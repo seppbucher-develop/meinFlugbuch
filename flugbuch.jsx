@@ -4291,14 +4291,19 @@ function DateAmbiguousResolver({ item, onAssign, onCreateNew, onClose, descripti
       <div onClick={e=>e.stopPropagation()}
         style={{background:"#0a1628",borderRadius:16,padding:"18px 16px",maxWidth:380,width:"100%",border:"1px solid rgba(255,255,255,0.1)"}}>
         <div style={{fontSize:15,fontWeight:800,marginBottom:6}}>Welchem Flug zuordnen?</div>
-        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:14}}>
+        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:10}}>
           {description || `"${item.file.name}" (${item.date}) passt zu keiner Flug-Nr., aber es gibt mehrere Flüge an diesem Datum ohne GPS-Track.`}
         </div>
+        {(item.igcData?.startTime || item.igcData?.durationStr) && (
+          <div style={{fontSize:12,color:"#7dd3fc",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.2)",borderRadius:8,padding:"7px 10px",marginBottom:12}}>
+            IGC-Datei: {item.igcData?.startTime ? `Start ${item.igcData.startTime}` : ""}{item.igcData?.startTime && item.igcData?.durationStr ? " · " : ""}{item.igcData?.durationStr ? `Dauer ${item.igcData.durationStr}` : ""}
+          </div>
+        )}
         <div style={{display:"flex",flexDirection:"column",gap:6,marginBottom:12,maxHeight:"40vh",overflowY:"auto"}}>
           {item.candidates.map(c => (
             <button key={c.id} onClick={()=>onAssign(c)}
               style={{textAlign:"left",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px 12px",color:"#e8f4fd",fontSize:13,cursor:"pointer"}}>
-              <b>{c.name}</b>{c.site ? " · "+c.site : ""}{c.startTime ? " · "+c.startTime : ""}
+              <b>{c.name}</b>{c.site ? " · "+c.site : ""}{c.startTime ? " · "+c.startTime : ""}{!c.startTime && c.durationStr ? " · "+c.durationStr : ""}
             </button>
           ))}
         </div>
@@ -5589,7 +5594,13 @@ function FlugbuchApp() {
           onAssign={async (chosen) => {
             const item = pendingDateAmbiguous[0];
             await attachIgcToFlight(chosen, item.track, item.date, item.pilot, item.glider, item.passagier, item.igcData);
-            setPendingDateAmbiguous(q=>q.slice(1));
+            // Remove the just-assigned flight from every remaining item's
+            // candidate list — otherwise a second IGC file for the same
+            // date could still be assigned to the same flight, silently
+            // overwriting what was just attached.
+            setPendingDateAmbiguous(q => q.slice(1).map(it => ({
+              ...it, candidates: it.candidates.filter(c => c.id !== chosen.id),
+            })));
           }}
           onCreateNew={async () => {
             const item = pendingDateAmbiguous[0];
