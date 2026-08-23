@@ -3373,6 +3373,8 @@ function PlaceInlineField({label, value, onSave, suggestions, flights, kind}) {
 // it never creates new names itself.
 function ReiseSelect({ value, onSave }) {
   const [names, setNames] = useState([]);
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
   useEffect(() => {
     (async () => {
       try {
@@ -3381,13 +3383,49 @@ function ReiseSelect({ value, onSave }) {
       } catch {}
     })();
   }, []);
+  // The current value must always be selectable, even if it isn't among the
+  // manually-managed Reisen names (e.g. trip names that came in via the
+  // Excel import rather than being typed on the Reisen page) — otherwise
+  // the browser silently falls back to the first <option> ("—"), making
+  // the field look empty even though the value is still stored correctly.
+  const options = value && !names.includes(value) ? [value, ...names] : names;
+
+  const commitNewName = async () => {
+    const trimmed = newName.trim();
+    setAdding(false); setNewName("");
+    if (!trimmed) return;
+    onSave(trimmed);
+    if (!names.includes(trimmed)) {
+      // Persisted to the same "reisen:names" key the separate Reisen page
+      // reads/writes, so a trip typed here shows up there too (and vice
+      // versa) instead of the two staying out of sync.
+      const next = [...names, trimmed];
+      setNames(next);
+      try { await window.storage.set("reisen:names", JSON.stringify(next)); } catch {}
+    }
+  };
+
+  if (adding) {
+    return (
+      <div data-inline-row style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
+        <span style={{fontSize:13,color:"rgba(232,244,253,0.45)",minWidth:90}}>Reise</span>
+        <input value={newName} onChange={e=>setNewName(e.target.value)} autoFocus
+          placeholder="Name der Reise…"
+          onKeyDown={e=>{ if(e.key==="Enter") commitNewName(); if(e.key==="Escape"){setAdding(false);setNewName("");} }}
+          onBlur={commitNewName}
+          style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"4px 8px",color:"#e8f4fd",fontSize:13,textAlign:"right",maxWidth:180,boxSizing:"border-box"}} />
+      </div>
+    );
+  }
+
   return (
     <div data-inline-row style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
       <span style={{fontSize:13,color:"rgba(232,244,253,0.45)",minWidth:90}}>Reise</span>
-      <select value={value||""} onChange={e=>onSave(e.target.value)}
+      <select value={value||""} onChange={e=>{ if(e.target.value==="__NEW__"){ setAdding(true); } else { onSave(e.target.value); } }}
         style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"4px 8px",color:value?"#e8f4fd":"rgba(232,244,253,0.4)",fontSize:13,textAlign:"right",maxWidth:180}}>
         <option value="" style={{background:"#0a1628"}}>—</option>
-        {names.map(n => <option key={n} value={n} style={{background:"#0a1628"}}>{n}</option>)}
+        {options.map(n => <option key={n} value={n} style={{background:"#0a1628"}}>{n}</option>)}
+        <option value="__NEW__" style={{background:"#0a1628",color:"#4ade80"}}>+ Neue Reise…</option>
       </select>
     </div>
   );
@@ -3988,6 +4026,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                 ...(extras ? { endPt: extras.pt, endAlt: extras.alt } : {}),
               })}
               suggestions={[...new Set(flights.map(f=>f.customFields?.landung).filter(Boolean))]} />
+            <InlineField label="Land" value={fl.customFields?.land||""} onSave={v=>saveField({customFields:{land:v}})} />
             <ReiseSelect value={fl.customFields?.reise} onSave={v=>saveField({customFields:{reise:v}})} />
             <InlineField label="Start müM"   value={fl.startAlt>0?String(fl.startAlt):(fl.customFields?.msa||"")}  onSave={v=>saveComputedField(fl,{startAlt:+v,customFields:{msa:v}})} unit="m" />
             <InlineField label="Landung müM" value={fl.endAlt>0?String(fl.endAlt):(fl.customFields?.ml||"")}       onSave={v=>saveComputedField(fl,{endAlt:+v,customFields:{ml:v}})} unit="m" />
