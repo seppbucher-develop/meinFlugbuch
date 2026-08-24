@@ -210,63 +210,6 @@ function buildGpxFromFlight(flight) {
 </gpx>`;
 }
 
-// Parses a GPX file's <trkpt> elements into a simple {lat, lon, ele, timeSec}
-// track — used for imported "Hike"-Strecken (the hike up to launch, kept as
-// its own separate track from the flight's own IGC-derived track). Basic
-// regex extraction rather than full XML parsing, matching the style already
-// used elsewhere in this file (parseIGC etc.) and keeping this dependency-
-// free for a browser-only environment.
-function parseGpxTrack(text) {
-  const points = [];
-  const trkptRe = /<trkpt\b[^>]*\blat="(-?[\d.]+)"[^>]*\blon="(-?[\d.]+)"[^>]*>([\s\S]*?)<\/trkpt>/gi;
-  let m;
-  while ((m = trkptRe.exec(text))) {
-    const lat = parseFloat(m[1]), lon = parseFloat(m[2]);
-    if (isNaN(lat) || isNaN(lon)) continue;
-    const inner = m[3];
-    const eleMatch = inner.match(/<ele>([\d.-]+)<\/ele>/i);
-    const timeMatch = inner.match(/<time>([^<]+)<\/time>/i);
-    let timeSec = null;
-    if (timeMatch) {
-      const d = new Date(timeMatch[1]);
-      if (!isNaN(d.getTime())) timeSec = d.getUTCHours()*3600 + d.getUTCMinutes()*60 + d.getUTCSeconds();
-    }
-    points.push({ lat, lon, ele: eleMatch ? parseFloat(eleMatch[1]) : null, timeSec });
-  }
-  // Fallback for GPX route files (<rtept> instead of <trkpt>) — hiking apps
-  // sometimes export a planned route rather than a recorded track.
-  if (!points.length) {
-    const rteptRe = /<rtept\b[^>]*\blat="(-?[\d.]+)"[^>]*\blon="(-?[\d.]+)"[^>]*>([\s\S]*?)<\/rtept>/gi;
-    while ((m = rteptRe.exec(text))) {
-      const lat = parseFloat(m[1]), lon = parseFloat(m[2]);
-      if (isNaN(lat) || isNaN(lon)) continue;
-      const eleMatch = m[3].match(/<ele>([\d.-]+)<\/ele>/i);
-      points.push({ lat, lon, ele: eleMatch ? parseFloat(eleMatch[1]) : null, timeSec: null });
-    }
-  }
-  const nameMatch = text.match(/<(?:trk|rte)>\s*<name>([^<]*)<\/name>/i);
-  return { points, name: nameMatch ? nameMatch[1].trim() : "" };
-}
-
-// Exports a flight's stored Hike-GPX track (separate from the flight's own
-// track — see parseGpxTrack above) back out as a .gpx file, mirroring
-// buildGpxFromFlight's structure.
-function buildHikeGpxFromFlight(flight) {
-  const track = flight?.hikeTrack || [];
-  if (!track.length) return null;
-  const points = track.map(p => {
-    let timeTag = "";
-    if (p.timeSec != null) {
-      const h = Math.floor(p.timeSec/3600)%24, m = Math.floor((p.timeSec%3600)/60), s = p.timeSec%60;
-      timeTag = `<time>1970-01-01T${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}Z</time>`;
-    }
-    return `<trkpt lat="${p.lat}" lon="${p.lon}">${p.ele!=null?`<ele>${p.ele}</ele>`:""}${timeTag}</trkpt>`;
-  }).join("");
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<gpx version="1.1" creator="meinflugApp" xmlns="http://www.topografix.com/GPX/1/1">
-  <trk><name>${flight?.name || "Hike"} (Hike)</name><trkseg>${points}</trkseg></trk>
-</gpx>`;
-}
 
 // ── WorldMapView ───────────────────────────────────────────────────────────
 // Shows Startplatz/Landeplatz markers across all (or just the currently
@@ -450,16 +393,14 @@ function WorldMapView({ flights, selectedIds, onBack }) {
 }
 
 
-function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, onPlaybackPhaseChange, controlsSlot, isWide }) {
+function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, controlsSlot, isWide }) {
   const previewDivRef = useRef(null);
   const previewMapRef = useRef(null);
   const previewRefMarkerRef = useRef(null);
-  const previewHikeRefMarkerRef = useRef(null);
   const previewReadyRef = useRef(false);
   const fullDivRef = useRef(null);
   const fullMapRef = useRef(null);
   const fullRefMarkerRef = useRef(null);
-  const fullHikeRefMarkerRef = useRef(null);
   const fullReadyRef = useRef(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   // Which glider marker to use — chosen in Settings > Schirme, shared
@@ -506,65 +447,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   const playLastTsRef = useRef(null);
   const [gpsvColorBy, setGpsvColorBy] = useState("altitude"); // "altitude" | "climb"
 
-  // Combined Hike+Flug playback: if a Hike-GPX exists, cine playback runs
-  // the hike first, auto-pauses at the transition to the flight (so the
-  // person can resume deliberately rather than the flight starting mid-
-  // gesture), then the flight plays exactly as it always did. Without a
-  // hikeTrack, playPhase just stays "flight" and nothing here changes
-  // behaviour at all.
-  const hasHike = (flight?.hikeTrack?.length || 0) > 1;
-  // Starts in the hike phase whenever a Hike-GPX exists — matters especially
-  // when there is no IGC flight track at all (Hike & Fly logged without a
-  // recorded flight), since playPhase would otherwise default to "flight",
-  // a phase with no points to animate.
-  const [playPhase, setPlayPhase] = useState(() => hasHike ? "hike" : "flight");
-  useEffect(() => { if (onPlaybackPhaseChange) onPlaybackPhaseChange(playPhase); }, [playPhase]);
-  // Hike points assigned a synthetic, evenly-paced timeline (average
-  // walking speed ~4.5 km/h) when the GPX carries no real timestamps —
-  // common for route exports — so the hike phase still has a sensible,
-  // proportional duration instead of collapsing to zero or being skipped.
-  const hikeTimed = useMemo(() => {
-    const pts = flight?.hikeTrack || [];
-    if (pts.length < 2) return [];
-    const hasRealTimes = pts.every(p => p.timeSec != null);
-    let cumDistKm = 0;
-    if (hasRealTimes) {
-      const base = pts[0].timeSec;
-      return pts.map((p, i) => {
-        if (i > 0) cumDistKm += haversineDistKm(pts[i-1], p);
-        return { ...p, _t: p.timeSec - base, _distKm: cumDistKm };
-      });
-    }
-    const WALK_MPS = 1.25; // ~4.5 km/h
-    let cum = 0;
-    return pts.map((p, i) => {
-      if (i > 0) { const dKm = haversineDistKm(pts[i-1], p); cum += dKm*1000; cumDistKm += dKm; }
-      return { ...p, _t: cum / WALK_MPS, _distKm: cumDistKm };
-    });
-  }, [flight?.hikeTrack]);
-
-  // The only place playPhase/playElapsedSec actually transition from hike
-  // to flight — deliberately on the next ▶ press, not automatically at
-  // the pause moment (see the playback-loop effect below), so the marker
-  // stays visibly frozen at the hike's real end point while paused
-  // instead of jumping to the flight's start in the same frame.
-  const togglePlay = () => {
-    setIsPlaying(p => {
-      if (!p && playPhase === "hike" && hikeTimed.length > 1 && playElapsedSec >= hikeTimed[hikeTimed.length-1]._t - 0.01) {
-        if ((flight?.track?.length || 0) > 1) {
-          setPlayPhase("flight");
-        }
-        // No IGC track to move on to — replay the hike from the start
-        // instead of switching to an empty "flight" phase with nothing to animate.
-        setPlayElapsedSec(0);
-      }
-      return !p;
-    });
-  };
+  const togglePlay = () => setIsPlaying(p => !p);
 
   const track = flight?.track || [];
   const sP = flight?.startPt, eP = flight?.endPt;
-  const hasMap = track.length > 0 || (sP && eP) || hasHike;
+  const hasMap = track.length > 0 || (sP && eP);
 
   // Same GPS-glitch rejection as before: a single wild fix shouldn't blow
   // out the bounding box used for fitBounds.
@@ -589,9 +476,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
 
   // The segment highlightRange refers to (by cumulative flown distance
   // along the *raw* track, same basis FlightProfile itself uses), plus the
-  // single nearest point to use for the red reference marker. Guarded
-  // against a highlightRange that's purely a hike-window (no start/end at
-  // all) — see the hike-specific computation right after this one.
+  // single nearest point to use for the red reference marker.
   const { segment, refPoint, heading } = useMemo(() => {
     if (!highlightRange || highlightRange.start == null || track.length < 2) return { segment: null, refPoint: null, heading: 0 };
     let acc = 0;
@@ -612,22 +497,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     const heading = bearingDeg(spanBack, spanFwd);
     return { segment: seg.length > 1 ? seg : null, refPoint: track[bestIdx], heading };
   }, [track, highlightRange]);
-
-  // Same idea as above, but for the hike-relative portion of the zoomed
-  // window (if any) — used to show a static boot-icon reference marker
-  // when the profile is scrolled/zoomed into the hike segment, the same
-  // way refPoint does for the flight.
-  const hikeRefPoint = useMemo(() => {
-    const pts = flight?.hikeTrack || [];
-    if (!highlightRange || highlightRange.hikeCenter == null || pts.length < 2) return null;
-    let acc = 0, bestIdx = 0, bestDiff = Math.abs(0 - highlightRange.hikeCenter);
-    for (let i=1;i<pts.length;i++) {
-      acc += haversineDistKm(pts[i-1], pts[i]) || 0;
-      const diff = Math.abs(acc - highlightRange.hikeCenter);
-      if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
-    }
-    return pts[bestIdx];
-  }, [flight?.hikeTrack, highlightRange]);
 
   // Creates ONE MapTiler map instance (and its one WebGL context) per
   // flight: track line (white casing + blue line) and S/L markers, added
@@ -690,21 +559,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           layout: { "line-join": "round", "line-cap": "round" },
           paint: { "line-color": "#1e40af", "line-width": 3.5 } });
       }
-      // Hike-GPX (the walk up to launch, if imported) shown as a green
-      // line — visually distinct from the flight's own blue track, same
-      // white casing treatment for consistency.
-      if (flight?.hikeTrack?.length > 1) {
-        map.addSource("hiketrack", {
-          type: "geojson",
-          data: { type: "Feature", geometry: { type: "LineString", coordinates: flight.hikeTrack.map(p=>[p.lon,p.lat]) } },
-        });
-        map.addLayer({ id: "hiketrack-casing", type: "line", source: "hiketrack",
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "rgba(255,255,255,0.55)", "line-width": 5.5 } });
-        map.addLayer({ id: "hiketrack-line", type: "line", source: "hiketrack",
-          layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#16a34a", "line-width": 3, "line-dasharray": [2, 1.4] } });
-      }
       if (track.length) {
         addMarker(track[0], "#22c55e", "S");
         addMarker(track[track.length-1], "#ef4444", "L");
@@ -713,7 +567,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
         addMarker(eP, "#ef4444", "L");
       }
       readyRef.current = true;
-      applyHighlight(map, mapRefObj===previewMapRef ? previewRefMarkerRef : fullRefMarkerRef, mapRefObj===previewMapRef ? previewHikeRefMarkerRef : fullHikeRefMarkerRef);
+      applyHighlight(map, mapRefObj===previewMapRef ? previewRefMarkerRef : fullRefMarkerRef);
       removeStrayMapTilerWarnings();
     });
   };
@@ -723,19 +577,17 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // and swaps the track source's data between the full track and just the
   // zoomed-in segment. Safe to call repeatedly — does nothing until the
   // map's initial "load" has actually finished.
-  const applyHighlight = (map, refMarkerRefObj, hikeRefMarkerRefObj) => {
+  const applyHighlight = (map, refMarkerRefObj) => {
     if (!map) return;
     const sdk = window.maptilersdk;
     // Line always shows the whole track — only the camera zooms into the
     // profile's segment (via fitBounds below), so nothing here needs to
     // touch the "track" source at all once it's been set on load.
     if (refMarkerRefObj.current) { refMarkerRefObj.current.remove(); refMarkerRefObj.current = null; }
-    if (hikeRefMarkerRefObj.current) { hikeRefMarkerRefObj.current.remove(); hikeRefMarkerRefObj.current = null; }
-    // Skip the static reference markers entirely while cine playback is
+    // Skip the static reference marker entirely while cine playback is
     // running — the moving playback marker already shows the current
     // position, and showing both at once looked like two overlapping
-    // icons. Both a flight (glider) and hike (boot) marker can be shown
-    // together when the zoomed window spans the hike→flight transition.
+    // icons.
     if (refPoint && !isPlaying) {
       const el = document.createElement("div");
       el.style.cssText = `width:34px;height:34px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 4px rgba(0,0,0,0.7));`;
@@ -757,13 +609,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       refMarkerRefObj.current = new sdk.Marker({ element: el, rotationAlignment: "viewport", pitchAlignment: "viewport" })
         .setLngLat([refPoint.lon, refPoint.lat]).addTo(map);
     }
-    if (hikeRefPoint && !isPlaying) {
-      const el = document.createElement("div");
-      el.style.cssText = `width:34px;height:34px;display:flex;align-items:center;justify-content:center;font-size:26px;filter:drop-shadow(0 1px 4px rgba(0,0,0,0.7));`;
-      el.textContent = "🥾";
-      hikeRefMarkerRefObj.current = new sdk.Marker({ element: el, rotationAlignment: "map", pitchAlignment: "map" })
-        .setLngLat([hikeRefPoint.lon, hikeRefPoint.lat]).addTo(map);
-    }
     const fitToPoints = (pts) => {
       if (!pts.length) return;
       const lons = pts.map(p=>p.lon), lats = pts.map(p=>p.lat);
@@ -771,17 +616,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 36, animate: false });
     };
     if (segment && segment.length > 1) fitToPoints(segment);
-    else if (hikeRefPoint && highlightRange?.hikeStart != null) {
-      // Zoomed purely into the hike portion — fit the camera to that
-      // segment of the hike track, same idea as the flight's own segment.
-      const pts = flight?.hikeTrack || [];
-      let acc = 0; const seg = [];
-      for (let i=0;i<pts.length;i++) {
-        if (i>0) acc += haversineDistKm(pts[i-1], pts[i]) || 0;
-        if (acc >= highlightRange.hikeStart-0.02 && acc <= highlightRange.hikeEnd+0.02) seg.push(pts[i]);
-      }
-      if (seg.length > 1) fitToPoints(seg); else if (track.length) fitToPoints(cleanTrack.length ? cleanTrack : track);
-    }
     else if (track.length) fitToPoints(cleanTrack.length ? cleanTrack : track);
     else if (sP && eP) fitToPoints([sP, eP]);
   };
@@ -816,9 +650,9 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // them, which is what previously exhausted the browser's WebGL context
   // budget during a drag gesture.
   useEffect(() => {
-    if (previewReadyRef.current) applyHighlight(previewMapRef.current, previewRefMarkerRef, previewHikeRefMarkerRef);
-    if (isFullscreen && fullReadyRef.current) applyHighlight(fullMapRef.current, fullRefMarkerRef, fullHikeRefMarkerRef);
-  }, [highlightRange?.start, highlightRange?.end, highlightRange?.hikeStart, highlightRange?.hikeEnd, isFullscreen, isPlaying]);
+    if (previewReadyRef.current) applyHighlight(previewMapRef.current, previewRefMarkerRef);
+    if (isFullscreen && fullReadyRef.current) applyHighlight(fullMapRef.current, fullRefMarkerRef);
+  }, [highlightRange?.start, highlightRange?.end, isFullscreen, isPlaying]);
 
   // Cine playback: moves a dedicated glider marker along the track over
   // time, at playSpeed× real flight time. Works on the preview map too now
@@ -828,9 +662,9 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // stays smooth and accurate regardless of frame rate hiccups.
   useEffect(() => {
     if (!isPlaying) return;
-    if (playPhase === "hike" ? hikeTimed.length < 2 : track.length < 2) return;
+    if (track.length < 2) return;
     playLastTsRef.current = null;
-    const totalSec = playPhase === "hike" ? hikeTimed[hikeTimed.length-1]._t : (track[track.length-1].timeSec - track[0].timeSec);
+    const totalSec = track[track.length-1].timeSec - track[0].timeSec;
     const step = (ts) => {
       if (playLastTsRef.current == null) playLastTsRef.current = ts;
       const dtReal = (ts - playLastTsRef.current) / 1000;
@@ -847,7 +681,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     };
     playRafRef.current = requestAnimationFrame(step);
     return () => { if (playRafRef.current) cancelAnimationFrame(playRafRef.current); };
-  }, [isPlaying, playSpeed, playPhase, track.length, hikeTimed.length]);
+  }, [isPlaying, playSpeed, track.length]);
 
   // Moves the playback marker to match playElapsedSec whenever it changes
   // (during playback, or when scrubbing manually) — interpolates between
@@ -857,60 +691,32 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // which only the (non-fullscreen) preview allows.
   useEffect(() => {
     if (!window.maptilersdk) return;
-    if (playPhase === "hike" ? hikeTimed.length < 2 : track.length < 2) return;
+    if (track.length < 2) return;
     const sdk = window.maptilersdk;
 
-    let lat, lon, hdg = null, alt = null, showBoot = false;
-    if (playPhase === "hike") {
-      const targetT = playElapsedSec;
-      let i = 0;
-      while (i < hikeTimed.length-2 && hikeTimed[i+1]._t < targetT) i++;
-      const a = hikeTimed[i], b = hikeTimed[i+1] || a;
-      const span = (b._t - a._t) || 1;
-      const frac = Math.max(0, Math.min(1, (targetT - a._t) / span));
-      lat = a.lat + (b.lat-a.lat)*frac; lon = a.lon + (b.lon-a.lon)*frac;
-      alt = (a.ele!=null && b.ele!=null) ? a.ele + (b.ele-a.ele)*frac : (a.ele ?? b.ele ?? null);
-      showBoot = true;
-      if (onPlaybackPositionChange) {
-        const distKm = (a._distKm||0) + ((b._distKm||a._distKm||0) - (a._distKm||0)) * frac;
-        onPlaybackPositionChange(distKm);
-      }
-    } else {
-      const targetTime = track[0].timeSec + playElapsedSec;
-      let i = 0;
-      while (i < track.length-2 && track[i+1].timeSec < targetTime) i++;
-      const a = track[i], b = track[i+1] || a;
-      const span = (b.timeSec - a.timeSec) || 1;
-      const frac = Math.max(0, Math.min(1, (targetTime - a.timeSec) / span));
-      lat = a.lat + (b.lat-a.lat)*frac; lon = a.lon + (b.lon-a.lon)*frac;
-      alt = a.gpsAlt + ((b.gpsAlt||a.gpsAlt) - a.gpsAlt)*frac;
-      const spanBack = track[Math.max(0,i-3)], spanFwd = track[Math.min(track.length-1,i+3)];
-      hdg = bearingDeg(spanBack, spanFwd);
+    const targetTime = track[0].timeSec + playElapsedSec;
+    let i = 0;
+    while (i < track.length-2 && track[i+1].timeSec < targetTime) i++;
+    const a = track[i], b = track[i+1] || a;
+    const span = (b.timeSec - a.timeSec) || 1;
+    const frac = Math.max(0, Math.min(1, (targetTime - a.timeSec) / span));
+    const lat = a.lat + (b.lat-a.lat)*frac, lon = a.lon + (b.lon-a.lon)*frac;
+    const alt = a.gpsAlt + ((b.gpsAlt||a.gpsAlt) - a.gpsAlt)*frac;
+    const spanBack = track[Math.max(0,i-3)], spanFwd = track[Math.min(track.length-1,i+3)];
+    const hdg = bearingDeg(spanBack, spanFwd);
 
-      if (onPlaybackPositionChange && cumDist.length) {
-        const distKm = (cumDist[i]||0) + ((cumDist[i+1]||cumDist[i]||0) - (cumDist[i]||0)) * frac;
-        onPlaybackPositionChange(distKm);
-      }
+    if (onPlaybackPositionChange && cumDist.length) {
+      const distKm = (cumDist[i]||0) + ((cumDist[i+1]||cumDist[i]||0) - (cumDist[i]||0)) * frac;
+      onPlaybackPositionChange(distKm);
     }
 
     const placeOn = (map, ref, showAlt) => {
       if (!map) return;
-      // Rebuild (not just move) the marker element whenever its icon kind
-      // needs to change — a hiking-boot emoji vs. the glider photo aren't
-      // interchangeable via a simple src swap the way two glider colour
-      // variants are.
-      if (ref.current && ref.current._kind !== (showBoot ? "boot" : "glider")) {
-        ref.current.remove();
-        ref.current = null;
-      }
       if (!ref.current) {
         const el = document.createElement("div");
         el.style.cssText = `position:relative;width:34px;height:34px;filter:drop-shadow(0 1px 4px rgba(0,0,0,0.7));display:flex;align-items:center;justify-content:center;`;
         let img = null;
-        if (showBoot) {
-          el.style.fontSize = "26px";
-          el.textContent = "🥾";
-        } else if (gliderIcon.type === "image") {
+        if (gliderIcon.type === "image") {
           img = document.createElement("img");
           img.src = gliderIcon.value;
           img.style.cssText = `width:100%;height:100%;object-fit:contain;`;
@@ -927,17 +733,14 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
         } else {
           ref._altEl = null;
         }
-        const marker = new sdk.Marker({ element: el, rotationAlignment: showBoot?"map":"viewport", pitchAlignment: showBoot?"map":"viewport" }).setLngLat([lon, lat]).addTo(map);
+        const marker = new sdk.Marker({ element: el, rotationAlignment: "viewport", pitchAlignment: "viewport" }).setLngLat([lon, lat]).addTo(map);
         ref.current = marker;
         ref.current._imgEl = img;
         ref.current._altEl = ref._altEl;
-        ref.current._kind = showBoot ? "boot" : "glider";
       } else {
         ref.current.setLngLat([lon, lat]);
       }
-      // Fixed (non-rotating) during the hike phase, as requested — only
-      // the flight's own glider marker turns to face the actual heading.
-      if (!showBoot && ref.current._imgEl) ref.current._imgEl.style.transform = `rotate(${hdg}deg)`;
+      if (ref.current._imgEl) ref.current._imgEl.style.transform = `rotate(${hdg}deg)`;
       if (ref.current._altEl) ref.current._altEl.textContent = (alt!=null ? Math.round(alt) : "")+"m";
       // Follow while zoomed to a segment: once the marker leaves the
       // currently visible area, jump (same zoom level, so same-size view —
@@ -948,7 +751,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     };
     if (previewReadyRef.current) placeOn(previewMapRef.current, previewPlayMarkerRef, false);
     if (isFullscreen && fullReadyRef.current) placeOn(fullMapRef.current, playMarkerRef, true);
-  }, [playElapsedSec, isFullscreen, playPhase]);
+  }, [playElapsedSec, isFullscreen]);
 
   // Cleans up the fullscreen-specific playback marker whenever fullscreen
   // closes (playback itself keeps going — it's shared with the preview
@@ -960,7 +763,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   useEffect(() => {
     setIsPlaying(false);
     setPlayElapsedSec(0);
-    setPlayPhase((flight?.hikeTrack?.length || 0) > 1 ? "hike" : "flight");
     if (playMarkerRef.current) { playMarkerRef.current.remove(); playMarkerRef.current = null; }
     if (previewPlayMarkerRef.current) { previewPlayMarkerRef.current.remove(); previewPlayMarkerRef.current = null; }
     if (onPlaybackPositionChange) onPlaybackPositionChange(null);
@@ -1017,12 +819,12 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       </div>
       {controlsSlot && hasMap && ReactDOM.createPortal(
         <>
-          {(flight?.track?.length > 1 || hasHike) && (
+          {flight?.track?.length > 1 && (
             <>
               <button onClick={togglePlay}
-                title={isPlaying?"Pause":(hasHike ? (playPhase==="hike"?"Hike abspielen":"Flug abspielen") : "Abspielen")}
+                title={isPlaying?"Pause":"Abspielen"}
                 style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:isPlaying?"#dc2626":"#16a34a",border:"none",borderRadius:8,color:"#fff",fontSize:14,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:3}}>
-                {isPlaying ? "⏸" : "▶"}{hasHike && <span style={{fontSize:11}}>{playPhase==="hike"?"🥾":"🪂"}</span>}
+                {isPlaying ? "⏸" : "▶"}
               </button>
               <div style={{position:"relative",flex:"1 1 0",minWidth:0}} onClick={e=>e.stopPropagation()}>
                 <button onClick={()=>setPlayPickerOpen(o=>!o)}
@@ -1078,12 +880,12 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           style={{position:"fixed",inset:0,background:"#000",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",overflow:"hidden"}}
         >
           <div ref={fullDivRef} style={{width:"100%",height:"70vh"}} />
-          {(flight?.track?.length > 1 || hasHike) && (
+          {flight?.track?.length > 1 && (
             <div style={{position:"absolute",bottom:"calc(15vh + 10px)",right:14,display:"flex",gap:6,alignItems:"center"}}>
               <button onClick={togglePlay}
-                title={isPlaying?"Pause":(hasHike ? (playPhase==="hike"?"Hike abspielen":"Flug abspielen") : "Abspielen")}
+                title={isPlaying?"Pause":"Abspielen"}
                 style={{background:isPlaying?"#dc2626":"#16a34a",border:"none",borderRadius:20,width:40,height:40,color:"#fff",fontSize:17,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
-                {isPlaying ? "⏸" : "▶"}{hasHike && <span style={{fontSize:9,lineHeight:1}}>{playPhase==="hike"?"🥾":"🪂"}</span>}
+                {isPlaying ? "⏸" : "▶"}
               </button>
               <div style={{position:"relative"}}>
                 <button onClick={()=>setPlayPickerOpen(o=>!o)}
@@ -1137,87 +939,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
 // are sent (one batched request) rather than the whole track, since terrain
 // doesn't need 1-second resolution to look right and Open-Meteo caps
 // batches at 100 coordinates anyway.
-// Compact standalone elevation profile for the Hike-GPX portion (if any) —
-// deliberately simple (no zoom/pan, unlike the main flight profile below)
-// since it's a secondary/supplementary chart. Green line matching the
-// map's own Hike-route colour; syncs its own marker to the cine playback's
-// hike phase.
-function HikeProfile({ flight, playbackDistanceKm, isPlaybackActive, playbackPhase }) {
-  const canvasRef = useRef(null);
-  const pts = flight?.hikeTrack || [];
-  const showPlayback = isPlaybackActive && playbackPhase === "hike" && playbackDistanceKm != null;
-
-  const { distances, elevations, totalDist } = useMemo(() => {
-    if (pts.length < 2) return { distances: [], elevations: [], totalDist: 0 };
-    const d = [0], e = [pts[0].ele ?? 0];
-    for (let i = 1; i < pts.length; i++) {
-      d.push(d[i-1] + (haversineDistKm(pts[i-1], pts[i]) || 0));
-      e.push(pts[i].ele ?? e[i-1]);
-    }
-    return { distances: d, elevations: e, totalDist: d[d.length-1] || 0 };
-  }, [pts]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || distances.length < 2) return;
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
-    const W = rect.width, H = 70;
-    canvas.width = W*dpr; canvas.height = H*dpr;
-    canvas.style.height = H+"px";
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    const padL = 34*dpr, padR = 8*dpr, padT = 8*dpr, padB = 16*dpr;
-    const plotW = canvas.width-padL-padR, plotH = canvas.height-padT-padB;
-    const minE = Math.min(...elevations), maxE = Math.max(...elevations, minE+1);
-    const eRange = maxE-minE || 1;
-    const xPos = d => padL + (d/totalDist)*plotW;
-    const yPos = e => padT + plotH - ((e-minE)/eRange)*plotH;
-
-    ctx.strokeStyle = "rgba(255,255,255,0.15)"; ctx.lineWidth = 1*dpr;
-    ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+plotH); ctx.lineTo(padL+plotW,padT+plotH); ctx.stroke();
-
-    ctx.strokeStyle = "#16a34a"; ctx.lineWidth = 2*dpr;
-    ctx.beginPath();
-    distances.forEach((d,i) => { const x=xPos(d), y=yPos(elevations[i]); i===0?ctx.moveTo(x,y):ctx.lineTo(x,y); });
-    ctx.stroke();
-
-    ctx.fillStyle = "rgba(232,244,253,0.5)"; ctx.font = `${9*dpr}px -apple-system,sans-serif`;
-    ctx.textAlign = "right";
-    ctx.fillText(Math.round(maxE)+"m", padL-4*dpr, padT+8*dpr);
-    ctx.fillText(Math.round(minE)+"m", padL-4*dpr, padT+plotH);
-    ctx.textAlign = "left"; ctx.fillText("0.0 km", padL, padT+plotH+13*dpr);
-    ctx.textAlign = "right"; ctx.fillText(totalDist.toFixed(1)+" km", padL+plotW, padT+plotH+13*dpr);
-
-    if (showPlayback) {
-      let i = 0;
-      while (i < distances.length-2 && distances[i+1] < playbackDistanceKm) i++;
-      const a = distances[i], b = distances[i+1] ?? a;
-      const frac = Math.max(0, Math.min(1, (playbackDistanceKm-a)/((b-a)||1)));
-      const ex = elevations[i] + ((elevations[i+1]??elevations[i]) - elevations[i])*frac;
-      const px = xPos(playbackDistanceKm), py = yPos(ex);
-      ctx.save();
-      ctx.setLineDash([3*dpr,3*dpr]);
-      ctx.strokeStyle = "rgba(74,222,128,0.7)"; ctx.lineWidth = 1*dpr;
-      ctx.beginPath(); ctx.moveTo(px,padT); ctx.lineTo(px,padT+plotH); ctx.stroke();
-      ctx.restore();
-      ctx.fillStyle = "#4ade80";
-      ctx.beginPath(); ctx.arc(px,py,4*dpr,0,Math.PI*2); ctx.fill();
-    }
-  }, [distances, elevations, totalDist, playbackDistanceKm, showPlayback]);
-
-  if (pts.length < 2) return null;
-  return (
-    <div style={{marginBottom:10}}>
-      <div style={{fontSize:10,fontWeight:700,color:"#4ade80",letterSpacing:1.5,textTransform:"uppercase",marginBottom:6}}>🥾 Hike-Höhenprofil</div>
-      <div style={{borderRadius:14,overflow:"hidden",border:"1px solid rgba(74,222,128,0.15)",background:"#040e20"}}>
-        <canvas ref={canvasRef} style={{width:"100%",display:"block"}} />
-      </div>
-    </div>
-  );
-}
-
-function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlaybackDistanceKm, isPlaybackActive, playbackPhase, controlsSlot, isWide }) {
+function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybackActive, controlsSlot, isWide }) {
   const canvasRef = useRef(null);
   const [groundProfile, setGroundProfile] = useState(null);
   const [groundError, setGroundError] = useState(false);
@@ -1242,20 +964,6 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
   const viewStart = panPos - (1/viewScale)/2;
   const track = flight?.track || [];
 
-  // Hike-GPX portion (if any) — prepended onto the same distance axis as
-  // the flight, in its own (unscaled) real km. Zoom/pan below applies to
-  // the combined range, not just the flight.
-  const hikePts = flight?.hikeTrack || [];
-  const { hikeDist, hikeElev, hikeOffsetKm } = useMemo(() => {
-    if (hikePts.length < 2) return { hikeDist: [], hikeElev: [], hikeOffsetKm: 0 };
-    const d = [0], e = [hikePts[0].ele ?? 0];
-    for (let i = 1; i < hikePts.length; i++) {
-      d.push(d[i-1] + (haversineDistKm(hikePts[i-1], hikePts[i]) || 0));
-      e.push(hikePts[i].ele ?? e[i-1]);
-    }
-    return { hikeDist: d, hikeElev: e, hikeOffsetKm: d[d.length-1] || 0 };
-  }, [hikePts]);
-
   const rawDistances = useMemo(() => {
     if (!track.length) return [];
     const d = [0];
@@ -1274,17 +982,8 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
   // manual value has been entered for this flight.
   const manualDist = parseFloat(getDisplayDistance(flight)) || 0;
   const scale = (manualDist > 0 && rawTotalDist > 0) ? manualDist/rawTotalDist : 1;
-  // Flight distances offset by the hike's own length, so both sit on one
-  // continuous axis: [0, hikeOffsetKm] is the hike, [hikeOffsetKm,
-  // totalDist] is the flight.
-  const distances = useMemo(() => rawDistances.map(d => d*scale + hikeOffsetKm), [rawDistances, scale, hikeOffsetKm]);
-  const totalDist = distances[distances.length-1] || hikeOffsetKm || 0;
-
-  // Converts a playback position (reported as hike-relative km during the
-  // hike phase, or flight-relative km during the flight phase — see
-  // FlightMap) into this chart's combined-axis km.
-  const playbackDistanceKm = rawPlaybackDistanceKm == null ? null
-    : (playbackPhase === "hike" ? rawPlaybackDistanceKm : rawPlaybackDistanceKm*scale + hikeOffsetKm);
+  const distances = useMemo(() => rawDistances.map(d => d*scale), [rawDistances, scale]);
+  const totalDist = distances[distances.length-1] || 0;
 
   // Cine-playback follow: while zoomed in, once the glider's position
   // (reported by FlightMap, same "raw km" basis distances[] uses) leaves
@@ -1320,24 +1019,12 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
     const visStart = viewStart * totalDist;
     const visEnd = visStart + totalDist/viewScale;
     const overallCenter = (visStart+visEnd)/2;
-    const result = {};
-    // Only ONE reference marker/segment is reported — matching whichever
-    // segment the *overall* window centre falls into, the exact same
-    // point the red altitude/time label above reads from. Previously both
-    // a hike and a flight marker could show at once when the window
-    // spanned the boundary, while the label only ever showed one of them
-    // — map and profile disagreeing about "the" reference point even
-    // outside of cine playback (pure manual pan/zoom).
-    if (overallCenter <= hikeOffsetKm && hikeOffsetKm > 0) {
-      const hs = Math.max(0, visStart), he = Math.min(hikeOffsetKm, visEnd);
-      result.hikeStart = hs; result.hikeEnd = he; result.hikeCenter = overallCenter;
-    } else {
-      const toRaw = d => scale > 0 ? Math.max(0, d-hikeOffsetKm) / scale : Math.max(0, d-hikeOffsetKm);
-      const fs = Math.max(hikeOffsetKm, visStart), fe = Math.min(totalDist, visEnd);
-      result.start = toRaw(fs); result.end = toRaw(fe); result.center = toRaw(overallCenter);
-    }
-    onPositionChange(result);
-  }, [zoomLevel, viewStart, viewScale, totalDist, scale, hikeOffsetKm]);
+    // FlightMap's own segment/refPoint computation walks its track in RAW
+    // (unscaled) km, so the window reported here must be converted back
+    // from this chart's scaled axis before being passed up.
+    const toRaw = d => scale > 0 ? Math.max(0, d) / scale : Math.max(0, d);
+    onPositionChange({ start: toRaw(visStart), end: toRaw(visEnd), center: toRaw(overallCenter) });
+  }, [zoomLevel, viewStart, viewScale, totalDist, scale]);
 
   // Swipe-to-pan directly on the chart, active only while zoomed (>1×) —
   // the page-level swipe-between-flights gesture is already fully disabled
@@ -1410,22 +1097,14 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
   useEffect(() => {
     setGroundProfile(null);
     setGroundError(false);
-    if ((!track.length && hikePts.length < 2) || totalDist <= 0) return;
+    if (!track.length || totalDist <= 0) return;
     let cancelled = false;
     (async () => {
       try {
-        // Hike portion: no API call needed at all — a hiker's own GPS
-        // elevation (already in hikePts[].ele from the GPX) effectively
-        // IS the ground elevation at that point, so it's used directly.
-        // This also guarantees the green hike line and its brown ground
-        // fill align exactly, with no interpolation/sampling mismatch
-        // possible between the two.
-        const hikeGroundPts = hikePts.map((p, i) => ({ distKm: hikeDist[i], elev: p.ele ?? null }));
-
-        // Flight portion: 80 sample points across the flown distance,
-        // fetched from the external terrain API — a paraglider's own
-        // altitude genuinely isn't ground level, so this can't be
-        // derived from the track's own data the way the hike portion can.
+        // 80 sample points across the flown distance, fetched from the
+        // external terrain API — a paraglider's own altitude genuinely
+        // isn't ground level, so this can't be derived from the track's
+        // own data.
         const N = 80;
         const samplePts = [];
         let idx = 0;
@@ -1435,10 +1114,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
           samplePts.push({ lat: track[idx].lat, lon: track[idx].lon, distKm: distances[idx], ownElev: track[idx].gpsAlt });
         }
 
-        if (!samplePts.length) {
-          if (hikeGroundPts.length) setGroundProfile(hikeGroundPts);
-          return;
-        }
+        if (!samplePts.length) return;
         const lats = samplePts.map(s=>s.lat.toFixed(5)).join(",");
         const lons = samplePts.map(s=>s.lon.toFixed(5)).join(",");
         const url = `https://api.open-meteo.com/v1/elevation?latitude=${lats}&longitude=${lons}`;
@@ -1469,22 +1145,18 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
           distKm: s.distKm,
           elev: elevation[i] != null ? Math.min(elevation[i], s.ownElev - 5) : null,
         }));
-        setGroundProfile([...hikeGroundPts, ...flightGroundPts]);
+        setGroundProfile(flightGroundPts);
       } catch {
         if (cancelled) return;
-        // Even if the flight-side API call fails entirely, the hike
-        // portion (needing no API at all) can still show correctly.
-        const hikeGroundPts = hikePts.map((p, i) => ({ distKm: hikeDist[i], elev: p.ele ?? null }));
-        if (hikeGroundPts.length) { setGroundProfile(hikeGroundPts); setGroundError(track.length > 1); }
-        else setGroundError(true);
+        setGroundError(true);
       }
     })();
     return () => { cancelled = true; };
-  }, [flight?.id, totalDist, hikeOffsetKm]);
+  }, [flight?.id, totalDist]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || (!track.length && hikePts.length < 2)) return;
+    if (!canvas || !track.length) return;
     const dpr = window.devicePixelRatio || 1;
     canvas.width = canvas.clientWidth * dpr;
     canvas.height = canvas.clientHeight * dpr;
@@ -1503,17 +1175,12 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
     const visStartLabel = Math.max(0, visStart);
     const visEndLabel = Math.min(totalDist, visEnd);
 
-    // Altitude range comes from every point (hike + flight) actually
-    // inside the visible window — zooming into a segment re-scales the
-    // legend to that segment's own min/max instead of staying pinned to
-    // the whole combined range.
+    // Altitude range comes from every point actually inside the visible
+    // window — zooming into a segment re-scales the legend to that
+    // segment's own min/max instead of staying pinned to the whole range.
     const visibleAlts = [];
     for (let i=0;i<track.length;i++) if (distances[i]>=visStart && distances[i]<=visEnd) visibleAlts.push(track[i].gpsAlt);
-    for (let i=0;i<hikeElev.length;i++) if (hikeDist[i]>=visStart && hikeDist[i]<=visEnd) visibleAlts.push(hikeElev[i]);
-    if (!visibleAlts.length) {
-      if (track.length) visibleAlts.push(track[0].gpsAlt, track[track.length-1].gpsAlt);
-      else visibleAlts.push(hikeElev[0], hikeElev[hikeElev.length-1]);
-    }
+    if (!visibleAlts.length && track.length) visibleAlts.push(track[0].gpsAlt, track[track.length-1].gpsAlt);
     let minA = Math.min(...visibleAlts), maxA = Math.max(...visibleAlts);
     if (groundProfile) {
       const gv = groundProfile.filter(g=>g.distKm>=visStart && g.distKm<=visEnd).map(g=>g.elev).filter(v=>v!=null);
@@ -1527,17 +1194,6 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
 
     ctx.strokeStyle = "rgba(255,255,255,0.15)"; ctx.lineWidth = 1*dpr;
     ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+plotH); ctx.lineTo(padL+plotW,padT+plotH); ctx.stroke();
-
-    // Marks where the hike ends and the flight begins, if both are shown
-    // in the current window — a thin, permanent divider (distinct from
-    // the dashed red zoom-centre line below).
-    if (hikeOffsetKm > 0 && hikeOffsetKm > visStart && hikeOffsetKm < visEnd) {
-      ctx.save();
-      ctx.strokeStyle = "rgba(74,222,128,0.4)"; ctx.lineWidth = 1*dpr;
-      ctx.setLineDash([2*dpr, 2*dpr]);
-      ctx.beginPath(); ctx.moveTo(xPos(hikeOffsetKm), padT); ctx.lineTo(xPos(hikeOffsetKm), padT+plotH); ctx.stroke();
-      ctx.restore();
-    }
 
     ctx.fillStyle = "rgba(232,244,253,0.5)"; ctx.font = `${10*dpr}px -apple-system,sans-serif`;
     ctx.textAlign = "right";
@@ -1561,21 +1217,12 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
     // same point the map's red reference marker sits at — shown on the
     // Y-axis alongside the min/max labels, positioned at its own height.
     // While cine playback is actively running, this follows the moving
-    // marker instead (same combined-axis basis as everything else here),
-    // so the red label always matches whichever marker is actually
-    // visible on the map right now. Shown at every zoom level, including
-    // the overview (1×) — not just once actually zoomed in. Reads from
-    // whichever segment (hike or flight) the centre point actually falls
-    // into.
+    // marker instead, so the red label always matches whichever marker is
+    // actually visible on the map right now. Shown at every zoom level,
+    // including the overview (1×) — not just once actually zoomed in.
     const centerDist = (isPlaybackActive && playbackDistanceKm != null) ? playbackDistanceKm : (visStart+visEnd)/2;
-    const inHike = centerDist <= hikeOffsetKm && hikeDist.length > 0;
     let centerAlt = null, centerLabel = "";
-    if (inHike) {
-      let ci = 0, cd = Infinity;
-      for (let i=0;i<hikeDist.length;i++) { const diff = Math.abs(hikeDist[i]-centerDist); if (diff<cd) { cd=diff; ci=i; } }
-      centerAlt = hikeElev[ci];
-      centerLabel = `🥾 ${centerDist.toFixed(1)}km`;
-    } else if (distances.length) {
+    if (distances.length) {
       let ci = 0, cd = Infinity;
       for (let i=0;i<distances.length;i++) { const diff = Math.abs(distances[i]-centerDist); if (diff<cd) { cd=diff; ci=i; } }
       centerAlt = track[ci]?.gpsAlt;
@@ -1584,7 +1231,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
         const elapsedSec = Math.max(0, rawTime - utcStartSec);
         const hh = String(Math.floor(elapsedSec/3600)).padStart(2,"0");
         const mm = String(Math.floor((elapsedSec%3600)/60)).padStart(2,"0");
-        const flightKm = (centerDist-hikeOffsetKm)/(scale||1);
+        const flightKm = centerDist/(scale||1);
         centerLabel = `${hh}:${mm}/${flightKm.toFixed(1)}km`;
       }
     }
@@ -1657,20 +1304,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
       ctx.stroke();
     }
 
-    // Hike segment — solid green, matching the map's own Hike-route
-    // colour, no height-gradient (that's reserved for the flight below).
-    for (let i=1;i<hikeDist.length;i++) {
-      if (hikeDist[i] < visStart && hikeDist[i-1] < visStart) continue;
-      if (hikeDist[i-1] > visEnd && hikeDist[i] > visEnd) continue;
-      ctx.strokeStyle = "#16a34a"; ctx.lineWidth = 2.5*dpr;
-      ctx.beginPath();
-      ctx.moveTo(xPos(hikeDist[i-1]), yPos(hikeElev[i-1]));
-      ctx.lineTo(xPos(hikeDist[i]), yPos(hikeElev[i]));
-      ctx.stroke();
-    }
-
-    // Flight segment — existing height-colour-coded line (red=low,
-    // blue=high), offset onto the combined axis via `distances`.
+    // Flight segment — height-colour-coded line (red=low, blue=high).
     for (let i=1;i<track.length;i++) {
       if (distances[i] < visStart && distances[i-1] < visStart) continue;
       if (distances[i-1] > visEnd && distances[i] > visEnd) continue;
@@ -1681,9 +1315,9 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm: rawPlayba
       ctx.lineTo(xPos(distances[i]), yPos(track[i].gpsAlt));
       ctx.stroke();
     }
-  }, [track, distances, hikeDist, hikeElev, hikeOffsetKm, totalDist, groundProfile, viewStart, viewScale, playbackDistanceKm, isPlaybackActive]);
+  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceKm, isPlaybackActive]);
 
-  if (!track.length && hikePts.length < 2) return null;
+  if (!track.length) return null;
 
   return (
     <div style={{marginBottom:14}}>
@@ -2311,15 +1945,6 @@ function flightFieldValue(f, field){
     case "endlon": return f.endPt?.lon||0;
     case "speed": case "kmh": return parseFloat(cf.kmh||0)||0;
     case "rating": case "bewertung": return f.rating||0;
-    case "hikeort": return cf.hikeOrt||"";
-    case "hikestartpunkt": return cf.hikeStartpunkt||"";
-    case "hikestarthoehe": return +(cf.hikeStarthoehe||0)||0;
-    case "hikedauer": return cf.hikeDauer||"";
-    case "hikehoehenmeter": {
-      const startAlt = f.startAlt>0 ? f.startAlt : parseFloat(cf.msa);
-      const hikeStart = parseFloat(cf.hikeStarthoehe);
-      return (Number.isFinite(startAlt) && Number.isFinite(hikeStart)) ? Math.round(startAlt-hikeStart) : 0;
-    }
     default: return "";
   }
 }
@@ -2335,12 +1960,11 @@ function evalToken(f, tok){
       const has = !!(f.customFields?.passagier||"").trim();
       return op==="!=" ? !has : has;
     }
-    // igc:ja / igc:nein and gpx:ja / gpx:nein — presence of an imported
-    // IGC flight track resp. a Hike-GPX route, not a value comparison.
-    // training:ja / training:nein likewise checks the Excel "Training"
-    // flag (cf.training === "T"), not a text comparison.
-    if(field==="igc" || field==="gpx" || field==="training"){
-      const has = field==="igc" ? (f.track?.length>1) : field==="gpx" ? (f.hikeTrack?.length>1) : (f.customFields?.training||"").trim().toUpperCase()==="T";
+    // igc:ja / igc:nein — presence of an imported IGC flight track, not a
+    // value comparison. training:ja / training:nein likewise checks the
+    // Excel "Training" flag (cf.training === "T"), not a text comparison.
+    if(field==="igc" || field==="training"){
+      const has = field==="igc" ? (f.track?.length>1) : (f.customFields?.training||"").trim().toUpperCase()==="T";
       const want = ["ja","vorhanden","true","1"].includes(raw.toLowerCase());
       return op==="!=" ? has!==want : has===want;
     }
@@ -2348,7 +1972,7 @@ function evalToken(f, tok){
 
     const numericFields=["name","titel","dauer","duration","distanz","dist","km","höhe","hoehe","maxhöhe","maxhoehe","alt",
       "startalt","endalt","hdiff","maxsteigen","maxsteigen20","maxsinken","hgew","entfernungsl",
-      "speed","kmh","rating","bewertung","jahr","year","startlat","startlon","endlat","endlon","hikestarthoehe","hikehoehenmeter"];
+      "speed","kmh","rating","bewertung","jahr","year","startlat","startlon","endlat","endlon"];
     const dateFields=["datum","date"];
     const timeFields=["startzeit","starttime","landezeit","endtime"];
 
@@ -2432,10 +2056,6 @@ const SORT_OPTIONS = [
   { id: "hGew",     label: "H.Gew." },
   { id: "entfernungSL", label: "Entf. S-L" },
   { id: "rating",   label: "Bewertung" },
-  { id: "hikeOrt",         label: "Hike-Ort" },
-  { id: "hikeStarthoehe",  label: "Hike-Starthöhe" },
-  { id: "hikeHoehenmeter", label: "Hike-Höhenmeter" },
-  { id: "hikeDauer",       label: "Hike-Dauer" },
 ];
 function parseDateToTs(d, timeStr) {
   if (!d) return 0;
@@ -2479,14 +2099,6 @@ function sortFieldValue(f, sortId) {
     case "reise":    return (cf.reise || "").toLowerCase();
     case "speed":    return parseFloat(cf.kmh || 0) || 0;
     case "rating":   return f.rating || 0;
-    case "hikeOrt":  return (cf.hikeOrt || "").toLowerCase();
-    case "hikeStarthoehe": return +(cf.hikeStarthoehe||0) || 0;
-    case "hikeHoehenmeter": {
-      const startAlt = f.startAlt>0 ? f.startAlt : parseFloat(cf.msa);
-      const hikeStart = parseFloat(cf.hikeStarthoehe);
-      return (Number.isFinite(startAlt) && Number.isFinite(hikeStart)) ? Math.round(startAlt-hikeStart) : 0;
-    }
-    case "hikeDauer": return (cf.hikeDauer || "").toLowerCase();
     case "jahr":     return f.year || 0;
     default:         return 0;
   }
@@ -2530,14 +2142,6 @@ function formatSortValue(f, sortId) {
     case "reise":    return cf.reise || "—";
     case "speed":    return cf.kmh ? cf.kmh + " km/h" : "—";
     case "rating":   return f.rating ? "★".repeat(f.rating) : "—";
-    case "hikeOrt":  return cf.hikeOrt || "—";
-    case "hikeStarthoehe": return cf.hikeStarthoehe ? cf.hikeStarthoehe + " m" : "—";
-    case "hikeHoehenmeter": {
-      const startAlt = f.startAlt>0 ? f.startAlt : parseFloat(cf.msa);
-      const hikeStart = parseFloat(cf.hikeStarthoehe);
-      return (Number.isFinite(startAlt) && Number.isFinite(hikeStart)) ? Math.round(startAlt-hikeStart) + " m" : "—";
-    }
-    case "hikeDauer": return cf.hikeDauer || "—";
     case "jahr":     return f.year ? String(f.year) : "—";
     default:         return f.durationStr || "—";
   }
@@ -2590,15 +2194,11 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
         <span style={{flexShrink:0,marginLeft:6,display:"flex",alignItems:"center",gap:4}}>
           {f.pdfOnly&&<span style={{background:"rgba(139,92,246,0.18)",color:"#c4b5fd",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700}}>CSV</span>}
           {f.track?.length>1&&<span style={{background:"rgba(34,197,94,0.22)",color:"#4ade80",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(74,222,128,0.5)"}}>IGC</span>}
-          {f.hikeTrack?.length>1&&<span style={{background:"rgba(239,68,68,0.22)",color:"#f87171",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(248,113,113,0.5)"}}>GPX</span>}
           {pax&&<span style={{border:"1px solid rgba(232,244,253,0.15)",borderRadius:20,padding:"1px 7px",fontSize:9,color:"rgba(232,244,253,0.5)"}}>👤 {pax}</span>}
         </span>
         <span style={{flex:1}} />
         <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
           {!showSortValue && f.totalDist ? <span style={{fontSize:11,color:"rgba(232,244,253,0.3)"}}>{f.totalDist} km</span> : null}
-          {f.hikeTrack?.length>1 && f.customFields?.hikeDauer && (
-            <span style={{color:"#f87171",fontSize:11,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:64,display:"inline-block"}}>🥾{f.customFields.hikeDauer}</span>
-          )}
           {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
           <span style={{fontSize:13,fontWeight:600,color:"#7dd3fc"}}>{showSortValue ? formatSortValue(f, sortId) : (f.durationStr||"—")}</span>
         </div>
@@ -2624,7 +2224,6 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
           <span style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
             {f.pdfOnly&&<span style={{background:"rgba(139,92,246,0.18)",color:"#c4b5fd",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700}}>CSV</span>}
             {f.track?.length>1&&<span style={{background:"rgba(34,197,94,0.22)",color:"#4ade80",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(74,222,128,0.5)"}}>IGC</span>}
-            {f.hikeTrack?.length>1&&<span style={{background:"rgba(239,68,68,0.22)",color:"#f87171",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(248,113,113,0.5)"}}>GPX</span>}
             {pax&&<span style={{border:"1px solid rgba(232,244,253,0.15)",borderRadius:20,padding:"1px 7px",fontSize:9,color:"rgba(232,244,253,0.5)"}}>👤 {pax}</span>}
           </span>
         </div>
@@ -2637,9 +2236,6 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
       <div style={{textAlign:"right",flexShrink:0,marginLeft:8}}>
         <div style={{fontSize:13,fontWeight:600,color:"#7dd3fc",display:"flex",alignItems:"center",justifyContent:"flex-end",gap:4}}>
           {f.rating>0 && <span><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
-          {f.hikeTrack?.length>1 && f.customFields?.hikeDauer && (
-            <span style={{color:"#f87171",fontSize:10,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:54,display:"inline-block",verticalAlign:"bottom"}}>🥾{f.customFields.hikeDauer}</span>
-          )}
           <span>{showSortValue ? formatSortValue(f, sortId) : (f.durationStr||"—")}</span>
         </div>
         {secondaryText !== "—" && (
@@ -2712,13 +2308,7 @@ const SEARCH_FIELDS = [
   { id: "endlon",    label: "Landung Lon",    type: "number" },
   { id: "rating",    label: "Bewertung",      type: "number" },
   { id: "igc",       label: "IGC-Track",      type: "bool" },
-  { id: "gpx",       label: "Hike-GPX",       type: "bool" },
   { id: "training",  label: "Training",       type: "bool" },
-  { id: "hikeort",        label: "Hike-Ort",         type: "text" },
-  { id: "hikestartpunkt", label: "Hike-Startpunkt",  type: "text" },
-  { id: "hikestarthoehe", label: "Hike-Starthöhe (m)", type: "number" },
-  { id: "hikehoehenmeter", label: "Hike-Höhenmeter (m)", type: "number" },
-  { id: "hikedauer",      label: "Hike-Dauer",       type: "text" },
 ];
 const BOOL_OPTIONS = [
   { value: "ja",   label: "Vorhanden" },
@@ -2743,15 +2333,6 @@ const TILE_FIELD_OPTIONS = [
   { key: "hGew",      label: "Höhengewinn",   icon: "📈", get: fl => fl.customFields?.hGew ? fl.customFields.hGew+" m" : "—" },
   { key: "entfernungSL", label: "Entf. S-L",  icon: "📐", get: fl => fl.entfernungSL!=null ? fl.entfernungSL+" km" : "—" },
   { key: "rating",    label: "Bewertung",     icon: "⭐️", get: fl => fl.rating ? "★".repeat(fl.rating) : "—" },
-  { key: "hikeStartpunkt", label: "Hike-Startpunkt", icon: "🥾", hikeOnly: true, get: fl => fl.customFields?.hikeStartpunkt || "—" },
-  { key: "hikeOrt",        label: "Hike-Ort",        icon: "🥾", hikeOnly: true, get: fl => fl.customFields?.hikeOrt || "—" },
-  { key: "hikeStarthoehe", label: "Hike-Starthöhe",  icon: "🥾", hikeOnly: true, get: fl => fl.customFields?.hikeStarthoehe ? fl.customFields.hikeStarthoehe+" m" : "—" },
-  { key: "hikeHoehenmeter", label: "Hike-Höhenmeter", icon: "🥾", hikeOnly: true, get: fl => {
-      const startAlt = fl.startAlt>0 ? fl.startAlt : parseFloat(fl.customFields?.msa);
-      const hikeStart = parseFloat(fl.customFields?.hikeStarthoehe);
-      return (Number.isFinite(startAlt) && Number.isFinite(hikeStart)) ? Math.round(startAlt-hikeStart)+" m" : "—";
-    } },
-  { key: "hikeDauer",      label: "Hike-Dauer",      icon: "🥾", hikeOnly: true, get: fl => fl.customFields?.hikeDauer || "—" },
 ];
 const DEFAULT_TILE_KEYS = ["duration","maxAlt","distanz","startAlt","endAlt","hDiff","maxSinken","maxSteigen","speed"];
 
@@ -3041,119 +2622,6 @@ function StaticField({label, value, unit}) {
         {value ? value+(unit?" "+unit:"") : "—"}
       </span>
     </div>
-  );
-}
-
-// Same tap-to-edit value behaviour as InlineField, but the label itself is
-// also independently editable (tap it to rename what the field means) —
-// used for the Hike-Daten card's "Zusatz" row, which starts out generic
-// but the person may want to relabel (e.g. "Gipfelzeit", "Pausen").
-// Startpunkt accepts either a free-text place name or "lat, lon"
-// coordinates — when coordinates are recognized, Starthöhe is fetched
-// automatically from the same elevation API the ground profile uses
-// (rather than typed by hand) and persisted so it doesn't need refetching
-// on every visit; any other Startpunkt text leaves Starthöhe empty.
-function HikeStartFields({ startpunkt, starthoehe, ort, hikeTrack, onSavePunkt, onSaveHoehe, onSaveOrt }) {
-  // Retroactively fills Startpunkt for a hike track that was already
-  // imported before this auto-fill existed (or through some other path
-  // that didn't set it) — not just brand-new imports going forward.
-  useEffect(() => {
-    if (!startpunkt && hikeTrack?.length) {
-      const p = hikeTrack[0];
-      onSavePunkt(`${p.lat.toFixed(5)}, ${p.lon.toFixed(5)}`);
-    }
-  }, [startpunkt, hikeTrack]);
-  // Automatic reverse-geocoding for Ort was removed — the MapTiler
-  // village/municipality matching proved unreliably wrong in practice
-  // (and untestable directly, since api.maptiler.com blocks automated
-  // fetches). Ort is manually editable instead, pre-filled on import from
-  // the GPX file's own route name where available (see importGpxFiles /
-  // attachGpxToFlight), which the person can then correct freely.
-  //
-  // Bugfix (Flug 932): this effect used to re-fetch on every mount (i.e.
-  // every time the Flugdetail was opened) and, on any fetch failure —
-  // offline, rate-limited, blocked in an in-app preview — it cleared an
-  // already-correct Starthöhe via onSaveHoehe(""), silently wiping data
-  // that had been fetched successfully before. fetchedForRef now tracks
-  // which Startpunkt the current Starthöhe belongs to, so a remount with
-  // an unchanged Startpunkt and an existing Starthöhe skips the fetch
-  // entirely, and a failed fetch leaves a previously stored value intact
-  // instead of clearing it.
-  const fetchedForRef = useRef(startpunkt);
-  useEffect(() => {
-    if (startpunkt === fetchedForRef.current && starthoehe) return;
-    const cleaned = (startpunkt||"").trim().replace(/°/g, "").replace(/\s*[NSEW]\b/gi, "");
-    const m = cleaned.trim().match(/^(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)$/);
-    if (!m) { fetchedForRef.current = startpunkt; if (starthoehe) onSaveHoehe(""); return; }
-    const lat = parseFloat(m[1]), lon = parseFloat(m[2]);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) { fetchedForRef.current = startpunkt; if (starthoehe) onSaveHoehe(""); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(`https://api.open-meteo.com/v1/elevation?latitude=${lat}&longitude=${lon}`);
-        const data = await res.json();
-        if (cancelled) return;
-        const elev = Array.isArray(data.elevation) ? data.elevation[0] : null;
-        if (elev != null) {
-          onSaveHoehe(String(Math.round(elev)));
-          fetchedForRef.current = startpunkt;
-        }
-        // else: unexpected response shape — leave any existing Starthöhe as is
-      } catch (e) {
-        // network/fetch failure — leave any existing Starthöhe as is rather
-        // than clearing it; will retry on the next Startpunkt change or
-        // next mount since fetchedForRef wasn't updated
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [startpunkt]);
-  return (
-    <>
-      <InlineField label="Startpunkt" value={startpunkt} onSave={onSavePunkt} />
-      <InlineField label="Ort" value={ort} onSave={onSaveOrt} />
-      <StaticField label="Starthöhe" value={starthoehe||""} unit="m" />
-    </>
-  );
-}
-
-function EditableLabelField({label, onLabelSave, value, onSave, unit}) {
-  const [labelEditing, setLabelEditing] = useState(false);
-  const [labelVal, setLabelVal] = useState(label||"");
-  const commitLabel = () => {
-    setLabelEditing(false);
-    if (labelVal.trim() && labelVal!==label) onLabelSave(labelVal.trim());
-  };
-  return (
-    <div data-inline-row style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
-      {labelEditing ? (
-        <input value={labelVal} onChange={e=>setLabelVal(e.target.value)} onBlur={commitLabel} autoFocus
-          onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); e.target.blur(); } }}
-          style={{flex:"0 1 90px",background:"rgba(255,255,255,0.08)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,padding:"4px 6px",color:"#7dd3fc",fontSize:13}} />
-      ) : (
-        <span onClick={()=>{setLabelVal(label||"");setLabelEditing(true);}}
-          style={{fontSize:13,color:"rgba(125,211,252,0.7)",minWidth:90,cursor:"pointer",textDecoration:"underline",textDecorationStyle:"dotted",textDecorationColor:"rgba(125,211,252,0.35)"}}>
-          {label}
-        </span>
-      )}
-      <InlineFieldValueOnly value={value} onSave={onSave} unit={unit} />
-    </div>
-  );
-}
-// Just the tap-to-edit value half of InlineField, reused by
-// EditableLabelField (which supplies its own label/row wrapper).
-function InlineFieldValueOnly({value, onSave, unit}) {
-  const [editing, setEditing] = useState(false);
-  const [val, setVal] = useState(value||"");
-  const commit = () => { setEditing(false); if(val!==(value||"")) onSave(val); };
-  return editing ? (
-    <input value={val} onChange={e=>setVal(e.target.value)} onBlur={commit} autoFocus
-      onKeyDown={e=>{ if(e.key==="Enter"){ e.preventDefault(); e.target.blur(); } }}
-      style={{flex:1,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,padding:"4px 8px",color:"#e8f4fd",fontSize:13,textAlign:"right"}} />
-  ) : (
-    <span onClick={()=>{setVal(value||"");setEditing(true);}}
-      style={{fontSize:13,fontWeight:500,color:value?"#e8f4fd":"rgba(232,244,253,0.25)",cursor:"pointer",minWidth:60,textAlign:"right"}}>
-      {value||(unit?"— "+unit:"—")}
-    </span>
   );
 }
 
@@ -3544,9 +3012,9 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
       setFlights(p=>p.map(f=>f.id===upd.id?upd:f));
       setSelected(upd);
     };
-    // "Typ" auto-derived from Passagier/Hike-GPX (Biplace / Hike / "Hike,
-    // Biplace" / Solo) but stays freely editable — customFields.typAuto
-    // tracks whether the current value is still the app's own computed one.
+    // "Typ" auto-derived from Passagier (Biplace / Solo) but stays freely
+    // editable — customFields.typAuto tracks whether the current value is
+    // still the app's own computed one.
     // A manual edit via the InlineField below (which always sets
     // typAuto:false) permanently stops the auto-updates for that flight.
     // New/manually-entered flights (no recognizable CSV origin) and any
@@ -3559,8 +3027,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
     // or "Beibehalten") is then remembered via typAuto for that flight.
     useEffect(() => {
       const hasPax = !!(fl.customFields?.passagier||"").trim();
-      const hasHike = (fl.hikeTrack?.length||0) > 1;
-      const computed = hasHike && hasPax ? "Hike, Biplace" : hasHike ? "Hike" : hasPax ? "Biplace" : "Solo";
+      const computed = hasPax ? "Biplace" : "Solo";
       const cf = fl.customFields || {};
       if (cf.typAuto === false) return;
       if (cf.typ === computed) return;
@@ -3568,7 +3035,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
       const hasExistingCsvTyp = !!fl.pdfOnly && !!cf.typ;
       if (hasExistingCsvTyp) { setConfirmTypAuto(computed); }
       else { saveField({ customFields: { typ: computed, typAuto: true } }); }
-    }, [fl.id, fl.customFields?.passagier, fl.hikeTrack?.length]);
+    }, [fl.id, fl.customFields?.passagier]);
     // Same as saveField, but for fields that feed into Dauer/H.Diff./Ø Speed
     // (start/end time, start/end altitude, distance). For manually-entered
     // flights with no IGC track — where these values aren't already derived
@@ -3676,20 +3143,11 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
     const [confirmDateChange, setConfirmDateChange] = useState(null); // newDateStr | null
     const [confirmNameChange, setConfirmNameChange] = useState(null); // newName | null
     // Consolidated delete: one 🗑 tile opens a small menu choosing what to
-    // remove (IGC track / Hike-GPX / whole flight) instead of separate
-    // buttons for each.
+    // remove (IGC track / whole flight) instead of separate buttons for each.
     const [showDeleteMenu, setShowDeleteMenu] = useState(false);
-    const gpxDirectFileRef = useRef(null);
-    const [confirmDeleteKind, setConfirmDeleteKind] = useState(null); // null | "igc" | "gpxhike" | "all"
+    const [confirmDeleteKind, setConfirmDeleteKind] = useState(null); // null | "igc" | "all"
     const deleteTrack = async () => {
       const upd = { ...fl, track: [] };
-      await saveFlight(upd);
-      setFlights(p=>p.map(f=>f.id===upd.id?upd:f));
-      setSelected(upd);
-      setConfirmDeleteKind(null);
-    };
-    const deleteHikeTrack = async () => {
-      const upd = { ...fl, hikeTrack: [] };
       await saveFlight(upd);
       setFlights(p=>p.map(f=>f.id===upd.id?upd:f));
       setSelected(upd);
@@ -3748,23 +3206,6 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                 }}
                 style={{background:"rgba(34,197,94,0.15)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:16,padding:"4px 8px",color:"#4ade80",fontSize:11,cursor:"pointer",whiteSpace:"nowrap"}}>⬇ GPX</button>
             )}
-            {fl.hikeTrack?.length>1 && (
-              <button onClick={()=>{
-                  const gpx = buildHikeGpxFromFlight(fl);
-                  if (gpx) {
-                    const blob = new Blob([gpx], { type: "application/gpx+xml" });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement("a");
-                    a.href = url;
-                    a.download = `${fl?.name || "flug"}_hike.gpx`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    setTimeout(() => URL.revokeObjectURL(url), 1000);
-                  }
-                }}
-                style={{background:"rgba(134,239,172,0.15)",border:"1px solid rgba(134,239,172,0.3)",borderRadius:16,padding:"4px 8px",color:"#86efac",fontSize:11,cursor:"pointer",whiteSpace:"nowrap"}}>⬇ Hike</button>
-            )}
             <div style={{position:"relative"}}>
               <button onClick={()=>setShowDeleteMenu(s=>!s)}
                 style={{background:"rgba(239,68,68,0.12)",border:"1px solid rgba(239,68,68,0.25)",borderRadius:16,padding:"4px 8px",color:"#f87171",fontSize:11,cursor:"pointer",whiteSpace:"nowrap"}}>🗑 ▾</button>
@@ -3777,12 +3218,6 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                       <button onClick={()=>{setShowDeleteMenu(false);setConfirmDeleteKind("igc");}}
                         style={{background:"transparent",border:"none",borderRadius:6,padding:"8px 10px",color:"#e8f4fd",fontSize:13,cursor:"pointer",textAlign:"left"}}>
                         IGC-Track
-                      </button>
-                    )}
-                    {fl.hikeTrack?.length>1 && (
-                      <button onClick={()=>{setShowDeleteMenu(false);setConfirmDeleteKind("gpxhike");}}
-                        style={{background:"transparent",border:"none",borderRadius:6,padding:"8px 10px",color:"#e8f4fd",fontSize:13,cursor:"pointer",textAlign:"left"}}>
-                        GPX Hike
                       </button>
                     )}
                     <button onClick={()=>{setShowDeleteMenu(false);setConfirmDelete(fl.id);}}
@@ -3821,31 +3256,6 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
             </div>
             <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginLeft:"auto",justifyContent:"flex-end"}}>
               {fl.track?.length>1&&<span style={{background:"rgba(30,64,175,0.22)",color:"#60a5fa",borderRadius:20,padding:"2px 10px",fontSize:10,fontWeight:700,flexShrink:0}}>IGC</span>}
-              {fl.hikeTrack?.length>1&&<span style={{background:"rgba(22,163,74,0.22)",color:"#4ade80",borderRadius:20,padding:"2px 10px",fontSize:10,fontWeight:700,flexShrink:0}}>GPX</span>}
-              <button onClick={()=>gpxDirectFileRef.current?.click()}
-                title="Hike-GPX-Route direkt diesem Flug zuordnen"
-                style={{background:"rgba(239,68,68,0.15)",border:"1px solid rgba(239,68,68,0.4)",color:"#f87171",borderRadius:20,padding:"2px 10px",fontSize:10,fontWeight:700,flexShrink:0,cursor:"pointer"}}>
-                🥾 Import
-              </button>
-              <input ref={gpxDirectFileRef} type="file" accept=".gpx" multiple style={{display:"none"}}
-                onChange={async e=>{
-                  const files = Array.from(e.target.files||[]);
-                  e.target.value = "";
-                  if (!files.length) return;
-                  for (const file of files) {
-                    const text = await file.text();
-                    const { points, name } = parseGpxTrack(text);
-                    if (points.length) {
-                      const cf = { ...(fl.customFields||{}) };
-                      if (!cf.hikeStartpunkt) cf.hikeStartpunkt = `${points[0].lat.toFixed(5)}, ${points[0].lon.toFixed(5)}`;
-                      if (!cf.hikeOrt && name) cf.hikeOrt = name;
-                      const upd = { ...fl, hikeTrack: points, customFields: cf };
-                      await saveFlight(upd);
-                      setFlights(p=>p.map(f=>f.id===upd.id?upd:f));
-                      setSelected(upd);
-                    }
-                  }
-                }} />
               <button onClick={()=>window.open("https://www.xcontest.org/world/en/my-flights/","_blank")}
                 title="XContest — Meine Flüge"
                 style={{background:"rgba(245,158,11,0.18)",border:"1px solid rgba(245,158,11,0.4)",color:"#fcd34d",borderRadius:20,padding:"2px 10px",fontSize:10,fontWeight:700,flexShrink:0,cursor:"pointer"}}>
@@ -3907,7 +3317,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                 style={{background:"#14253a",borderTopLeftRadius:18,borderTopRightRadius:18,padding:"16px 18px calc(20px + env(safe-area-inset-bottom, 0px))",maxWidth:480,width:"100%",maxHeight:"75vh",overflowY:"auto",border:"1px solid rgba(255,255,255,0.1)"}}>
                 <div style={{fontSize:14,fontWeight:700,marginBottom:10}}>Kachel {tilePickerIdx+1}: Feld wählen</div>
                 <div style={{display:"flex",flexDirection:"column",gap:4}}>
-                  {TILE_FIELD_OPTIONS.filter(opt => !opt.hikeOnly || fl.hikeTrack?.length>1).map(opt => (
+                  {TILE_FIELD_OPTIONS.map(opt => (
                     <button key={opt.key}
                       onClick={()=>{
                         const next = [...tileConfig]; next[tilePickerIdx] = opt.key;
@@ -3950,36 +3360,6 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                 }} />
             </div>
           </div>
-
-          {/* Hike-Daten — nur wenn eine Hike-GPX-Route importiert wurde.
-              Startpunkt akzeptiert auch "lat, lon"-Koordinaten, aus denen
-              Starthöhe automatisch berechnet wird (siehe HikeStartFields).
-              Höhenmeter ist ebenfalls kein eigenes gespeichertes Feld,
-              sondern live berechnet (Startplatzhöhe des Flugs minus
-              Starthöhe der Wanderung). */}
-          {fl.hikeTrack?.length>1 && (
-            <div style={{background:"rgba(22,163,74,0.06)",borderRadius:14,padding:"13px 15px",marginBottom:11,border:"1px solid rgba(22,163,74,0.15)"}}>
-              <div style={{fontSize:10,fontWeight:700,color:"#4ade80",letterSpacing:1.5,textTransform:"uppercase",marginBottom:9}}>🥾 Hike-Daten</div>
-              <HikeStartFields
-                startpunkt={fl.customFields?.hikeStartpunkt}
-                starthoehe={fl.customFields?.hikeStarthoehe}
-                ort={fl.customFields?.hikeOrt}
-                hikeTrack={fl.hikeTrack}
-                onSavePunkt={v=>saveField({customFields:{hikeStartpunkt:v}})}
-                onSaveHoehe={v=>saveField({customFields:{hikeStarthoehe:v}})}
-                onSaveOrt={v=>saveField({customFields:{hikeOrt:v}})} />
-              <StaticField label="Höhenmeter" value={(() => {
-                  const startAlt = fl.startAlt>0 ? fl.startAlt : parseFloat(fl.customFields?.msa);
-                  const hikeStart = parseFloat(fl.customFields?.hikeStarthoehe);
-                  return (Number.isFinite(startAlt) && Number.isFinite(hikeStart)) ? String(Math.round(startAlt-hikeStart)) : "";
-                })()} unit="m" />
-              <InlineField label="Dauer" value={fl.customFields?.hikeDauer} onSave={v=>saveField({customFields:{hikeDauer:v}})} />
-              <EditableLabelField label={fl.customFields?.hikeZusatzLabel||"Zusatz"}
-                onLabelSave={v=>saveField({customFields:{hikeZusatzLabel:v}})}
-                value={fl.customFields?.hikeZusatzValue}
-                onSave={v=>saveField({customFields:{hikeZusatzValue:v}})} />
-            </div>
-          )}
 
           {/* Editierbare Felder */}
           <div id="flugdaten-section" style={{background:"rgba(255,255,255,0.04)",borderRadius:14,padding:"13px 15px",marginBottom:11,border:"1px solid rgba(255,255,255,0.06)"}}>
@@ -4095,16 +3475,14 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
             style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:100,padding:24}}>
             <div onClick={e=>e.stopPropagation()}
               style={{background:"#14253a",borderRadius:16,padding:"20px 22px",maxWidth:320,width:"100%",border:"1px solid rgba(255,255,255,0.1)"}}>
-              <div style={{fontSize:16,fontWeight:700,marginBottom:6}}>{confirmDeleteKind==="igc" ? "IGC-Track löschen?" : "GPX Hike löschen?"}</div>
+              <div style={{fontSize:16,fontWeight:700,marginBottom:6}}>IGC-Track löschen?</div>
               <div style={{fontSize:13,color:"rgba(232,244,253,0.6)",marginBottom:18}}>
-                {confirmDeleteKind==="igc"
-                  ? `Der GPS-Track von ${fl.name} wird entfernt. Start- und Landepunkt bleiben erhalten. Diese Aktion kann nicht rückgängig gemacht werden.`
-                  : `Die Hike-Route von ${fl.name} wird entfernt. Diese Aktion kann nicht rückgängig gemacht werden.`}
+                Der GPS-Track von {fl.name} wird entfernt. Start- und Landepunkt bleiben erhalten. Diese Aktion kann nicht rückgängig gemacht werden.
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>setConfirmDeleteKind(null)}
                   style={{flex:1,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px",color:"#e8f4fd",fontSize:14,cursor:"pointer"}}>Abbrechen</button>
-                <button onClick={confirmDeleteKind==="igc" ? deleteTrack : deleteHikeTrack}
+                <button onClick={deleteTrack}
                   style={{flex:1,background:"rgba(239,68,68,0.2)",border:"1px solid rgba(239,68,68,0.4)",borderRadius:10,padding:"10px",color:"#f87171",fontSize:14,fontWeight:700,cursor:"pointer"}}>Löschen</button>
               </div>
             </div>
@@ -4156,7 +3534,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
               style={{background:"#14253a",borderRadius:16,padding:"20px 22px",maxWidth:320,width:"100%",border:"1px solid rgba(255,255,255,0.1)"}}>
               <div style={{fontSize:16,fontWeight:700,marginBottom:6}}>Typ automatisch führen?</div>
               <div style={{fontSize:13,color:"rgba(232,244,253,0.6)",marginBottom:18}}>
-                Dieser importierte Flug hat bereits einen Typ: „{fl.customFields?.typ}". Automatisch aus Passagier/Hike-GPX abgeleitet wäre: „{confirmTypAuto}". Soll der Typ ab jetzt automatisch anhand Passagier/Hike-GPX mitgeführt werden (aktueller Wert wird dabei ersetzt)? Diese Wahl gilt nur für diesen Flug und wird gemerkt.
+                Dieser importierte Flug hat bereits einen Typ: „{fl.customFields?.typ}". Automatisch aus Passagier abgeleitet wäre: „{confirmTypAuto}". Soll der Typ ab jetzt automatisch anhand Passagier mitgeführt werden (aktueller Wert wird dabei ersetzt)? Diese Wahl gilt nur für diesen Flug und wird gemerkt.
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>{ saveField({customFields:{typAuto:false}}); setConfirmTypAuto(null); }}
@@ -4357,37 +3735,6 @@ function DateAmbiguousResolver({ item, onAssign, onCreateNew, onClose, descripti
   );
 }
 
-// Shown when a Hike-GPX file has no readable timestamp, so date-matching
-// isn't possible — lets the person type the flight's own number instead.
-function GpxManualMatchResolver({ item, flights, onAssign, onSkip }) {
-  const [nr, setNr] = useState("");
-  const match = flights.find(f => (f.name||"").replace(/\D/g,"") === nr.trim());
-  return (
-    <div onClick={onSkip} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
-      <div onClick={e=>e.stopPropagation()}
-        style={{background:"#0a1628",borderRadius:16,padding:"18px 16px",maxWidth:340,width:"100%",border:"1px solid rgba(255,255,255,0.1)"}}>
-        <div style={{fontSize:15,fontWeight:800,marginBottom:6}}>Welche Flugnummer?</div>
-        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:14}}>
-          "{item.file.name}" enthält keinen lesbaren Zeitstempel — automatische Zuordnung per Datum nicht möglich. Bitte Flugnummer eingeben.
-        </div>
-        <input value={nr} onChange={e=>setNr(e.target.value)} placeholder="z.B. 1013" inputMode="numeric" autoFocus
-          style={{width:"100%",boxSizing:"border-box",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px 13px",color:"#e8f4fd",fontSize:16,marginBottom:8}} />
-        {nr.trim() && (
-          <div style={{fontSize:12,marginBottom:12,color:match?"#4ade80":"#f87171"}}>
-            {match ? `✓ ${match.name}${match.site?" · "+match.site:""}` : "Kein Flug mit dieser Nummer gefunden."}
-          </div>
-        )}
-        <div style={{display:"flex",gap:10}}>
-          <button onClick={onSkip}
-            style={{flex:1,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px",color:"#e8f4fd",fontSize:14,cursor:"pointer"}}>Überspringen</button>
-          <button onClick={()=>match && onAssign(match)} disabled={!match}
-            style={{flex:1,background:match?"rgba(34,197,94,0.2)":"rgba(255,255,255,0.05)",border:`1px solid ${match?"rgba(34,197,94,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,padding:"10px",color:match?"#4ade80":"rgba(232,244,253,0.3)",fontSize:14,fontWeight:700,cursor:match?"pointer":"default"}}>Zuordnen</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function FlugbuchApp() {
   const isWide = useIsWide();
   const [flights, setFlights] = useState([]);
@@ -4413,16 +3760,6 @@ function FlugbuchApp() {
   // MULTIPLE existing (track-less) flights by date — resolved one at a
   // time via a picker rather than guessing which flight each belongs to.
   const [pendingDateAmbiguous, setPendingDateAmbiguous] = useState([]); // [{file, date, candidates}]
-  // Hike-GPX import (separate from the flight's own IGC track) — matched
-  // to an existing flight by date only, never creates a new flight on its
-  // own (a hike route with no flight data attached wouldn't make sense as
-  // a flugbuch entry).
-  const [importingGpx, setImportingGpx] = useState(false);
-  const [gpxResult, setGpxResult] = useState(null);
-  const [pendingGpxAmbiguous, setPendingGpxAmbiguous] = useState([]); // [{file, date, points, name, candidates}]
-  const [pendingGpxManual, setPendingGpxManual] = useState([]); // [{file, points}] — no timestamp found, needs a flight number
-  const [gpxDragOver, setGpxDragOver] = useState(false);
-  const gpxFileRef = useRef(null);
   const [editData, setEditData] = useState({});
   const [customFieldDefs, setCustomFieldDefs] = useState([{id:"passagier",name:"Passagier",type:"text",formula:""}]);
   const [showFieldEditor, setShowFieldEditor] = useState(false);
@@ -5254,98 +4591,6 @@ function FlugbuchApp() {
     await doImport(igc);
   }, [doImport]);
 
-  // Attaches a parsed Hike-GPX track onto an existing flight — additive
-  // only (never overwrites an existing hikeTrack, matching how IGC import
-  // never overwrites an existing real track without explicit confirmation).
-  const attachGpxToFlight = useCallback(async (existing, points, gpxName) => {
-    const cf = { ...(existing.customFields||{}) };
-    if (!cf.hikeStartpunkt && points.length) {
-      // "lat, lon" — same format HikeStartFields already recognizes and
-      // auto-fetches Starthöhe from, so setting this here is all that's
-      // needed to also get the elevation filled in automatically.
-      cf.hikeStartpunkt = `${points[0].lat.toFixed(5)}, ${points[0].lon.toFixed(5)}`;
-    }
-    // Many hiking apps (Komoot, Outdooractive, SwitzerlandMobility etc.)
-    // embed the route's own name in the GPX <name> tag, often already
-    // naming the place — used as an initial Ort suggestion instead of
-    // unreliable automated reverse-geocoding; still freely editable.
-    if (!cf.hikeOrt && gpxName) cf.hikeOrt = gpxName;
-    const updated = { ...existing, hikeTrack: points, customFields: cf };
-    await saveFlight(updated);
-    setFlights(prev=>prev.map(f=>f.id===updated.id?updated:f));
-    if (selected?.id===updated.id) setSelected(updated);
-  }, [selected, saveFlight]);
-
-  const processGpxFiles = useCallback(async (gpxFiles) => {
-    setImportingGpx(true);
-    let attached = 0;
-    const dateAmbiguous = [];
-    const pendingManual = [];
-    const noMatch = [];
-    for (const file of gpxFiles) {
-      const text = await file.text();
-      const { points, name } = parseGpxTrack(text);
-      if (!points.length) { noMatch.push(file.name); continue; }
-      // Date comes from the first trackpoint's own timestamp if present;
-      // GPX time is UTC same as IGC, but a Hike-GPX rarely has an exact
-      // matching Startzeit anyway, so only the date is used for matching.
-      const firstWithDate = points.find(p => p.timeSec != null);
-      let dateStr = null;
-      const rawFirstTime = text.match(/<trkpt[^>]*>[\s\S]*?<time>([^<]+)<\/time>/i);
-      if (rawFirstTime) {
-        const d = new Date(rawFirstTime[1]);
-        if (!isNaN(d.getTime())) {
-          dateStr = `${String(d.getUTCDate()).padStart(2,"0")}.${String(d.getUTCMonth()+1).padStart(2,"0")}.${d.getUTCFullYear()}`;
-        }
-      }
-      if (!dateStr) { pendingManual.push({ file, points, name }); continue; }
-      const candidates = flights.filter(f => f.date === dateStr);
-      if (candidates.length === 1) {
-        await attachGpxToFlight(candidates[0], points, name);
-        attached++;
-      } else if (candidates.length > 1) {
-        dateAmbiguous.push({ file, date: dateStr, points, name, candidates });
-      } else {
-        noMatch.push(file.name + ` (${dateStr}, kein Flug an diesem Datum)`);
-      }
-    }
-    if (dateAmbiguous.length) setPendingGpxAmbiguous(dateAmbiguous);
-    if (pendingManual.length) setPendingGpxManual(pendingManual);
-    setGpxResult({ attached, total: gpxFiles.length, deferred: dateAmbiguous.length+pendingManual.length, noMatch });
-    setTimeout(() => setGpxResult(null), 6000);
-    setImportingGpx(false);
-  }, [flights, attachGpxToFlight]);
-
-  const importGpxFiles = useCallback(async (files) => {
-    const gpx = files.filter(f=>f.name.toLowerCase().endsWith(".gpx"));
-    if (!gpx.length) return;
-    // If one or more flights are currently marked (Auswahl), attach
-    // directly to all of them instead of trying to auto-match by date —
-    // sidesteps the whole "GPX has no timestamp" problem entirely, since
-    // the target flight(s) are already explicit. Also covers several
-    // flights sharing the exact same hike route (e.g. a group hike).
-    if (selectMode && selectedIds.size >= 1) {
-      const targets = flights.filter(f => selectedIds.has(f.id));
-      if (targets.length) {
-        setImportingGpx(true);
-        let attached = 0;
-        for (const file of gpx) {
-          const text = await file.text();
-          const { points, name } = parseGpxTrack(text);
-          if (points.length) {
-            for (const target of targets) await attachGpxToFlight(target, points, name);
-            attached++;
-          }
-        }
-        setGpxResult({ attached, total: gpx.length, deferred: 0, noMatch: attached<gpx.length ? [`${gpx.length-attached} Datei(en) ohne lesbare Trackpunkte`] : [] });
-        setTimeout(() => setGpxResult(null), 6000);
-        setImportingGpx(false);
-        return;
-      }
-    }
-    await processGpxFiles(gpx);
-  }, [processGpxFiles, selectMode, selectedIds, flights, attachGpxToFlight]);
-
 
   const saveEdit = useCallback(async () => {
     if (!selected) return;
@@ -5567,7 +4812,7 @@ function FlugbuchApp() {
         </div>
       )}
 
-      {/* Import menu: CSV/PDF, IGC, GPX (Hike) */}
+      {/* Import menu: CSV/PDF, IGC, Excel */}
       {showImportMenu && (
         <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,padding:10,display:"flex",gap:8}}>
           <div onDragOver={e=>{e.preventDefault();setPdfDragOver(true)}} onDragLeave={()=>setPdfDragOver(false)}
@@ -5586,16 +4831,6 @@ function FlugbuchApp() {
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing?"⏳ Importiere…":"IGC"}
             </div>
           </div>
-          <div onDragOver={e=>{e.preventDefault();setGpxDragOver(true)}} onDragLeave={()=>setGpxDragOver(false)}
-            onDrop={e=>{e.preventDefault();setGpxDragOver(false);importGpxFiles(Array.from(e.dataTransfer.files));}}
-            onClick={()=>gpxFileRef.current?.click()}
-            title={selectMode && selectedIds.size>=1 ? `Hike-GPX-Route direkt ${selectedIds.size===1?"dem markierten Flug":"den "+selectedIds.size+" markierten Flügen"} zuordnen` : "Hike-GPX-Route importieren (wird per Datum dem passenden Flug zugeordnet)"}
-            style={{flex:1,border:`2px dashed ${gpxDragOver?"#4ade80":"rgba(74,222,128,0.25)"}`,borderRadius:10,padding:"10px 8px",textAlign:"center",background:gpxDragOver?"rgba(74,222,128,0.08)":"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3}}>
-            <div style={{fontSize:15}}>🥾</div>
-            <div style={{color:gpxDragOver?"#4ade80":"rgba(134,239,172,0.5)",fontSize:10}}>
-              {importingGpx?"⏳ Importiere…":(selectMode && selectedIds.size>=1 ? `GPX → ${selectedIds.size===1?"markiert":selectedIds.size+"×"}` : "GPX")}
-            </div>
-          </div>
           <div onDragOver={e=>{e.preventDefault();setExcelDragOver(true)}} onDragLeave={()=>setExcelDragOver(false)}
             onDrop={e=>{e.preventDefault();setExcelDragOver(false);e.dataTransfer.files[0]&&importExcelFile(e.dataTransfer.files[0]);}}
             onClick={()=>excelFileRef.current?.click()}
@@ -5606,15 +4841,6 @@ function FlugbuchApp() {
               {importingExcel?"⏳ Importiere…":"Excel"}
             </div>
           </div>
-        </div>
-      )}
-      <input ref={gpxFileRef} type="file" accept=".gpx" multiple style={{display:"none"}}
-        onChange={e=>{ if (e.target.files.length) importGpxFiles(Array.from(e.target.files)); e.target.value=""; }} />
-      {gpxResult && (
-        <div style={{margin:"8px 16px 0",background:"rgba(74,222,128,0.08)",border:"1px solid rgba(74,222,128,0.2)",borderRadius:10,padding:"8px 12px",fontSize:12,color:"#4ade80"}}>
-          {gpxResult.attached} von {gpxResult.total} Hike-GPX zugeordnet.
-          {gpxResult.deferred>0 && ` ${gpxResult.deferred} mit mehreren Kandidaten (Nachfrage folgt).`}
-          {gpxResult.noMatch.length>0 && ` Nicht zugeordnet: ${gpxResult.noMatch.join(", ")}.`}
         </div>
       )}
 
@@ -5660,32 +4886,6 @@ function FlugbuchApp() {
             await saveFlight(newF);
             setFlights(prev=>[newF,...prev]);
             setPendingDateAmbiguous(q=>q.slice(1));
-          }}
-        />
-      )}
-
-      {pendingGpxAmbiguous.length > 0 && (
-        <DateAmbiguousResolver
-          item={pendingGpxAmbiguous[0]}
-          description={`"${pendingGpxAmbiguous[0].file.name}" (${pendingGpxAmbiguous[0].date}) — mehrere Flüge an diesem Datum. Welchem soll die Hike-Route zugeordnet werden?`}
-          onClose={()=>setPendingGpxAmbiguous(q=>q.slice(1))}
-          onAssign={async (chosen) => {
-            const item = pendingGpxAmbiguous[0];
-            await attachGpxToFlight(chosen, item.points, item.name);
-            setPendingGpxAmbiguous(q=>q.slice(1));
-          }}
-        />
-      )}
-
-      {pendingGpxManual.length > 0 && (
-        <GpxManualMatchResolver
-          item={pendingGpxManual[0]}
-          flights={flights}
-          onSkip={()=>setPendingGpxManual(q=>q.slice(1))}
-          onAssign={async (chosen) => {
-            const item = pendingGpxManual[0];
-            await attachGpxToFlight(chosen, item.points, item.name);
-            setPendingGpxManual(q=>q.slice(1));
           }}
         />
       )}
@@ -5815,7 +5015,6 @@ function FlugbuchApp() {
       )}
       {bulkEditOpen && (() => {
         const chosenCount = selectedIds.size;
-        const hasHikeInSelection = flights.some(f => selectedIds.has(f.id) && f.hikeTrack?.length>1);
         const applyBulkEdit = async () => {
           const d = bulkEditData;
           let updated = flights.map(f => {
@@ -5831,11 +5030,6 @@ function FlugbuchApp() {
             if (d.passagier) cfPatch.passagier = d.passagier;
             if (d.typ) { cfPatch.typ = d.typ; cfPatch.typAuto = false; }
             if (d.reise) cfPatch.reise = d.reise==="__CLEAR__" ? "" : d.reise;
-            if (d.hikeStartpunkt) cfPatch.hikeStartpunkt = d.hikeStartpunkt;
-            if (d.hikeOrt) cfPatch.hikeOrt = d.hikeOrt;
-            if (d.hikeStarthoehe) cfPatch.hikeStarthoehe = d.hikeStarthoehe;
-            if (d.hikeDauer) cfPatch.hikeDauer = d.hikeDauer;
-            if (d.hikeZusatzValue) cfPatch.hikeZusatzValue = d.hikeZusatzValue;
             return { ...f, ...patch, customFields: { ...(f.customFields||{}), ...cfPatch } };
           });
           // A date change can shift where these flights (and everyone
@@ -5882,14 +5076,6 @@ function FlugbuchApp() {
                   {reisenNames.map(n => <option key={n} value={n} style={{background:"#14253a"}}>{n}</option>)}
                 </select>
               </div>
-              {hasHikeInSelection && (<>
-                <div style={{fontSize:10,fontWeight:700,color:"#4ade80",letterSpacing:1.5,textTransform:"uppercase",margin:"4px 0 10px"}}>🥾 Hike-Daten</div>
-                {field("Startpunkt", "hikeStartpunkt")}
-                {field("Ort", "hikeOrt")}
-                {field("Starthöhe", "hikeStarthoehe", { placeholder: "unverändert lassen (m)" })}
-                {field("Dauer", "hikeDauer")}
-                {field("Zusatz", "hikeZusatzValue")}
-              </>)}
               <div style={{marginBottom:12}}>
                 <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",marginBottom:6}}>Bewertung</div>
                 <div style={{display:"flex",gap:6}}>
