@@ -12,17 +12,16 @@ let profileZoomActive = false;
 function parseIGC(text) {
   const lines = text.split("\n");
   const track = [];
-  let date = "", pilot = "", glider = "", passagier = "", tzOffsetHours = null;
+  let date = "", pilot = "", glider = "", tzOffsetHours = null;
   for (const line of lines) {
     if (line.startsWith("HFDTE")) {
       const m = line.match(/HFDTE(?:DATE:)?(\d{2})(\d{2})(\d{2})/);
       if (m) date = `${m[1]}.${m[2]}.20${m[3]}`;
     }
     // Header records carry more than just the date — pilot name and glider
-    // type are standard IGC fields (every logger writes them), and CM2
-    // ("Crew 2") is the co-pilot/passenger seat on a tandem/biplace flight.
-    // Reading these means a fresh IGC import can fill in Pilot/Schirm/
-    // Passagier immediately instead of leaving them blank for manual entry.
+    // type are standard IGC fields (every logger writes them). Reading
+    // these means a fresh IGC import can fill in Pilot/Schirm immediately
+    // instead of leaving them blank for manual entry.
     if (line.startsWith("HFPLT")) {
       const m = line.match(/HFPLT(?:PILOTINCHARGE:|PILOT:)?(.+)/);
       if (m) pilot = m[1].trim();
@@ -30,10 +29,6 @@ function parseIGC(text) {
     if (line.startsWith("HFGTY")) {
       const m = line.match(/HFGTY(?:GLIDERTYPE:)?(.+)/);
       if (m) glider = m[1].trim();
-    }
-    if (line.startsWith("HFCM2")) {
-      const m = line.match(/HFCM2(?:CREW2:)?(.+)/);
-      if (m && m[1].trim() && !/^nil$/i.test(m[1].trim())) passagier = m[1].trim();
     }
     // B-record times are always UTC per the IGC spec — HFTZN is the
     // timezone the pilot's own device was set to for that flight, used to
@@ -70,7 +65,7 @@ function parseIGC(text) {
         track.push({ lat, lon, gpsAlt, timeSec: hh*3600+mm*60+ss });
     }
   }
-  return { track, date, pilot, glider, passagier, tzOffsetHours };
+  return { track, date, pilot, glider, tzOffsetHours };
 }
 
 // No HFTZN in the file: look up the real IANA timezone for the takeoff
@@ -1518,7 +1513,6 @@ const CSV_COLUMN_DEFS = [
   { key: "sinken", label: "Sinken", getter: "sinken" },
   { key: "steigen", label: "Steigen", getter: "steigen" },
   { key: "geraet", label: "Gerät", getter: "geraet" },
-  { key: "passagier", label: "Passagier", getter: "passagier" },
   { key: "datum2", label: "Datum2", getter: null },
   { key: "bemerkung", label: "Bemerkung", getter: "bemerkung" },
 ];
@@ -1556,7 +1550,6 @@ function flightToCsvValues(f) {
     sinken:   cf.maxSinken || "",
     steigen:  cf.maxSteigen || "",
     geraet:   f.glider || "",
-    passagier: cf.passagier || "",
     bemerkung: f.notes || "",
   };
 }
@@ -1646,7 +1639,7 @@ function parseCompactNumbersRow(cols) {
     sLat: s.lat, sLon: s.lon, lLat: l.lat, lLon: l.lon,
     dur: get(8), dk: get(11), kmh: get(12), hd: get(13),
     msa: get(14) || start.alt, ml: get(15) || land.alt, hm: get(16), hg: get(18),
-    ms: get(19), mst: get(20), ge: get(21), pa: get(22), be: get(24),
+    ms: get(19), mst: get(20), ge: get(21), be: get(24),
     _nr: get(0),
     _colCount: 53, // treat as valid — this is the compact 25-col format
   };
@@ -1709,7 +1702,7 @@ function parseSingleRow(rowText) {
     sLat: s.lat, sLon: s.lon, lLat: l.lat, lLon: l.lon,
     dur: get(34), dk: get(37), kmh: get(38), hd: get(39),
     msa: get(40), ml: get(41), hm: get(42), hg: get(44),
-    ms: get(45), mst: get(46), ge: get(47), pa: get(48), be: get(52),
+    ms: get(45), mst: get(46), ge: get(47), be: get(52),
     _nr: get(0),
     _colCount: cols.length,
   };
@@ -1756,7 +1749,7 @@ function createFlightFromPDF(nr, p) {
     comment:"", rating:0,
     notes: p.be||"",
     customFields: {
-      passagier: p.pa||"", landung: p.la||"",
+      landung: p.la||"",
       distKm: p.dk||"", kmh: p.kmh||"",
       hDiff: p.hd||"", hMax: p.hm||"", hGew: p.hg||"",
       maxSinken: p.ms||"", maxSteigen: p.mst||"",
@@ -1833,7 +1826,7 @@ function createFlightFromExcelRow(nr, row, rowNumber) {
     comment: "", rating: 0,
     notes: bemerkung || "",
     customFields: {
-      passagier: "", landung: landung || "",
+      landung: landung || "",
       distKm: totalDist ? String(totalDist) : "",
       hMax: maxAlt ? String(maxAlt) : "",
       maxSteigen: varioPlus != null ? String(varioPlus) : "",
@@ -2040,7 +2033,6 @@ function flightFieldValue(f, field){
     case "schirm": case "glider": case "gerät": case "geraet": return f.glider||"";
     case "typ": case "type": return cf.typ||"";
     case "pilot": return f.pilot||"";
-    case "passagier": case "pax": return cf.passagier||"";
     case "reise": return cf.reise||"";
     case "jahr": case "year": return f.year||"";
     case "datum": case "date": return f.date||"";
@@ -2073,13 +2065,6 @@ function evalToken(f, tok){
   let m=tok.match(/^([\wäöü]+)\s*(>=|<=|!=|≠|>|<|=|:)\s*(.+)$/i);
   if(m){
     const field=m[1].toLowerCase(), op=(m[2]==="≠"?"!=":m[2]), raw=m[3].trim().replace(/^"(.*)"$/, "$1");
-    // "passagier:*" (or pax:*) means "any passenger at all" — for finding
-    // biplace flights regardless of who the passenger was, rather than
-    // matching a specific name.
-    if((field==="passagier"||field==="pax") && raw==="*"){
-      const has = !!(f.customFields?.passagier||"").trim();
-      return op==="!=" ? !has : has;
-    }
     // igc:ja / igc:nein — presence of an imported IGC flight track, not a
     // value comparison. training:ja / training:nein likewise checks the
     // Excel "Training" flag (cf.training === "T"), not a text comparison.
@@ -2147,7 +2132,7 @@ function evalToken(f, tok){
     return fvStr.toLowerCase().includes(rawStr.toLowerCase());
   }
   // plain word => search across all text
-  const hay=[f.name,f.site,f.glider,f.pilot,f.customFields?.passagier,f.customFields?.landung,f.customFields?.reise,f.comment,f.notes,f.date,f.year].join(" ").toLowerCase();
+  const hay=[f.name,f.site,f.glider,f.pilot,f.customFields?.landung,f.customFields?.reise,f.comment,f.notes,f.date,f.year].join(" ").toLowerCase();
   return hay.includes(tok.toLowerCase());
 }
 // ── SORT ENGINE ──────────────────────────────────────────────────────────
@@ -2285,7 +2270,6 @@ const SECONDARY_VALUE_FOR_SORT = {
 };
 
 function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onToggleSelect, isWide }) {
-  const pax = f.customFields?.passagier;
   const showSortValue = sortId && sortId !== "date" && sortId !== "number";
   const secondaryId = SECONDARY_VALUE_FOR_SORT[sortId] || "duration";
   const secondaryText = formatSortValue(f, secondaryId);
@@ -2313,7 +2297,6 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
         <span style={{flexShrink:0,marginLeft:6,display:"flex",alignItems:"center",gap:4}}>
           {f.pdfOnly&&<span style={{background:"rgba(139,92,246,0.18)",color:"#c4b5fd",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700}}>CSV</span>}
           {f.track?.length>1&&<span style={{background:"rgba(34,197,94,0.22)",color:"#4ade80",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(74,222,128,0.5)"}}>IGC</span>}
-          {pax&&<span style={{border:"1px solid rgba(232,244,253,0.15)",borderRadius:20,padding:"1px 7px",fontSize:9,color:"rgba(232,244,253,0.5)"}}>👤 {pax}</span>}
         </span>
         <span style={{flex:1}} />
         <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
@@ -2342,7 +2325,6 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
           <span style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
             {f.pdfOnly&&<span style={{background:"rgba(139,92,246,0.18)",color:"#c4b5fd",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700}}>CSV</span>}
             {f.track?.length>1&&<span style={{background:"rgba(34,197,94,0.22)",color:"#4ade80",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(74,222,128,0.5)"}}>IGC</span>}
-            {pax&&<span style={{border:"1px solid rgba(232,244,253,0.15)",borderRadius:20,padding:"1px 7px",fontSize:9,color:"rgba(232,244,253,0.5)"}}>👤 {pax}</span>}
           </span>
         </div>
         <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",alignItems:"baseline",whiteSpace:"nowrap",overflow:"hidden"}}>
@@ -2594,7 +2576,7 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
                     </select>
                   ) : (
                   <input value={row.value==="*"?"":row.value} onChange={e=>updateRow(idx,{value:e.target.value})}
-                    placeholder={fieldDef?.anyOption ? "Name, oder \"beliebig\" →" : (row.op==="between" ? "von…" : "Wert…")}
+                    placeholder={row.op==="between" ? "von…" : "Wert…"}
                     disabled={row.value==="*"}
                     list={row.field==="glider" && knownGliders?.length ? "glider-datalist" : undefined}
                     style={{flex:1,minWidth:0,background:row.value==="*"?"rgba(255,255,255,0.03)":"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"5px 8px",color:"#e8f4fd",fontSize:12}} />
@@ -2602,13 +2584,6 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
                   {row.op==="between" && (
                     <input value={row.value2||""} onChange={e=>updateRow(idx,{value2:e.target.value})} placeholder="bis…"
                       style={{flex:1,minWidth:0,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"5px 8px",color:"#e8f4fd",fontSize:12}} />
-                  )}
-                  {fieldDef?.anyOption && (
-                    <button onClick={()=>updateRow(idx,{value: row.value==="*" ? "" : "*"})}
-                      title="Beliebiger Passagier (Biplace-Flüge)"
-                      style={{background:row.value==="*"?"rgba(125,211,252,0.25)":"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"5px 8px",color:row.value==="*"?"#7dd3fc":"rgba(232,244,253,0.6)",fontSize:11,fontWeight:700,cursor:"pointer",flexShrink:0,whiteSpace:"nowrap"}}>
-                      beliebig
-                    </button>
                   )}
                   <button onClick={()=>removeRow(idx)} style={{background:"none",border:"none",color:"rgba(232,244,253,0.35)",cursor:"pointer",fontSize:14,padding:"0 2px",flexShrink:0}}>✕</button>
                 </div>
@@ -3074,7 +3049,7 @@ function SchirmSelect({ value, onSave, extra }) {
 
 
 
-function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, setSelected, setView, setInlinePassagier, setEditData, saveFlight, showFieldEditor, setShowFieldEditor, handleSaveFields, confirmDelete, setConfirmDelete, hideBackButton, isWide, returnTo }) {
+function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, setSelected, setView, setEditData, saveFlight, showFieldEditor, setShowFieldEditor, handleSaveFields, confirmDelete, setConfirmDelete, hideBackButton, isWide, returnTo }) {
 
     const autoFields = customFieldDefs.filter(d=>d.formula).map(d=>({...d, value:evalFormula(d.formula,fl,flights)}));
     const manualFields = customFieldDefs.filter(d=>!d.formula);
@@ -3103,7 +3078,6 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
       const next = navList[flIdx + delta];
       if (!next) return;
       setSelected(next);
-      setInlinePassagier(next.customFields?.passagier || "");
     };
     const onTouchStart = (e) => {
       if (profileZoomActive || e.target.closest?.('[data-no-swipe]')) { touchStart.current = null; return; }
@@ -3130,9 +3104,8 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
       setFlights(p=>p.map(f=>f.id===upd.id?upd:f));
       setSelected(upd);
     };
-    // "Typ" auto-derived from Passagier (Biplace / Solo) but stays freely
-    // editable — customFields.typAuto tracks whether the current value is
-    // still the app's own computed one.
+    // "Typ" defaults to "GS" but stays freely editable — customFields.typAuto
+    // tracks whether the current value is still the app's own default one.
     // A manual edit via the InlineField below (which always sets
     // typAuto:false) permanently stops the auto-updates for that flight.
     // New/manually-entered flights (no recognizable CSV origin) and any
@@ -3140,12 +3113,11 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
     // is nothing meaningful to lose. A CSV-imported flight (pdfOnly) that
     // already carries a real Typ value from that import is different: that
     // value might be a deliberate, more specific category than this app's
-    // four buckets, so it's never silently overwritten — the person is
-    // asked once via a confirmation dialog, and either choice ("Automatisch"
-    // or "Beibehalten") is then remembered via typAuto for that flight.
+    // buckets, so it's never silently overwritten — the person is asked
+    // once via a confirmation dialog, and either choice ("Automatisch" or
+    // "Beibehalten") is then remembered via typAuto for that flight.
     useEffect(() => {
-      const hasPax = !!(fl.customFields?.passagier||"").trim();
-      const computed = hasPax ? "Biplace" : "Solo";
+      const computed = "GS";
       const cf = fl.customFields || {};
       if (cf.typAuto === false) return;
       if (cf.typ === computed) return;
@@ -3153,7 +3125,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
       const hasExistingCsvTyp = !!fl.pdfOnly && !!cf.typ;
       if (hasExistingCsvTyp) { setConfirmTypAuto(computed); }
       else { saveField({ customFields: { typ: computed, typAuto: true } }); }
-    }, [fl.id, fl.customFields?.passagier]);
+    }, [fl.id]);
     // Same as saveField, but for fields that feed into Dauer/H.Diff./Ø Speed
     // (start/end time, start/end altitude, distance). For manually-entered
     // flights with no IGC track — where these values aren't already derived
@@ -3555,10 +3527,10 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
           )}
 
           {/* Manual custom fields */}
-          {manualFields.filter(f=>!["passagier","landung","distKm","kmh","hDiff","msa","ml","hm","hGew","maxSinken","maxSteigen"].includes(f.id)).length>0&&(
+          {manualFields.filter(f=>!["landung","distKm","kmh","hDiff","msa","ml","hm","hGew","maxSinken","maxSteigen"].includes(f.id)).length>0&&(
             <div style={{background:"rgba(255,255,255,0.04)",borderRadius:14,padding:"13px 15px",marginBottom:11,border:"1px solid rgba(255,255,255,0.06)"}}>
               <div style={{fontSize:10,fontWeight:700,color:"rgba(232,244,253,0.4)",letterSpacing:1.5,textTransform:"uppercase",marginBottom:9}}>Eigene Felder</div>
-              {manualFields.filter(f=>!["passagier","landung","distKm","kmh","hDiff","msa","ml","hm","hGew","maxSinken","maxSteigen"].includes(f.id)).map(f=>(
+              {manualFields.filter(f=>!["landung","distKm","kmh","hDiff","msa","ml","hm","hGew","maxSinken","maxSteigen"].includes(f.id)).map(f=>(
                 <InlineField key={f.id} label={f.name} value={fl.customFields?.[f.id]||""} onSave={v=>saveField({customFields:{[f.id]:v}})} />
               ))}
             </div>
@@ -3653,7 +3625,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
               style={{background:"#14253a",borderRadius:16,padding:"20px 22px",maxWidth:320,width:"100%",border:"1px solid rgba(255,255,255,0.1)"}}>
               <div style={{fontSize:16,fontWeight:700,marginBottom:6}}>Typ automatisch führen?</div>
               <div style={{fontSize:13,color:"rgba(232,244,253,0.6)",marginBottom:18}}>
-                Dieser importierte Flug hat bereits einen Typ: „{fl.customFields?.typ}". Automatisch aus Passagier abgeleitet wäre: „{confirmTypAuto}". Soll der Typ ab jetzt automatisch anhand Passagier mitgeführt werden (aktueller Wert wird dabei ersetzt)? Diese Wahl gilt nur für diesen Flug und wird gemerkt.
+                Dieser importierte Flug hat bereits einen Typ: „{fl.customFields?.typ}". Automatischer Standard wäre: „{confirmTypAuto}". Soll der Typ ab jetzt automatisch mitgeführt werden (aktueller Wert wird dabei ersetzt)? Diese Wahl gilt nur für diesen Flug und wird gemerkt.
               </div>
               <div style={{display:"flex",gap:10}}>
                 <button onClick={()=>{ saveField({customFields:{typAuto:false}}); setConfirmTypAuto(null); }}
@@ -3879,9 +3851,8 @@ function FlugbuchApp() {
   // time via a picker rather than guessing which flight each belongs to.
   const [pendingDateAmbiguous, setPendingDateAmbiguous] = useState([]); // [{file, date, candidates}]
   const [editData, setEditData] = useState({});
-  const [customFieldDefs, setCustomFieldDefs] = useState([{id:"passagier",name:"Passagier",type:"text",formula:""}]);
+  const [customFieldDefs, setCustomFieldDefs] = useState([]);
   const [showFieldEditor, setShowFieldEditor] = useState(false);
-  const [inlinePassagier, setInlinePassagier] = useState("");
   const [filterText, setFilterTextRaw] = useState("");
   const [sortId, setSortIdRaw] = useState("number");
   const [sortDir, setSortDirRaw] = useState("desc");
@@ -4120,6 +4091,18 @@ function FlugbuchApp() {
           await Promise.all(toRepair.slice(i, i+BATCH).map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f)).catch(()=>{})));
         }
       }
+      // One-time repair: "Solo" (the app's old default/auto-derived Typ
+      // value for a flight with no Passagier) is renamed to "GS" — applies
+      // to every flight still carrying the old value, not just Excel-
+      // imported ones.
+      const soloFlights = sorted.filter(f => f.customFields?.typ === "Solo");
+      if (soloFlights.length) {
+        for (const f of soloFlights) f.customFields = { ...f.customFields, typ: "GS" };
+        const BATCH = 50;
+        for (let i = 0; i < soloFlights.length; i += BATCH) {
+          await Promise.all(soloFlights.slice(i, i+BATCH).map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f)).catch(()=>{})));
+        }
+      }
       // One-time migration: flights created directly from an IGC file
       // (before this fix) had the raw IGC filename as their Nummer
       // (name) — e.g. "2025-06-20-XXX-01" — instead of a plain sequential
@@ -4178,7 +4161,10 @@ function FlugbuchApp() {
       } catch {}
       try {
         const r = await window.storage.get("customFieldDefs");
-        if (r) { const s = JSON.parse(r.value); if (s.length) setCustomFieldDefs(s); }
+        if (r) {
+          const s = JSON.parse(r.value).filter(d => d.id !== "passagier");
+          if (s.length) setCustomFieldDefs(s);
+        }
       } catch {}
       // Only start flagging real changes once the initial load (flights +
       // customFieldDefs, above) has fully settled and re-rendered — a
@@ -4371,13 +4357,12 @@ function FlugbuchApp() {
       durationStr: "", durationSec: 0,
       totalDist: 0, maxAlt: 0, startAlt: 0, endAlt: 0,
       startPt: null, endPt: null, track: [],
-      customFields: { passagier:"", landung:"", typ:"Solo", typAuto:true },
+      customFields: { landung:"", typ:"GS", typAuto:true },
     };
     await saveFlight(newFlight);
     setFlights(prev => [newFlight, ...prev].sort((a,b)=>
       (parseInt((b.name||"").match(/\d+/)?.[0]||"0",10)) - (parseInt((a.name||"").match(/\d+/)?.[0]||"0",10))));
     setSelected(newFlight);
-    setInlinePassagier("");
     setView("detail");
   }, [flights, saveFlight]);
 
@@ -4423,7 +4408,6 @@ function FlugbuchApp() {
         endPt:   f.endPt   || (p.lLat&&p.lLon ? {lat:+p.lLat,lon:+p.lLon,gpsAlt:+(p.ml||0)}  : null),
         customFields: {
           ...(f.customFields||{}),
-          passagier: p.pa || f.customFields?.passagier || "",
           landung: p.la || f.customFields?.landung || "",
           distKm: p.dk || "", kmh: p.kmh || "",
           hDiff: p.hd || "", hMax: p.hm || "", hGew: p.hg || "",
@@ -4458,7 +4442,7 @@ function FlugbuchApp() {
     const allFlights = [...updatedFlights, ...newEntries]
       .sort((a,b)=>(parseInt((b.name||"").match(/\d+/)?.[0]||"0",10))-(parseInt((a.name||"").match(/\d+/)?.[0]||"0",10)));
     setFlights(allFlights);
-    if (selected) { const u=allFlights.find(f=>f.id===selected.id); if(u){setSelected(u);setInlinePassagier(u.customFields?.passagier||"");} }
+    if (selected) { const u=allFlights.find(f=>f.id===selected.id); if(u){setSelected(u);} }
     setPdfResult({ matched: updated+newEntries.length, created: newEntries.length, total: Object.keys(DATA).length });
   }, [flights, selected, saveFlight]);
 
@@ -4493,7 +4477,6 @@ function FlugbuchApp() {
     hmax: ["h.max", "hmax", "max höhe", "maxhöhe", "höhe max", "max altitude", "max alt"],
     hgew: ["h.gew", "hgew", "höhengewinn", "gewinn", "altitude gain"],
     geraet: ["gerät", "geraet", "schirm", "glider", "wing"],
-    passagier: ["passagier", "passenger", "biplace", "passagiere"],
     bemerkung: ["bemerkung", "notiz", "notizen", "comment", "comments", "remarks", "notes"],
     typ: ["typ", "type", "schirmtyp", "kategorie", "category"],
   };
@@ -4531,7 +4514,7 @@ function FlugbuchApp() {
       sLat: s.lat, sLon: s.lon, lLat: l.lat, lLon: l.lon,
       dur: get("dauer"), dk: get("distanz"), kmh: get("kmh"), hd: get("hdiff"),
       msa: get("maxsteigen"), ml: get("maxsinken"), hm: get("hmax"), hg: get("hgew"),
-      ge: get("geraet"), pa: get("passagier"), be: get("bemerkung"), ty: get("typ"),
+      ge: get("geraet"), be: get("bemerkung"), ty: get("typ"),
       _nr: get("nr"),
     };
   };
@@ -4714,10 +4697,9 @@ function FlugbuchApp() {
 
   // Applies parsed IGC data onto an existing flight (shared by both the
   // filename-match and the date-match paths, so they stay in sync).
-  const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, passagier, igcData, igcFilename) => {
+  const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, igcData, igcFilename) => {
     const cf = { ...(existing.customFields||{}) };
     if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) cf.hGew = String(igcData.totalGain);
-    if (!(cf.passagier||"").trim() && passagier) cf.passagier = passagier;
     if (igcData.hDiff) cf.hDiff = String(igcData.hDiff);
     if (!(cf.maxSteigen||"").trim() && igcData.maxClimb) cf.maxSteigen = String(igcData.maxClimb);
     if (!(cf.maxSteigen20||"").trim() && igcData.maxClimb20) cf.maxSteigen20 = String(igcData.maxClimb20);
@@ -4770,7 +4752,7 @@ function FlugbuchApp() {
     for (let i=0; i<igcFiles.length; i++) {
       const file = igcFiles[i];
       const text = await file.text();
-      const { track, date, pilot, glider, passagier, tzOffsetHours } = parseIGC(text);
+      const { track, date, pilot, glider, tzOffsetHours } = parseIGC(text);
       const igcData = analyzeIGC(track, tzOffsetHours, date);
       const baseName = file.name.replace(/\.igc$/i,"");
       // Matched via the stored igcFilename (Detail-only field), not the
@@ -4788,7 +4770,7 @@ function FlugbuchApp() {
         // cleared) never got a chance to be recalculated. Now it fills in
         // anything currently blank, without touching values that are
         // already set (manually or from a previous import).
-        await attachIgcToFlight(existing, track, date, pilot, glider, passagier, igcData, baseName);
+        await attachIgcToFlight(existing, track, date, pilot, glider, igcData, baseName);
         updatedCount++;
       } else {
         // No filename match — try matching by date instead, but only
@@ -4797,11 +4779,11 @@ function FlugbuchApp() {
         // silently overwritten just because the date happens to match).
         const dateCandidates = flights.filter(f => f.date===dateStr && (!f.track || f.track.length<=1));
         if (dateCandidates.length === 1) {
-          await attachIgcToFlight(dateCandidates[0], track, date, pilot, glider, passagier, igcData, baseName);
+          await attachIgcToFlight(dateCandidates[0], track, date, pilot, glider, igcData, baseName);
           updatedCount++;
         } else if (dateCandidates.length > 1) {
           // Ambiguous — don't guess. Resolved via a picker after this loop.
-          dateAmbiguous.push({ file, date: dateStr, track, pilot, glider, passagier, igcData, candidates: dateCandidates, baseName });
+          dateAmbiguous.push({ file, date: dateStr, track, pilot, glider, igcData, candidates: dateCandidates, baseName });
         } else {
           // Fresh flight, nothing to preserve — Distanz/Speed simply use
           // whatever computeDistanceSpeedBackfill derives from this IGC
@@ -4814,7 +4796,7 @@ function FlugbuchApp() {
           const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr), pdfOnly:false,
             date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:"",glider:glider||"",
             startTime:"", endTime:"", comment:"", rating:0, notes:"", track,
-            customFields:{passagier:passagier||"",landung:"",igcFilename:baseName,
+            customFields:{landung:"",igcFilename:baseName,
               hGew: igcData.totalGain ? String(igcData.totalGain) : "",
               hDiff: igcData.hDiff ? String(igcData.hDiff) : "",
               maxSteigen: igcData.maxClimb ? String(igcData.maxClimb) : "",
@@ -4867,11 +4849,11 @@ function FlugbuchApp() {
     return (
       <div style={{display:"flex",height:"100vh",overflow:"hidden",background:"#040e20"}}>
         <SidebarList flights={filterText.trim() ? filteredFlights : flights} selectedId={selected.id} longestId={longestId}
-          onSelect={f=>{setSelected(f);setInlinePassagier(f.customFields?.passagier||"");}} />
+          onSelect={f=>{setSelected(f);}} />
         <div style={{flex:1,minWidth:0,height:"100vh",overflowY:"auto"}}>
           <DetailContent fl={enrichedSelected} flights={flightsWithRanks} navFlights={filterText.trim() ? filteredFlights : flightsWithRanks} customFieldDefs={customFieldDefs}
             setFlights={setFlights} setSelected={setSelected} setView={setView}
-            setInlinePassagier={setInlinePassagier} setEditData={setEditData}
+            setEditData={setEditData}
             saveFlight={saveFlight} showFieldEditor={showFieldEditor} setShowFieldEditor={setShowFieldEditor}
             handleSaveFields={handleSaveFields} confirmDelete={confirmDelete} setConfirmDelete={setConfirmDelete}
             returnTo={returnTo}
@@ -4883,7 +4865,7 @@ function FlugbuchApp() {
   if (view==="detail" && selected) {
     return <DetailContent fl={enrichedSelected} flights={flightsWithRanks} navFlights={filterText.trim() ? filteredFlights : flightsWithRanks} customFieldDefs={customFieldDefs}
       setFlights={setFlights} setSelected={setSelected} setView={setView}
-      setInlinePassagier={setInlinePassagier} setEditData={setEditData}
+      setEditData={setEditData}
       saveFlight={saveFlight} showFieldEditor={showFieldEditor} setShowFieldEditor={setShowFieldEditor}
       handleSaveFields={handleSaveFields} confirmDelete={confirmDelete} setConfirmDelete={setConfirmDelete}
       returnTo={returnTo}
@@ -4926,7 +4908,7 @@ function FlugbuchApp() {
             <textarea value={editData.notes||""} onChange={e=>setEditData(d=>({...d,notes:e.target.value}))} rows={2}
               style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px 13px",color:"#e8f4fd",fontSize:13,resize:"vertical",boxSizing:"border-box"}} />
           </div>
-          {manualFields.filter(f=>f.id!=="passagier").length>0&&manualFields.filter(f=>f.id!=="passagier").map(f=>(
+          {manualFields.length>0&&manualFields.map(f=>(
             <div key={f.id} style={{marginBottom:12}}>
               <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",marginBottom:4}}>{f.name}</div>
               <input value={editData.customFields?.[f.id]||""} onChange={e=>setEditData(d=>({...d,customFields:{...(d.customFields||{}),[f.id]:e.target.value}}))} type={f.type==="number"?"number":f.type==="date"?"date":"text"}
@@ -5109,7 +5091,7 @@ function FlugbuchApp() {
           onClose={()=>setPendingDateAmbiguous(q=>q.slice(1))}
           onAssign={async (chosen) => {
             const item = pendingDateAmbiguous[0];
-            await attachIgcToFlight(chosen, item.track, item.date, item.pilot, item.glider, item.passagier, item.igcData, item.baseName);
+            await attachIgcToFlight(chosen, item.track, item.date, item.pilot, item.glider, item.igcData, item.baseName);
             // Remove the just-assigned flight from every remaining item's
             // candidate list — otherwise a second IGC file for the same
             // date could still be assigned to the same flight, silently
@@ -5132,7 +5114,7 @@ function FlugbuchApp() {
             const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr+1), pdfOnly:false,
               date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:"",glider:item.glider||"",
               startTime:"", endTime:"", comment:"", rating:0, notes:"", track:item.track,
-              customFields:{passagier:item.passagier||"",landung:"",igcFilename:baseName,
+              customFields:{landung:"",igcFilename:baseName,
                 hGew: item.igcData.totalGain ? String(item.igcData.totalGain) : "",
                 hDiff: item.igcData.hDiff ? String(item.igcData.hDiff) : "",
                 maxSteigen: item.igcData.maxClimb ? String(item.igcData.maxClimb) : "",
@@ -5204,7 +5186,7 @@ function FlugbuchApp() {
               ) : (
                 <div style={{overflowY:"auto",flex:1,marginBottom:14,border:"1px solid rgba(255,255,255,0.08)",borderRadius:10}}>
                   {affected.map(f => (
-                    <div key={f.id} onClick={()=>{setSelected(f);setInlinePassagier(f.customFields?.passagier||"");setView("detail");setShowMissingTracks(false);}}
+                    <div key={f.id} onClick={()=>{setSelected(f);setView("detail");setShowMissingTracks(false);}}
                       style={{padding:"9px 12px",borderBottom:"1px solid rgba(255,255,255,0.05)",cursor:"pointer",fontSize:12}}>
                       <div style={{display:"flex",justifyContent:"space-between"}}>
                         <span style={{fontWeight:700,color:"#e8f4fd"}}>Nr. {f.name}</span>
@@ -5356,7 +5338,6 @@ function FlugbuchApp() {
             if (d.notes) patch.notes = d.notes;
             const cfPatch = {};
             if (d.landung) cfPatch.landung = d.landung;
-            if (d.passagier) cfPatch.passagier = d.passagier;
             if (d.typ) { cfPatch.typ = d.typ; cfPatch.typAuto = false; }
             if (d.reise) cfPatch.reise = d.reise==="__CLEAR__" ? "" : d.reise;
             return { ...f, ...patch, customFields: { ...(f.customFields||{}), ...cfPatch } };
@@ -5395,7 +5376,6 @@ function FlugbuchApp() {
               {field("Landeplatz", "landung")}
               {field("Schirm", "glider")}
               {field("Typ", "typ")}
-              {field("Passagier", "passagier")}
               <div style={{marginBottom:12}}>
                 <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",marginBottom:4}}>Reise</div>
                 <select value={bulkEditData.reise||""} onChange={e=>setBulkEditData(d=>({...d,reise:e.target.value}))}
@@ -5617,7 +5597,7 @@ function FlugbuchApp() {
                   });
                   setRowImportText(""); setRowImportError(""); setShowRowImport(false);
                   if (newFlights.length === 1) {
-                    setSelected(newFlights[0]); setInlinePassagier(newFlights[0].customFields?.passagier||""); setView("detail");
+                    setSelected(newFlights[0]); setView("detail");
                   }
                 } catch(e) { setRowImportError("Fehler beim Verarbeiten: "+e.message); }
               }}
@@ -5650,7 +5630,7 @@ function FlugbuchApp() {
           <FlightRow key={f.id} f={f} isLongest={f.id===longestId} sortId={sortId} isWide={isWide}
             selectMode={selectMode} isSelected={selectedIds.has(f.id)}
             onToggleSelect={id=>setSelectedIds(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;})}
-            onClick={()=>{setSelected(f);setInlinePassagier(f.customFields?.passagier||"");setView("detail");}} />
+            onClick={()=>{setSelected(f);setView("detail");}} />
         ))}
       </div>
       {showFieldEditor&&<FieldEditor customFieldDefs={customFieldDefs} onSave={handleSaveFields} onClose={()=>setShowFieldEditor(false)} />}
