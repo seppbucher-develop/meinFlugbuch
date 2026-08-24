@@ -188,8 +188,12 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   // for manual entry, and Ø Speed only gets filled in once that manual
   // distance exists (via saveComputedField, same as for any other flight).
   const hDiff = Math.abs(startAlt - endAlt);
+  // Analog XContest „Freier Streckenflug" (bis zu 3 Wendepunkte) — siehe
+  // computeOpenDistanceKm weiter unten in dieser Datei (Funktionsdeklara-
+  // tionen werden gehoisted, daher hier bereits aufrufbar).
+  const scoreDistanceKm = computeOpenDistanceKm(track);
   return { maxAlt, minAlt, startAlt, endAlt, startPt, endPt, durationSec, durationStr, startTime, endTime,
-    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, totalGain: Math.round(totalGain), hDiff };
+    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm };
 }
 
 // ── FlightMap ──────────────────────────────────────────────────────────────
@@ -1872,6 +1876,122 @@ function createFlightFromExcelRow(nr, row, rowNumber) {
 function getDisplayDistance(fl) {
   if (fl?.totalDist) return String(fl.totalDist);
   return fl?.customFields?.distKm || fl?.customFields?.dk || "";
+}
+// ── OPEN-DISTANCE-BEWERTUNG (analog XContest „Freier Streckenflug", bis zu
+// 3 Wendepunkte) ────────────────────────────────────────────────────────
+// Approximiert XContest's Freiflug-Wertung: findet bis zu 5 Punkte entlang
+// des Tracks (chronologisch geordnet — Start, bis zu 3 Wendepunkte, Ziel),
+// die die Summe der Luftlinien-Distanzen zwischen ihnen maximieren. Das ist
+// KEINE bit-genaue Nachbildung von XContest's eigener Wertungs-Engine
+// (die zusätzliche Validierungs-/Sperrzonen-Regeln kennt), sondern eine
+// praxistaugliche Annäherung — gut genug, um Distanz/Ø Speed automatisch
+// zu befüllen, wenn noch kein manuell erfasster XContest-Wert vorliegt.
+//
+// Jede der 5^n möglichen Punktkombinationen auf einem mehrtausend-Punkte-
+// Track durchzuprobieren ist praktisch unmöglich (O(n^5)) — stattdessen
+// wird der Track zunächst vereinfacht (Douglas-Peucker) auf eine deutlich
+// kleinere Kandidatenmenge, die die grobe Form noch gut abbildet. Ein
+// dynamisches Programm findet dann den optimalen Pfad mit bis zu 4
+// Teilstrecken (= bis zu 5 Punkten) durch diese reduzierte Menge in O(k²)
+// Zeit — trivial selbst für einige hundert Kandidaten.
+function simplifyTrackDP(track, epsilonKm) {
+  if (track.length <= 2) return track;
+  // Lokale, ebene (äquirechteckige) Projektion um Referenzpunkt `ref` —
+  // für die Ausdehnung eines einzelnen Flugs (wenige bis niedrige
+  // Hunderte km) genau genug für die Abstandsberechnung Punkt-zu-Gerade.
+  const toXY = (pt, ref) => {
+    const R = 6371;
+    const x = (pt.lon - ref.lon) * Math.PI/180 * R * Math.cos(ref.lat*Math.PI/180);
+    const y = (pt.lat - ref.lat) * Math.PI/180 * R;
+    return { x, y };
+  };
+  const perpDistKm = (p, a, b) => {
+    const P = toXY(p, a), A = { x: 0, y: 0 }, B = toXY(b, a);
+    const dx = B.x-A.x, dy = B.y-A.y;
+    const len2 = dx*dx + dy*dy;
+    if (len2 === 0) return Math.hypot(P.x-A.x, P.y-A.y);
+    const t = Math.max(0, Math.min(1, ((P.x-A.x)*dx + (P.y-A.y)*dy) / len2));
+    return Math.hypot(P.x-(A.x+t*dx), P.y-(A.y+t*dy));
+  };
+  const keep = new Array(track.length).fill(false);
+  keep[0] = true; keep[track.length-1] = true;
+  const stack = [[0, track.length-1]];
+  while (stack.length) {
+    const [start, end] = stack.pop();
+    if (end - start < 2) continue;
+    let maxDist = -1, maxIdx = -1;
+    for (let i = start+1; i < end; i++) {
+      const d = perpDistKm(track[i], track[start], track[end]);
+      if (d > maxDist) { maxDist = d; maxIdx = i; }
+    }
+    if (maxDist > epsilonKm) {
+      keep[maxIdx] = true;
+      stack.push([start, maxIdx]);
+      stack.push([maxIdx, end]);
+    }
+  }
+  return track.filter((_, i) => keep[i]);
+}
+function computeOpenDistanceKm(track) {
+  if (!track || track.length < 2) return null;
+  // epsilon schrittweise vergröbern, bis die Kandidatenmenge für das O(k²)
+  // DP unten handlich bleibt — bei sehr langen/verwinkelten Tracks selten
+  // nötig, aber als Sicherheitsnetz gegen Ausreisser wichtig.
+  let epsilon = 0.05; // km
+  let candidates = simplifyTrackDP(track, epsilon);
+  let tries = 0;
+  while (candidates.length > 400 && tries < 8) {
+    epsilon *= 1.8;
+    candidates = simplifyTrackDP(track, epsilon);
+    tries++;
+  }
+  if (candidates.length > 600) {
+    const stride = Math.ceil(candidates.length / 600);
+    candidates = candidates.filter((_, i) => i % stride === 0 || i === candidates.length-1);
+  }
+  const k = candidates.length;
+  if (k < 2) return null;
+  const dist = (i, j) => haversineDistKm(candidates[i], candidates[j]) || 0;
+
+  const MAX_LEGS = 4; // bis zu 3 Wendepunkte = bis zu 4 Teilstrecken
+  // best[L][i] = beste Gesamtdistanz eines Pfads mit genau L Teilstrecken,
+  // endend bei Kandidat i (Punkte müssen in chronologischer Reihenfolge
+  // verwendet werden — DP läuft daher nur über j<i).
+  const best = Array.from({ length: MAX_LEGS+1 }, () => new Float64Array(k).fill(-Infinity));
+  for (let i = 0; i < k; i++) best[0][i] = 0; // 0 Teilstrecken: nur der Startpunkt selbst
+  let overallBest = 0;
+  for (let L = 1; L <= MAX_LEGS; L++) {
+    for (let i = 0; i < k; i++) {
+      let localBest = -Infinity;
+      for (let j = 0; j < i; j++) {
+        if (best[L-1][j] === -Infinity) continue;
+        const cand = best[L-1][j] + dist(j, i);
+        if (cand > localBest) localBest = cand;
+      }
+      best[L][i] = localBest;
+      if (localBest > overallBest) overallBest = localBest;
+    }
+  }
+  return +overallBest.toFixed(1);
+}
+// Entscheidet, was (falls überhaupt) bei Distanz/Ø Speed nachgetragen
+// werden soll — überschreibt nie bereits vorhandene Werte. Wird sowohl
+// beim IGC-Import (neu berechneter scoreDistanceKm) als auch beim
+// nachträglichen Batch-Lauf über bestehende Flüge verwendet.
+function computeDistanceSpeedBackfill(existingTotalDist, cf, scoreDistanceKm, durationSec) {
+  const hasDist = (existingTotalDist > 0) || !!(cf?.distKm||"").trim();
+  let distKm = hasDist ? (existingTotalDist || parseFloat(cf?.distKm) || 0) : null;
+  const result = {};
+  if (!hasDist && scoreDistanceKm != null && scoreDistanceKm > 0) {
+    distKm = scoreDistanceKm;
+    result.totalDist = scoreDistanceKm;
+    result.distKm = String(scoreDistanceKm);
+  }
+  const hasSpeed = !!(cf?.kmh||"").trim();
+  if (!hasSpeed && distKm && durationSec > 0) {
+    result.kmh = String(+(distKm / (durationSec/3600)).toFixed(1));
+  }
+  return result; // { totalDist?, distKm?, kmh? } — nur gesetzte Keys sind neu
 }
 function haversineDistKm(a, b) {
   if (!a || !b || a.lat == null || b.lat == null) return null;
@@ -3901,6 +4021,13 @@ function FlugbuchApp() {
   const [excelDragOver, setExcelDragOver] = useState(false);
   const [importingExcel, setImportingExcel] = useState(false);
   const [excelResult, setExcelResult] = useState(null);
+  // Einmaliger Nachlauf: berechnet Distanz (analog XContest, bis zu 3
+  // Wendepunkte) und Ø Speed für alle bereits im Flugbuch stehenden Flüge
+  // mit IGC-Track, bei denen eines der beiden Felder noch leer ist. Läuft
+  // zusätzlich automatisch bei jedem künftigen IGC-Import mit (siehe
+  // attachIgcToFlight/computeDistanceSpeedBackfill).
+  const [backfillRunning, setBackfillRunning] = useState(false);
+  const [backfillResult, setBackfillResult] = useState(null);
   // Backup-Hinweis: zeigt einen Punkt am 💾-Button, sobald sich Flüge oder
   // Feld-Definitionen seit dem letzten Backup geändert haben. Persistiert
   // über window.storage, damit der Hinweis auch nach einem Neustart der
@@ -4476,6 +4603,46 @@ function FlugbuchApp() {
     }
   }, [flights, saveFlight]);
 
+  // Einmaliger Nachlauf über alle Flüge, die bereits einen IGC-Track haben
+  // (unabhängig davon, wann/wie der importiert wurde) — trägt Distanz
+  // (analog XContest) und Ø Speed nach, aber nur wo eines der Felder noch
+  // leer ist. Ein kurzer Zwischen-Yield alle paar Flüge hält die UI
+  // responsiv, da die Distanzberechnung selbst pro Flug spürbar CPU-Zeit
+  // braucht (Douglas-Peucker + O(k²)-DP über den ganzen Track).
+  const backfillDistanceSpeed = useCallback(async () => {
+    setBackfillRunning(true);
+    setBackfillResult(null);
+    let updatedCount = 0, skipped = 0, noTrack = 0, n = 0;
+    const updates = [];
+    for (const f of flights) {
+      if (!(f.track && f.track.length > 1)) { noTrack++; continue; }
+      const cf = f.customFields || {};
+      const hasDist = (f.totalDist > 0) || !!(cf.distKm||"").trim();
+      const hasSpeed = !!(cf.kmh||"").trim();
+      if (hasDist && hasSpeed) { skipped++; continue; }
+      const scoreDistanceKm = computeOpenDistanceKm(f.track);
+      const backfill = computeDistanceSpeedBackfill(f.totalDist, cf, scoreDistanceKm, f.durationSec);
+      if (backfill.distKm == null && backfill.kmh == null) { skipped++; continue; }
+      const newCf = { ...cf };
+      if (backfill.distKm != null) newCf.distKm = backfill.distKm;
+      if (backfill.kmh != null) newCf.kmh = backfill.kmh;
+      updates.push({ ...f, customFields: newCf, totalDist: backfill.totalDist != null ? backfill.totalDist : f.totalDist });
+      updatedCount++;
+      n++;
+      if (n % 15 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+    const BATCH = 25;
+    for (let i = 0; i < updates.length; i += BATCH) {
+      await Promise.all(updates.slice(i, i+BATCH).map(f => saveFlight(f).catch(()=>{})));
+    }
+    if (updates.length) {
+      const byId = new Map(updates.map(f => [f.id, f]));
+      setFlights(prev => prev.map(f => byId.get(f.id) || f));
+    }
+    setBackfillResult({ updated: updatedCount, skipped, noTrack });
+    setBackfillRunning(false);
+  }, [flights, saveFlight]);
+
   const doImport = useCallback(async (igcFiles) => {
     if (!igcFiles.length) return;
     setImporting(true); setImportProgress({done:0,total:igcFiles.length});
@@ -4505,6 +4672,12 @@ function FlugbuchApp() {
     if (!(cf.maxSteigen||"").trim() && igcData.maxClimb) cf.maxSteigen = String(igcData.maxClimb);
     if (!(cf.maxSteigen20||"").trim() && igcData.maxClimb20) cf.maxSteigen20 = String(igcData.maxClimb20);
     if (!(cf.maxSinken||"").trim() && igcData.maxSinkRate) cf.maxSinken = String(igcData.maxSinkRate);
+    // Distanz (analog XContest, bis zu 3 Wendepunkte) und Ø Speed nur
+    // nachtragen, wenn beide Felder noch leer sind — ein bereits erfasster
+    // (z.B. manuell von XContest übernommener) Wert wird nie überschrieben.
+    const backfill = computeDistanceSpeedBackfill(existing.totalDist, cf, igcData.scoreDistanceKm, igcData.durationSec || existing.durationSec);
+    if (backfill.distKm != null) cf.distKm = backfill.distKm;
+    if (backfill.kmh != null) cf.kmh = backfill.kmh;
     const updated = {
       ...existing, track, customFields: cf,
       pilot: (existing.pilot||"").trim() ? existing.pilot : (pilot||existing.pilot),
@@ -4519,6 +4692,7 @@ function FlugbuchApp() {
       durationStr: igcData.durationStr || existing.durationStr,
       startTime: (existing.startTime||"").trim() ? existing.startTime : igcData.startTime,
       endTime: (existing.endTime||"").trim() ? existing.endTime : igcData.endTime,
+      totalDist: backfill.totalDist != null ? backfill.totalDist : existing.totalDist,
     };
     await saveFlight(updated);
     setFlights(prev=>prev.map(f=>f.id===updated.id?updated:f));
@@ -4562,6 +4736,11 @@ function FlugbuchApp() {
           // Ambiguous — don't guess. Resolved via a picker after this loop.
           dateAmbiguous.push({ file, date: dateStr, track, pilot, glider, passagier, igcData, candidates: dateCandidates });
         } else {
+          // Fresh flight, nothing to preserve — Distanz/Speed simply use
+          // whatever computeDistanceSpeedBackfill derives from this IGC
+          // file directly (existingTotalDist=0, cf={} → both count as
+          // "empty").
+          const backfill = computeDistanceSpeedBackfill(0, {}, igcData.scoreDistanceKm, igcData.durationSec);
           const newF = { id:`igc_${baseName}_${Date.now()}`, name:baseName, pdfOnly:false,
             date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:"",glider:glider||"",
             startTime:"", endTime:"", comment:"", rating:0, notes:"",
@@ -4570,8 +4749,10 @@ function FlugbuchApp() {
               hDiff: igcData.hDiff ? String(igcData.hDiff) : "",
               maxSteigen: igcData.maxClimb ? String(igcData.maxClimb) : "",
               maxSteigen20: igcData.maxClimb20 ? String(igcData.maxClimb20) : "",
-              maxSinken: igcData.maxSinkRate ? String(igcData.maxSinkRate) : ""},
-            ...igcData, startPt:igcData.startPt, endPt:igcData.endPt };
+              maxSinken: igcData.maxSinkRate ? String(igcData.maxSinkRate) : "",
+              distKm: backfill.distKm || "", kmh: backfill.kmh || ""},
+            ...igcData, startPt:igcData.startPt, endPt:igcData.endPt,
+            totalDist: backfill.totalDist || 0 };
           await saveFlight(newF);
           newFlights.push(newF);
         }
@@ -4873,6 +5054,7 @@ function FlugbuchApp() {
             const dateParts = item.date.split(".");
             let yr="", mo="";
             if (dateParts.length===3) { yr=dateParts[2]; mo=dateParts[1]; }
+            const backfill = computeDistanceSpeedBackfill(0, {}, item.igcData.scoreDistanceKm, item.igcData.durationSec);
             const newF = { id:`igc_${baseName}_${Date.now()}`, name:baseName, pdfOnly:false,
               date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:"",glider:item.glider||"",
               startTime:"", endTime:"", comment:"", rating:0, notes:"",
@@ -4881,8 +5063,10 @@ function FlugbuchApp() {
                 hDiff: item.igcData.hDiff ? String(item.igcData.hDiff) : "",
                 maxSteigen: item.igcData.maxClimb ? String(item.igcData.maxClimb) : "",
                 maxSteigen20: item.igcData.maxClimb20 ? String(item.igcData.maxClimb20) : "",
-                maxSinken: item.igcData.maxSinkRate ? String(item.igcData.maxSinkRate) : ""},
-              ...item.igcData, startPt:item.igcData.startPt, endPt:item.igcData.endPt };
+                maxSinken: item.igcData.maxSinkRate ? String(item.igcData.maxSinkRate) : "",
+                distKm: backfill.distKm || "", kmh: backfill.kmh || ""},
+              ...item.igcData, startPt:item.igcData.startPt, endPt:item.igcData.endPt,
+              totalDist: backfill.totalDist || 0 };
             await saveFlight(newF);
             setFlights(prev=>[newF,...prev]);
             setPendingDateAmbiguous(q=>q.slice(1));
@@ -4891,15 +5075,30 @@ function FlugbuchApp() {
       )}
 
       {showBackupMenu && (
-        <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,padding:10,display:"flex",gap:8}}>
-          <button onClick={exportBackup}
-            style={{flex:1,background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 6px",color:"rgba(232,244,253,0.8)",fontSize:12,cursor:"pointer",textAlign:"center"}}>
-            ☁️ Backup sichern
+        <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+          <div style={{display:"flex",gap:8}}>
+            <button onClick={exportBackup}
+              style={{flex:1,background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 6px",color:"rgba(232,244,253,0.8)",fontSize:12,cursor:"pointer",textAlign:"center"}}>
+              ☁️ Backup sichern
+            </button>
+            <button onClick={()=>backupFileRef.current?.click()}
+              style={{flex:1,background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 6px",color:"rgba(232,244,253,0.8)",fontSize:12,cursor:"pointer",textAlign:"center"}}>
+              ⬆ Backup importieren
+            </button>
+          </div>
+          <button onClick={backfillDistanceSpeed} disabled={backfillRunning}
+            title="Berechnet Distanz (analog XContest, bis zu 3 Wendepunkte) und Ø Speed für alle Flüge mit IGC-Track, bei denen eines der Felder noch leer ist."
+            style={{background:"rgba(125,211,252,0.1)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:8,padding:"8px 6px",color:"#7dd3fc",fontSize:12,cursor:backfillRunning?"default":"pointer",textAlign:"center"}}>
+            {backfillRunning ? "⏳ Berechne…" : "📐 Distanz/Speed berechnen (alle IGC-Flüge)"}
           </button>
-          <button onClick={()=>backupFileRef.current?.click()}
-            style={{flex:1,background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 6px",color:"rgba(232,244,253,0.8)",fontSize:12,cursor:"pointer",textAlign:"center"}}>
-            ⬆ Backup importieren
-          </button>
+        </div>
+      )}
+      {backfillResult && (
+        <div style={{margin:"8px 16px 0",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:12,color:"#7dd3fc"}}>
+            ✅ {backfillResult.updated} Flüge ergänzt · {backfillResult.skipped} bereits vollständig · {backfillResult.noTrack} ohne IGC-Track
+          </span>
+          <button onClick={()=>setBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
 
