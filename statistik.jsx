@@ -101,6 +101,39 @@ function StatistikApp() {
   const [landeplatzF, setLandeplatzF] = React.useState(new Set());
   const [landF, setLandF] = React.useState(new Set());
   const [trainingF, setTrainingF] = React.useState("alle");
+  // Restauriert die zuletzt verwendeten Filter beim Öffnen der Seite —
+  // statistik.html ist eine eigene Seite (volle Navigation, kein
+  // client-seitiges Routing), daher setzt React-State bei jedem Aufruf
+  // sonst wieder auf die Standardwerte zurück. settingsLoaded verhindert,
+  // dass der Persistierungs-Effekt unten die gerade erst geladenen
+  // Filter sofort wieder mit den (noch leeren) Default-Werten überschreibt.
+  const [settingsLoaded, setSettingsLoaded] = React.useState(false);
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("statistikFilters");
+        if (r && r.value) {
+          const s = JSON.parse(r.value);
+          if (Array.isArray(s.typ)) setTypF(new Set(s.typ));
+          if (Array.isArray(s.reise)) setReiseF(new Set(s.reise));
+          if (Array.isArray(s.schirm)) setSchirmF(new Set(s.schirm));
+          if (Array.isArray(s.landeplatz)) setLandeplatzF(new Set(s.landeplatz));
+          if (Array.isArray(s.land)) setLandF(new Set(s.land));
+          if (s.training) setTrainingF(s.training);
+        }
+      } catch (e) { /* noch nichts gespeichert, oder Storage nicht verfügbar */ }
+      setSettingsLoaded(true);
+    })();
+  }, []);
+  React.useEffect(() => {
+    if (!settingsLoaded) return; // nicht speichern, bevor das Laden fertig ist
+    try {
+      window.storage.set("statistikFilters", JSON.stringify({
+        typ: [...typF], reise: [...reiseF], schirm: [...schirmF],
+        landeplatz: [...landeplatzF], land: [...landF], training: trainingF,
+      }));
+    } catch (e) {}
+  }, [settingsLoaded, typF, reiseF, schirmF, landeplatzF, landF, trainingF]);
 
   const all = flights || [];
 
