@@ -59,7 +59,7 @@ function parseDateToTs(d) {
   return p.length === 3 ? new Date(+p[2], +p[1] - 1, +p[0]).getTime() : 0;
 }
 
-function EntryForm({ initial, onSave, onCancel }) {
+function EntryForm({ initial, onSave, onCancel, onDelete }) {
   const [data, setData] = React.useState(initial || {});
   const set = (id, v) => setData(d => ({ ...d, [id]: v }));
   return (
@@ -78,6 +78,12 @@ function EntryForm({ initial, onSave, onCancel }) {
               style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 14 }} />
           </div>
         ))}
+        {initial?.id && (
+          <button onClick={() => onDelete(initial.id)}
+            style={{ width: "100%", background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 10, padding: "9px", color: "#f87171", fontSize: 13, cursor: "pointer", marginBottom: 12 }}>
+            🗑 Eintrag löschen
+          </button>
+        )}
         <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
           <button onClick={onCancel}
             style={{ flex: 1, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "11px", color: "#e8f4fd", fontSize: 14, cursor: "pointer" }}>
@@ -252,7 +258,31 @@ function MaterialApp() {
       </div>
 
       {editing && (
-        <EntryForm initial={editing} onSave={saveEntry} onCancel={() => setEditing(null)} />
+        <EntryForm initial={editing} onSave={saveEntry} onCancel={() => setEditing(null)}
+          onDelete={(id) => { setEditing(null); setConfirmDelete(id); }} />
+      )}
+
+      {confirmDelete && (
+        <div onClick={() => setConfirmDelete(null)}
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 210, padding: 24 }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ background: "#14253a", borderRadius: 16, padding: "20px 22px", maxWidth: 320, width: "100%", border: "1px solid rgba(255,255,255,0.1)" }}>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Eintrag löschen?</div>
+            <div style={{ fontSize: 13, color: "rgba(232,244,253,0.6)", marginBottom: 18 }}>
+              Diese Aktion kann nicht rückgängig gemacht werden.
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={() => setConfirmDelete(null)}
+                style={{ flex: 1, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px", color: "#e8f4fd", fontSize: 14, cursor: "pointer" }}>
+                Abbrechen
+              </button>
+              <button onClick={() => deleteEntry(confirmDelete)}
+                style={{ flex: 1, background: "rgba(239,68,68,0.2)", border: "1px solid rgba(239,68,68,0.4)", borderRadius: 10, padding: "10px", color: "#f87171", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+                Löschen
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <div style={{ padding: "16px 16px 0" }}>

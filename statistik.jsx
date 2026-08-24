@@ -184,9 +184,9 @@ function StatistikApp() {
       )}
 
       <div style={{ padding: "0 16px" }}>
-        <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1.4fr 1fr", background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-            {["Jahr", "Flüge", "Tage", "Minuten", "Schnitt"].map((h, i) => (
+        <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth: 480 }}>
+            {["Jahr", "Flüge", "Tage", "Flüge/Tag", "Minuten", "Schnitt"].map((h, i) => (
               <div key={h} style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
             ))}
           </div>
@@ -194,19 +194,21 @@ function StatistikApp() {
             <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>Keine Flüge für diese Filterauswahl.</div>
           )}
           {pivot.rows.map(r => (
-            <div key={r.year} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1.4fr 1fr", borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            <div key={r.year} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth: 480 }}>
               <div style={{ padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
               <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{r.flights}</div>
               <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{r.days}</div>
+              <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{r.days ? (r.flights / r.days).toFixed(1) : "—"}</div>
               <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{formatMinutes(r.minutes)}</div>
               <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{formatMinutes(r.minutes / r.flights)}</div>
             </div>
           ))}
           {pivot.rows.length > 0 && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1.4fr 1fr", background: "rgba(125,211,252,0.08)" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", background: "rgba(125,211,252,0.08)", minWidth: 480 }}>
               <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
               <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.flights}</div>
               <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
+              <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days ? (pivot.total.flights / pivot.total.days).toFixed(1) : "—"}</div>
               <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{formatMinutes(pivot.total.minutes)}</div>
               <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes / pivot.total.flights)}</div>
             </div>
@@ -215,7 +217,7 @@ function StatistikApp() {
       </div>
 
       <div style={{ padding: "16px 16px 0" }}>
-        <a href="flugbuch.html" style={{ display: "inline-block", fontSize: 12, color: "rgba(125,211,252,0.7)", textDecoration: "none" }}>← Zurück zum Flugbuch</a>
+        <a href="index.html" style={{ display: "inline-block", fontSize: 12, color: "rgba(125,211,252,0.7)", textDecoration: "none" }}>← Zur Startseite</a>
       </div>
     </div>
   );
