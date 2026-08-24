@@ -2305,7 +2305,6 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
           </div>
         )}
         {isLongest&&<span style={{fontSize:10,flexShrink:0}}>🏆</span>}
-        <span style={{fontWeight:700,fontSize:15,flexShrink:0}}>{f.name}</span>
         <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",flexShrink:0}}>{f.date}</span>
         <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{f.site||"—"}</span>
         {f.customFields?.landung && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
@@ -2340,7 +2339,6 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
       <div style={{flex:1,minWidth:0}}>
         <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
           {isLongest&&<span style={{fontSize:10}}>🏆</span>}
-          <span style={{fontWeight:700,fontSize:15}}>{f.name}</span>
           <span style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
             {f.pdfOnly&&<span style={{background:"rgba(139,92,246,0.18)",color:"#c4b5fd",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700}}>CSV</span>}
             {f.track?.length>1&&<span style={{background:"rgba(34,197,94,0.22)",color:"#4ade80",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(74,222,128,0.5)"}}>IGC</span>}
@@ -3528,6 +3526,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
               suggestions={[...new Set(flights.map(f=>f.customFields?.landung).filter(Boolean))]} />
             <InlineField label="Land" value={fl.customFields?.land||""} onSave={v=>saveField({customFields:{land:v}})} />
             <ReiseSelect value={fl.customFields?.reise} onSave={v=>saveField({customFields:{reise:v}})} />
+            {fl.customFields?.igcFilename && <StaticField label="IGC-Dateiname" value={fl.customFields.igcFilename} />}
             <InlineField label="Start müM"   value={fl.startAlt>0?String(fl.startAlt):(fl.customFields?.msa||"")}  onSave={v=>saveComputedField(fl,{startAlt:+v,customFields:{msa:v}})} unit="m" />
             <InlineField label="Landung müM" value={fl.endAlt>0?String(fl.endAlt):(fl.customFields?.ml||"")}       onSave={v=>saveComputedField(fl,{endAlt:+v,customFields:{ml:v}})} unit="m" />
             <InlineField label="Max. Höhe"   value={fl.maxAlt?String(fl.maxAlt):""}                                onSave={v=>saveField({maxAlt:+v,customFields:{hm:v}})} unit="m" />
@@ -3742,7 +3741,6 @@ function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef }) {
       style={{padding:"10px 14px",cursor:"pointer",borderBottom:"1px solid rgba(255,255,255,0.04)",background:f.id===selectedId?"rgba(14,165,233,0.12)":"transparent",borderLeft:f.id===selectedId?"3px solid #7dd3fc":"3px solid transparent"}}>
       <div style={{display:"flex",alignItems:"center",gap:6}}>
         {f.id===longestId && <span style={{fontSize:11}}>🏆</span>}
-        <span style={{fontWeight:700,fontSize:13,color:"#e8f4fd"}}>{f.name}</span>
         <span style={{fontSize:11,color:"rgba(232,244,253,0.4)"}}>{f.date}</span>
         {f.rating>0 && <span style={{fontSize:11}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
       </div>
@@ -4114,6 +4112,48 @@ function FlugbuchApp() {
         for (let i = 0; i < toRepair.length; i += BATCH) {
           await Promise.all(toRepair.slice(i, i+BATCH).map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f)).catch(()=>{})));
         }
+      }
+      // One-time migration: flights created directly from an IGC file
+      // (before this fix) had the raw IGC filename as their Nummer
+      // (name) — e.g. "2025-06-20-XXX-01" — instead of a plain sequential
+      // number like every other flight. Detected as "name isn't purely
+      // digits". Renamed to the next free sequential number, chronological
+      // by Datum so the new numbering still reads naturally; the original
+      // filename is preserved in customFields.igcFilename (shown in the
+      // Detail view) so future re-imports of that same file still find
+      // this exact flight.
+      // detected via a leading ISO-date pattern ("2025-06-20-...", exactly
+      // what flight instruments name their IGC exports) rather than just
+      // "not purely digits" — a person can freely rename a flight to any
+      // text via the title in the Detail view, and that deliberate choice
+      // must never get swept up here and overwritten.
+      const filenameNamed = sorted.filter(f => f.name && /^\d{4}-\d{2}-\d{2}/.test(f.name));
+      if (filenameNamed.length) {
+        let maxNr = sorted.reduce((m, f) => {
+          const n = /^\d+$/.test(f.name||"") ? parseInt(f.name, 10) : 0;
+          return n > m ? n : m;
+        }, 0);
+        const toParseDate = d => {
+          const p = (d||"").split(".");
+          return p.length === 3 ? new Date(+p[2], +p[1]-1, +p[0]).getTime() : 0;
+        };
+        const chronological = [...filenameNamed].sort((a,b) => toParseDate(a.date) - toParseDate(b.date));
+        for (const f of chronological) {
+          const oldName = f.name;
+          maxNr += 1;
+          f.name = String(maxNr);
+          if (!f.customFields?.igcFilename) {
+            f.customFields = { ...(f.customFields||{}), igcFilename: oldName };
+          }
+        }
+        const BATCH = 50;
+        for (let i = 0; i < chronological.length; i += BATCH) {
+          await Promise.all(chronological.slice(i, i+BATCH).map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f)).catch(()=>{})));
+        }
+        // Renumbering changes sort order (name-based, desc by number) —
+        // re-sort so the freshly-renamed flights land in the right place
+        // instead of wherever they happened to be before.
+        sorted.sort((a,b) => (parseInt((b.name||"").match(/\d+/)?.[0]||"0",10)) - (parseInt((a.name||"").match(/\d+/)?.[0]||"0",10)));
       }
       setFlights(sorted);
       try {
@@ -4566,7 +4606,7 @@ function FlugbuchApp() {
         flights.map(f => f.customFields?.excelImportKey).filter(Boolean)
       );
       let maxNr = flights.reduce((m, f) => {
-        const n = parseInt((f.name || "").match(/\d+/)?.[0] || "0", 10);
+        const n = /^\d+$/.test(f.name||"") ? parseInt(f.name, 10) : 0;
         return n > m ? n : m;
       }, 0);
       const newFlights = [];
@@ -4650,8 +4690,11 @@ function FlugbuchApp() {
     // Only treat a file as a duplicate if the matching flight already has a
     // REAL GPS track (track.length > 1) — a flight that merely exists (e.g.
     // imported from CSV with no track yet) should not block a fresh IGC import.
+    // Matched via the stored igcFilename field, not the flight's Nummer —
+    // Nummer no longer doubles as the source filename (see processIGCFiles).
     const flightsWithTrack = new Map(
-      flights.filter(f => f.track && f.track.length > 1).map(f => [f.name||"", f])
+      flights.filter(f => f.track && f.track.length > 1 && f.customFields?.igcFilename)
+        .map(f => [f.customFields.igcFilename, f])
     );
     for (const file of igcFiles) {
       const baseName = file.name.replace(/\.igc$/i,"");
@@ -4664,7 +4707,7 @@ function FlugbuchApp() {
 
   // Applies parsed IGC data onto an existing flight (shared by both the
   // filename-match and the date-match paths, so they stay in sync).
-  const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, passagier, igcData) => {
+  const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, passagier, igcData, igcFilename) => {
     const cf = { ...(existing.customFields||{}) };
     if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) cf.hGew = String(igcData.totalGain);
     if (!(cf.passagier||"").trim() && passagier) cf.passagier = passagier;
@@ -4672,6 +4715,12 @@ function FlugbuchApp() {
     if (!(cf.maxSteigen||"").trim() && igcData.maxClimb) cf.maxSteigen = String(igcData.maxClimb);
     if (!(cf.maxSteigen20||"").trim() && igcData.maxClimb20) cf.maxSteigen20 = String(igcData.maxClimb20);
     if (!(cf.maxSinken||"").trim() && igcData.maxSinkRate) cf.maxSinken = String(igcData.maxSinkRate);
+    // Original IGC filename kept as its own field (shown in the Detail
+    // view, not the list) — this is what lets a later re-import of the
+    // same corrected file find this exact flight again, now that the
+    // flight's "Nummer" (name) is always a plain sequential number rather
+    // than doubling as the filename.
+    if (igcFilename) cf.igcFilename = igcFilename;
     // Distanz (analog XContest, bis zu 3 Wendepunkte) und Ø Speed nur
     // nachtragen, wenn beide Felder noch leer sind — ein bereits erfasster
     // (z.B. manuell von XContest übernommener) Wert wird nie überschrieben.
@@ -4704,13 +4753,24 @@ function FlugbuchApp() {
     const newFlights = [];
     let updatedCount = 0;
     const dateAmbiguous = [];
+    // Running "next number" for brand-new flights created in this batch —
+    // continues from the current overall max so numbers stay unique even
+    // across several new flights created in the same import.
+    let maxNr = flights.reduce((m, f) => {
+      const n = /^\d+$/.test(f.name||"") ? parseInt(f.name, 10) : 0;
+      return n > m ? n : m;
+    }, 0);
     for (let i=0; i<igcFiles.length; i++) {
       const file = igcFiles[i];
       const text = await file.text();
       const { track, date, pilot, glider, passagier, tzOffsetHours } = parseIGC(text);
       const igcData = analyzeIGC(track, tzOffsetHours, date);
       const baseName = file.name.replace(/\.igc$/i,"");
-      const existing = flights.find(f=>f.name===baseName);
+      // Matched via the stored igcFilename (Detail-only field), not the
+      // flight's Nummer — "Nummer" is always a plain sequential number
+      // now, never the raw filename, so re-importing a corrected file
+      // needs its own dedicated match key.
+      const existing = flights.find(f=>f.customFields?.igcFilename===baseName);
       // Parse date
       const dateParts = date.split(".");
       let yr="", mo="", dateStr=date;
@@ -4721,7 +4781,7 @@ function FlugbuchApp() {
         // cleared) never got a chance to be recalculated. Now it fills in
         // anything currently blank, without touching values that are
         // already set (manually or from a previous import).
-        await attachIgcToFlight(existing, track, date, pilot, glider, passagier, igcData);
+        await attachIgcToFlight(existing, track, date, pilot, glider, passagier, igcData, baseName);
         updatedCount++;
       } else {
         // No filename match — try matching by date instead, but only
@@ -4730,21 +4790,24 @@ function FlugbuchApp() {
         // silently overwritten just because the date happens to match).
         const dateCandidates = flights.filter(f => f.date===dateStr && (!f.track || f.track.length<=1));
         if (dateCandidates.length === 1) {
-          await attachIgcToFlight(dateCandidates[0], track, date, pilot, glider, passagier, igcData);
+          await attachIgcToFlight(dateCandidates[0], track, date, pilot, glider, passagier, igcData, baseName);
           updatedCount++;
         } else if (dateCandidates.length > 1) {
           // Ambiguous — don't guess. Resolved via a picker after this loop.
-          dateAmbiguous.push({ file, date: dateStr, track, pilot, glider, passagier, igcData, candidates: dateCandidates });
+          dateAmbiguous.push({ file, date: dateStr, track, pilot, glider, passagier, igcData, candidates: dateCandidates, baseName });
         } else {
           // Fresh flight, nothing to preserve — Distanz/Speed simply use
           // whatever computeDistanceSpeedBackfill derives from this IGC
           // file directly (existingTotalDist=0, cf={} → both count as
-          // "empty").
+          // "empty"). Nummer is the next free sequential number — the
+          // raw filename is kept only in customFields.igcFilename
+          // (Detail-Ansicht), not as the flight's Nummer/name.
+          maxNr += 1;
           const backfill = computeDistanceSpeedBackfill(0, {}, igcData.scoreDistanceKm, igcData.durationSec);
-          const newF = { id:`igc_${baseName}_${Date.now()}`, name:baseName, pdfOnly:false,
+          const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr), pdfOnly:false,
             date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:"",glider:glider||"",
             startTime:"", endTime:"", comment:"", rating:0, notes:"",
-            customFields:{passagier:passagier||"",landung:"",
+            customFields:{passagier:passagier||"",landung:"",igcFilename:baseName,
               hGew: igcData.totalGain ? String(igcData.totalGain) : "",
               hDiff: igcData.hDiff ? String(igcData.hDiff) : "",
               maxSteigen: igcData.maxClimb ? String(igcData.maxClimb) : "",
@@ -5039,7 +5102,7 @@ function FlugbuchApp() {
           onClose={()=>setPendingDateAmbiguous(q=>q.slice(1))}
           onAssign={async (chosen) => {
             const item = pendingDateAmbiguous[0];
-            await attachIgcToFlight(chosen, item.track, item.date, item.pilot, item.glider, item.passagier, item.igcData);
+            await attachIgcToFlight(chosen, item.track, item.date, item.pilot, item.glider, item.passagier, item.igcData, item.baseName);
             // Remove the just-assigned flight from every remaining item's
             // candidate list — otherwise a second IGC file for the same
             // date could still be assigned to the same flight, silently
@@ -5050,15 +5113,19 @@ function FlugbuchApp() {
           }}
           onCreateNew={async () => {
             const item = pendingDateAmbiguous[0];
-            const baseName = item.file.name.replace(/\.igc$/i,"");
+            const baseName = item.baseName || item.file.name.replace(/\.igc$/i,"");
             const dateParts = item.date.split(".");
             let yr="", mo="";
             if (dateParts.length===3) { yr=dateParts[2]; mo=dateParts[1]; }
+            const maxNr = flights.reduce((m, f) => {
+              const n = /^\d+$/.test(f.name||"") ? parseInt(f.name, 10) : 0;
+              return n > m ? n : m;
+            }, 0);
             const backfill = computeDistanceSpeedBackfill(0, {}, item.igcData.scoreDistanceKm, item.igcData.durationSec);
-            const newF = { id:`igc_${baseName}_${Date.now()}`, name:baseName, pdfOnly:false,
+            const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr+1), pdfOnly:false,
               date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:"",glider:item.glider||"",
               startTime:"", endTime:"", comment:"", rating:0, notes:"",
-              customFields:{passagier:item.passagier||"",landung:"",
+              customFields:{passagier:item.passagier||"",landung:"",igcFilename:baseName,
                 hGew: item.igcData.totalGain ? String(item.igcData.totalGain) : "",
                 hDiff: item.igcData.hDiff ? String(item.igcData.hDiff) : "",
                 maxSteigen: item.igcData.maxClimb ? String(item.igcData.maxClimb) : "",
