@@ -4026,6 +4026,13 @@ function FlugbuchApp() {
   // attachIgcToFlight/computeDistanceSpeedBackfill).
   const [backfillRunning, setBackfillRunning] = useState(false);
   const [backfillResult, setBackfillResult] = useState(null);
+  // Liste aller Flüge, die ursprünglich aus einer IGC-Datei stammen
+  // (customFields.igcFilename gesetzt), aber aktuell keinen GPS-Track
+  // haben — betrifft Flüge, die durch einen früheren Bug beim Direkt-
+  // Import ohne Track angelegt wurden. Reines Anzeige-Feature, ändert
+  // nichts an den Daten — die Reparatur selbst passiert durch erneuten
+  // Import derselben IGC-Datei (dann per igcFilename wiedererkannt).
+  const [showMissingTracks, setShowMissingTracks] = useState(false);
   // Backup-Hinweis: zeigt einen Punkt am 💾-Button, sobald sich Flüge oder
   // Feld-Definitionen seit dem letzten Backup geändert haben. Persistiert
   // über window.storage, damit der Hinweis auch nach einem Neustart der
@@ -4806,7 +4813,7 @@ function FlugbuchApp() {
           const backfill = computeDistanceSpeedBackfill(0, {}, igcData.scoreDistanceKm, igcData.durationSec);
           const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr), pdfOnly:false,
             date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:"",glider:glider||"",
-            startTime:"", endTime:"", comment:"", rating:0, notes:"",
+            startTime:"", endTime:"", comment:"", rating:0, notes:"", track,
             customFields:{passagier:passagier||"",landung:"",igcFilename:baseName,
               hGew: igcData.totalGain ? String(igcData.totalGain) : "",
               hDiff: igcData.hDiff ? String(igcData.hDiff) : "",
@@ -5124,7 +5131,7 @@ function FlugbuchApp() {
             const backfill = computeDistanceSpeedBackfill(0, {}, item.igcData.scoreDistanceKm, item.igcData.durationSec);
             const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr+1), pdfOnly:false,
               date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:"",glider:item.glider||"",
-              startTime:"", endTime:"", comment:"", rating:0, notes:"",
+              startTime:"", endTime:"", comment:"", rating:0, notes:"", track:item.track,
               customFields:{passagier:item.passagier||"",landung:"",igcFilename:baseName,
                 hGew: item.igcData.totalGain ? String(item.igcData.totalGain) : "",
                 hDiff: item.igcData.hDiff ? String(item.igcData.hDiff) : "",
@@ -5158,6 +5165,11 @@ function FlugbuchApp() {
             style={{background:"rgba(125,211,252,0.1)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:8,padding:"8px 6px",color:"#7dd3fc",fontSize:12,cursor:backfillRunning?"default":"pointer",textAlign:"center"}}>
             {backfillRunning ? "⏳ Berechne…" : "📐 Distanz/Speed berechnen (alle IGC-Flüge)"}
           </button>
+          <button onClick={()=>setShowMissingTracks(true)}
+            title="Zeigt alle Flüge, die ursprünglich aus einer IGC-Datei stammen, aktuell aber keinen GPS-Track haben (betroffen von einem früheren Import-Bug)."
+            style={{background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.25)",borderRadius:8,padding:"8px 6px",color:"#f87171",fontSize:12,cursor:"pointer",textAlign:"center"}}>
+            🔍 Flüge ohne Track finden
+          </button>
         </div>
       )}
       {backfillResult && (
@@ -5168,6 +5180,57 @@ function FlugbuchApp() {
           <button onClick={()=>setBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
+
+      {showMissingTracks && (() => {
+        const affected = flights
+          .filter(f => f.customFields?.igcFilename && (!f.track || f.track.length <= 1))
+          .sort((a,b) => (parseInt((b.name||"").match(/\d+/)?.[0]||"0",10)) - (parseInt((a.name||"").match(/\d+/)?.[0]||"0",10)));
+        const copyList = async () => {
+          const text = affected.map(f => `${f.name}\t${f.date}\t${f.customFields.igcFilename}.igc`).join("\n");
+          try { await navigator.clipboard.writeText(text); setCopyMsg("✓ Liste kopiert."); }
+          catch { setCopyMsg("Kopieren fehlgeschlagen."); }
+        };
+        return (
+          <div onClick={()=>setShowMissingTracks(false)}
+            style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:24}}>
+            <div onClick={e=>e.stopPropagation()}
+              style={{background:"#14253a",borderRadius:16,padding:"20px 22px",maxWidth:420,width:"100%",border:"1px solid rgba(255,255,255,0.1)",maxHeight:"80vh",display:"flex",flexDirection:"column"}}>
+              <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>Flüge ohne Track ({affected.length})</div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:14}}>
+                Diese Flüge stammen ursprünglich aus einer IGC-Datei, haben aber aktuell keinen GPS-Track gespeichert. Importiere die jeweilige Datei erneut — sie wird über den Dateinamen wiedererkannt und automatisch ergänzt, statt einen neuen Flug anzulegen.
+              </div>
+              {affected.length === 0 ? (
+                <div style={{fontSize:13,color:"rgba(232,244,253,0.5)",padding:"12px 0"}}>Keine betroffenen Flüge gefunden. 🎉</div>
+              ) : (
+                <div style={{overflowY:"auto",flex:1,marginBottom:14,border:"1px solid rgba(255,255,255,0.08)",borderRadius:10}}>
+                  {affected.map(f => (
+                    <div key={f.id} onClick={()=>{setSelected(f);setInlinePassagier(f.customFields?.passagier||"");setView("detail");setShowMissingTracks(false);}}
+                      style={{padding:"9px 12px",borderBottom:"1px solid rgba(255,255,255,0.05)",cursor:"pointer",fontSize:12}}>
+                      <div style={{display:"flex",justifyContent:"space-between"}}>
+                        <span style={{fontWeight:700,color:"#e8f4fd"}}>Nr. {f.name}</span>
+                        <span style={{color:"rgba(232,244,253,0.5)"}}>{f.date}</span>
+                      </div>
+                      <div style={{color:"#f87171",fontSize:11,marginTop:2,wordBreak:"break-all"}}>{f.customFields.igcFilename}.igc</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div style={{display:"flex",gap:10}}>
+                {affected.length > 0 && (
+                  <button onClick={copyList}
+                    style={{flex:1,background:"rgba(125,211,252,0.15)",border:"1px solid rgba(125,211,252,0.3)",borderRadius:10,padding:"10px",color:"#7dd3fc",fontSize:13,fontWeight:700,cursor:"pointer"}}>
+                    📋 Liste kopieren
+                  </button>
+                )}
+                <button onClick={()=>setShowMissingTracks(false)}
+                  style={{flex:1,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px",color:"#e8f4fd",fontSize:13,cursor:"pointer"}}>
+                  Schliessen
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {selectMode && (
         <div style={{padding:"8px 16px 0",display:"flex",gap:8}}>
