@@ -218,10 +218,10 @@ function buildGpxFromFlight(flight) {
 // Separate from FlightMap's own custom canvas renderer used in the flight
 // detail view, which stays exactly as it was (it needs the height-profile
 // zoom sync, which this map has no equivalent of).
-// Standard-Schlüssel, falls in Service noch kein eigener hinterlegt wurde
-// (siehe FlugbuchApp: lädt "settings:maptilerApiKey" und überschreibt
-// diesen Default, sobald einer gespeichert ist).
-const MAPTILER_API_KEY_DEFAULT = "HFElbKEufz9KOHI4w2jB";
+// Kein eingebauter Schlüssel mehr — muss unter Service → API-Zugangsdaten
+// hinterlegt werden ("settings:maptilerApiKey"), sonst bleiben die Karten
+// leer (siehe die beiden apiKey-Stellen unten, die ohne Fallback nur noch
+// mapTilerKey selbst verwenden).
 
 // Stylised paraglider wing icon (top-down view, transparent background,
 // user-provided photo/render) used as the profile-sync reference marker in
@@ -304,7 +304,7 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
   // changes (compared via a stable JSON key), same as Tauchbuch does.
   const pointsKey = JSON.stringify(points);
   useEffect(() => {
-    if (!mapDivRef.current || !window.maptilersdk || !points.length) return;
+    if (!mapDivRef.current || !window.maptilersdk || !points.length || !mapTilerKey) return;
     const sdk = window.maptilersdk;
 
     const initMap = () => {
@@ -314,7 +314,7 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
       if (mapDivRef.current) mapDivRef.current.innerHTML = "";
       const map = new sdk.Map({
         container: mapDivRef.current,
-        apiKey: mapTilerKey || MAPTILER_API_KEY_DEFAULT,
+        apiKey: mapTilerKey,
         style: sdk.MapStyle.OUTDOOR,
         language: "de",
         center: [points[0].lon, points[0].lat],
@@ -384,7 +384,14 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
 
       <div style={{margin:"0 16px",position:"relative",borderRadius:14,overflow:"hidden",border:"1px solid rgba(100,180,255,0.12)"}}>
         <div ref={mapDivRef} style={{width:"100%",height:"60vh",background:"#040e20"}} />
-        {points.length === 0 && (
+        {!mapTilerKey && (
+          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:8,background:"rgba(4,14,32,0.92)",color:"rgba(232,244,253,0.6)",fontSize:13,textAlign:"center",padding:24}}>
+            <div style={{fontSize:28}}>🗺️</div>
+            <div>Kein MapTiler-Schlüssel hinterlegt.</div>
+            <a href="service.html" style={{color:"#7dd3fc",fontSize:12}}>→ Unter Service eintragen</a>
+          </div>
+        )}
+        {mapTilerKey && points.length === 0 && (
           <div style={{position:"absolute",inset:0,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(4,14,32,0.85)",color:"rgba(232,244,253,0.5)",fontSize:14,pointerEvents:"none"}}>
             Keine Orte gefunden.
           </div>
@@ -509,7 +516,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // at once. Camera position and the reference marker are instead updated
   // in place by the separate effect below.
   const buildMap = (container, mapRefObj, readyRef) => {
-    if (!container || !window.maptilersdk || !hasMap) return;
+    if (!container || !window.maptilersdk || !hasMap || !mapTilerKey) return;
     const sdk = window.maptilersdk;
     if (mapRefObj.current) { mapRefObj.current.remove(); mapRefObj.current = null; }
     // MapTiler's own .remove() doesn't reliably clear everything it
@@ -520,7 +527,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     readyRef.current = false;
     const initialCenter = track.length ? [track[0].lon, track[0].lat] : [sP.lon, sP.lat];
     const map = new sdk.Map({
-      container, apiKey: mapTilerKey || MAPTILER_API_KEY_DEFAULT, style: sdk.MapStyle.OUTDOOR,
+      container, apiKey: mapTilerKey, style: sdk.MapStyle.OUTDOOR,
       language: "de", center: initialCenter, zoom: 11,
     });
     mapRefObj.current = map;
@@ -818,6 +825,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     <>
       <div style={{position:"relative"}} onClick={()=>{ if (hasMap) setIsFullscreen(true); }}>
         <div ref={previewDivRef} style={{width:"100%",aspectRatio:"3/2",background:"#040e20",borderRadius:10,overflow:"hidden",cursor:hasMap?"pointer":"default"}} />
+        {hasMap && !mapTilerKey && (
+          <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:6,background:"rgba(4,14,32,0.92)",color:"rgba(232,244,253,0.6)",fontSize:12,textAlign:"center",padding:16}}>
+            <div style={{fontSize:22}}>🗺️</div>
+            <div>Kein MapTiler-Schlüssel hinterlegt.</div>
+            <a href="service.html" onClick={e=>e.stopPropagation()} style={{color:"#7dd3fc",fontSize:11}}>→ Unter Service eintragen</a>
+          </div>
+        )}
       </div>
       {controlsSlot && hasMap && ReactDOM.createPortal(
         <>
@@ -3849,9 +3863,10 @@ function DateAmbiguousResolver({ item, onAssign, onCreateNew, onClose, descripti
 function FlugbuchApp() {
   const isWide = useIsWide();
   const [flights, setFlights] = useState([]);
-  // Eigener MapTiler-Schlüssel, falls unter Service → API-Zugangsdaten
-  // hinterlegt — sonst bleibt es beim eingebauten Default (siehe
-  // MAPTILER_API_KEY_DEFAULT weiter oben in dieser Datei).
+  // MapTiler-Schlüssel, ausschliesslich unter Service → API-Zugangsdaten
+  // hinterlegt (kein eingebauter Schlüssel mehr im Code) — ohne Eintrag
+  // dort bleiben die Karten leer, siehe die Hinweis-Overlays in
+  // WorldMapView/FlightMap.
   const [mapTilerKey, setMapTilerKey] = useState("");
   useEffect(() => {
     (async () => {
