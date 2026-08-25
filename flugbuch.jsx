@@ -1784,6 +1784,21 @@ function parseExcelFluegeWorkbook(arrayBuffer) {
 // One raw "Flüge" row -> the app's internal flight shape. rowNumber is the
 // 1-based Excel row (header=1, first data row=2, ...), stored so re-running
 // the import against the same file is idempotent (see excelImportKey below).
+// Gleiche geprüfte Präfix-Liste wie auf der Schirme-Seite (schirme.jsx) —
+// dort noch einmal eigenständig definiert, da diese Datei unabhängig von
+// flugbuch.jsx geladen wird und keinen Code mit ihr teilt. Wird hier beim
+// Excel-Import verwendet, damit neu importierte Zeilen direkt bereinigt
+// ankommen, statt erst über die Schirme-Seite nachbereinigt werden zu
+// müssen.
+const KNOWN_GLIDER_PREFIXES = ["UP", "Supair", "Ozone", "Nova", "MacPara"];
+function splitGliderPrefix(raw) {
+  const name = (raw || "").trim();
+  for (const prefix of KNOWN_GLIDER_PREFIXES) {
+    const m = name.match(new RegExp(`^${prefix}\\s+(.+)$`, "i"));
+    if (m) return m[1].trim();
+  }
+  return name;
+}
 function createFlightFromExcelRow(nr, row, rowNumber) {
   const [typ, datum, monat, jahr, anzahlTage, schirm, start, landung,
     std, min, hhmm, kurs, bemerkung, varioPlus, varioMinus, maxHoehe,
@@ -1815,7 +1830,7 @@ function createFlightFromExcelRow(nr, row, rowNumber) {
     id: `xls_${rowNumber}_${Date.now()}`,
     name: nr, pdfOnly: true,
     date: dateStr, rawDate: dateStr, year: yr, month: mo,
-    pilot: "", site: start || "", glider: schirm || "",
+    pilot: "", site: start || "", glider: splitGliderPrefix(schirm || ""),
     startTime: "", endTime: "",
     durationSec, durationStr,
     maxAlt, minAlt: 0,
@@ -2992,25 +3007,33 @@ function ReiseSelect({ value, onSave }) {
   );
 }
 
-// Dropdown for selecting the glider used on a flight, sourced from the
-// actual names entered on the Service/Schirm page's 4 category tabs — not
-// the category labels (Solo, Solo light, etc.) themselves, just whatever
-// name the person gave each of their up-to-4 gliders there.
+// Dropdown for selecting the glider used on a flight — sourced from the
+// new "Schirme"-Seite (schirme:list, reachable via Service), which lists
+// one entry per distinct Schirm-Name actually used across the flights.
+// Also still reads the older "service:schirme" key (4 category tabs) if
+// present, for backward compatibility with names entered there before the
+// Schirme-Seite existed.
 function SchirmSelect({ value, onSave, extra }) {
   const [names, setNames] = useState([]);
   const [editing, setEditing] = useState(false);
   useEffect(() => {
     (async () => {
+      const combined = new Set();
       try {
-        const r = await window.storage.get("service:schirme");
+        const r = await window.storage.get("schirme:list");
         if (r) {
-          const schirme = JSON.parse(r.value) || {};
-          const list = Object.values(schirme)
-            .map(s => s?.name)
-            .filter(n => n && String(n).trim());
-          setNames(list);
+          const list = JSON.parse(r.value) || [];
+          list.forEach(s => { if (s?.name) combined.add(String(s.name).trim()); });
         }
       } catch {}
+      try {
+        const r2 = await window.storage.get("service:schirme");
+        if (r2) {
+          const schirme = JSON.parse(r2.value) || {};
+          Object.values(schirme).forEach(s => { if (s?.name) combined.add(String(s.name).trim()); });
+        }
+      } catch {}
+      setNames([...combined].filter(Boolean).sort((a,b)=>a.localeCompare(b,"de")));
     })();
   }, []);
 

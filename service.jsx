@@ -364,15 +364,21 @@ function ServiceApp() {
           </div>
         </div>
 
+        <a href="schirme.html"
+          style={{ display: "flex", alignItems: "center", gap: 14, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14, textDecoration: "none", color: "inherit" }}>
+          <div style={{ fontSize: 26, flexShrink: 0 }}>🪂</div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 2 }}>Schirme</div>
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)" }}>Hersteller, Typ, letzter Check — verknüpft mit Material</div>
+          </div>
+          <div style={{ fontSize: 18, color: "rgba(232,244,253,0.3)" }}>›</div>
+        </a>
+
         {msg && (
           <div style={{ background: msg.type === "ok" ? "rgba(74,222,128,0.1)" : "rgba(239,68,68,0.1)", border: `1px solid ${msg.type === "ok" ? "rgba(74,222,128,0.3)" : "rgba(239,68,68,0.3)"}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: msg.type === "ok" ? "#4ade80" : "#f87171", marginBottom: 14 }}>
             {msg.text}
           </div>
         )}
-
-        <div style={{ fontSize: 11, color: "rgba(232,244,253,0.3)", textAlign: "center", marginTop: 20 }}>
-          Weitere Service-Funktionen (z.B. Wartungserinnerungen für Schirm/Rettungsgerät) folgen hier später.
-        </div>
       </div>
 
       <div style={{ padding: "16px 16px 0" }}>
