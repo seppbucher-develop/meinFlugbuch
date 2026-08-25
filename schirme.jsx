@@ -67,17 +67,6 @@ function SchirmeApp() {
     try { await window.storage.set(SCHIRME_KEY, JSON.stringify(list)); } catch {}
   };
 
-  // Distinct Schirm-Namen aus den Flügen — jeder bekommt automatisch einen
-  // (leeren) Schirme-Eintrag, sobald er zum ersten Mal auftaucht, damit die
-  // Liste immer vollständig ist, auch ohne dass die Bereinigung manuell
-  // angestoßen wurde.
-  const gliderNamesInFlights = React.useMemo(() => {
-    if (!flights) return [];
-    const set = new Set();
-    flights.forEach(f => { const v = (f.glider || "").trim(); if (v) set.add(v); });
-    return [...set].sort((a, b) => a.localeCompare(b, "de"));
-  }, [flights]);
-
   // Häufigster Typ-Wert unter den Flügen mit diesem Schirm — als Vorschlag,
   // falls für diesen Schirm noch kein Typ gesetzt ist.
   const suggestTyp = (name) => {
@@ -142,21 +131,46 @@ function SchirmeApp() {
     }
   };
 
-  // Fehlende Schirme (in Flügen vorhanden, aber noch kein eigener Eintrag)
-  // automatisch ergänzen — leer, zum manuellen Ausfüllen.
-  React.useEffect(() => {
-    if (!flights) return;
-    const existingNames = new Set(schirme.map(s => s.name));
-    const missing = gliderNamesInFlights.filter(n => !existingNames.has(n));
-    if (missing.length) {
-      const next = [...schirme, ...missing.map(n => ({
-        id: `schirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${n.length}`,
-        name: n, hersteller: "", typ: "", letzterCheck: "", materialEntryId: null,
-      }))];
-      saveSchirme(next);
+  // Erzeugt (einmalig, per Klick) für jeden in den Flügen verwendeten
+  // Schirm-Namen einen Eintrag, falls noch keiner existiert — und versucht
+  // zusätzlich, automatisch einen passenden Material-Eintrag zu verknüpfen
+  // (nur bei eindeutigem Namens-Treffer im Feld "Was", um keine falschen
+  // Verknüpfungen zu riskieren; bei Unsicherheit bleibt unverknüpft, dann
+  // manuell im Schirm-Eintrag nachtragen).
+  const generateFromFlights = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const fl = flights || await loadAllFlights();
+      const mat = material.length ? material : await loadAllMaterial();
+      const names = [...new Set(fl.map(f => (f.glider || "").trim()).filter(Boolean))];
+      const existingNames = new Set(schirme.map(s => s.name));
+      const missing = names.filter(n => !existingNames.has(n));
+      if (!missing.length) {
+        setMsg({ type: "ok", text: "Alle Schirm-Namen aus den Flügen sind bereits erfasst — nichts zu erzeugen." });
+        setBusy(false);
+        return;
+      }
+      let linked = 0;
+      const newEntries = missing.map(n => {
+        // Eindeutiger Namens-Treffer im Material-Feld "Was" (Gross-/
+        // Kleinschreibung ignoriert) — nur verknüpfen, wenn GENAU EIN
+        // Material-Eintrag passt, sonst lieber unverknüpft lassen.
+        const candidates = mat.filter(m => (m.was || "").trim().toLowerCase() === n.toLowerCase());
+        const materialEntryId = candidates.length === 1 ? candidates[0].id : null;
+        if (materialEntryId) linked++;
+        return {
+          id: `schirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          name: n, hersteller: "", typ: "", letzterCheck: "", materialEntryId,
+        };
+      });
+      await saveSchirme([...schirme, ...newEntries]);
+      setMsg({ type: "ok", text: `✓ ${newEntries.length} Schirm(e) erzeugt${linked ? `, davon ${linked} automatisch mit Material verknüpft` : ""}.` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Erzeugen: " + (e.message || String(e)) });
+    } finally {
+      setBusy(false);
     }
-    // eslint-disable-next-line
-  }, [flights, gliderNamesInFlights.join("|")]);
+  };
 
   const flightCountFor = (name) => (flights || []).filter(f => (f.glider || "").trim() === name).length;
   const materialFor = (id) => material.find(m => m.id === id) || null;
@@ -175,7 +189,12 @@ function SchirmeApp() {
         <div style={{ fontSize: 12, color: "rgba(232,244,253,0.45)" }}>{sortedSchirme.length} Schirme</div>
       </div>
 
-      <div style={{ padding: "0 16px 14px" }}>
+      <div style={{ padding: "0 16px 14px", display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button onClick={generateFromFlights} disabled={busy}
+          title="Legt für jeden in den Flügen verwendeten Schirm-Namen einen Eintrag an, falls noch keiner existiert."
+          style={{ background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "9px 14px", color: "#4ade80", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+          {busy ? "⏳ …" : "🔄 Schirme aus Flugbuch erzeugen"}
+        </button>
         <button onClick={runCleanup} disabled={busy}
           title="Sucht bekannte Hersteller-Präfixe (UP, Supair, Ozone, Nova, MacPara) im Schirm-Feld der Flüge, entfernt sie dort und trägt sie hier als Hersteller ein."
           style={{ background: "rgba(250,204,21,0.12)", border: "1px solid rgba(250,204,21,0.3)", borderRadius: 8, padding: "9px 14px", color: "#facc15", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
