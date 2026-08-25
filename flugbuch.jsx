@@ -1799,6 +1799,22 @@ function splitGliderPrefix(raw) {
   }
   return name;
 }
+
+// Same storage key as the Schirme-Seite (schirme.jsx) — this file loads
+// independently and shares no code with it, so the key is duplicated here
+// deliberately.
+const SCHIRME_KEY = "schirme:list";
+// IGC-Logger schreiben den Schirm-Namen in HFGTY meist als "Hersteller
+// Modell…" ohne feste Konvention — anders als beim Excel-Bestandsimport
+// (splitGliderPrefix, feste Präfix-Liste) wird hier daher bewusst IMMER
+// das erste Wort als Hersteller abgetrennt, unabhängig davon, ob es in
+// KNOWN_GLIDER_PREFIXES steht.
+function splitFirstWordAsHersteller(raw) {
+  const name = (raw || "").trim();
+  const m = name.match(/^(\S+)\s+(.+)$/);
+  if (!m) return { hersteller: "", cleaned: name };
+  return { hersteller: m[1], cleaned: m[2].trim() };
+}
 function createFlightFromExcelRow(nr, row, rowNumber) {
   const [typ, datum, monat, jahr, anzahlTage, schirm, start, landung,
     std, min, hhmm, kurs, bemerkung, varioPlus, varioMinus, maxHoehe,
@@ -3951,6 +3967,12 @@ function FlugbuchApp() {
       await window.fsapiHandle.set("igcDir", handle);
       setIgcDirHandle(handle);
       setIgcDirName(handle.name);
+      // Direkt nach der Auswahl auch scannen/importieren — vorher blieb der
+      // erste Klick wirkungslos (er hat nur den Ordner gemerkt), man musste
+      // ein zweites Mal klicken, damit tatsächlich etwas importiert wurde.
+      // handle wird hier direkt übergeben, statt sich auf den (noch nicht
+      // aktualisierten) State igcDirHandle zu verlassen.
+      await runIgcDirImport(handle);
     } catch (e) {
       if (e && e.name === "AbortError") return;
       console.error("IGC-Ordnerauswahl fehlgeschlagen:", e);
@@ -3994,6 +4016,12 @@ function FlugbuchApp() {
   const [importProgress, setImportProgress] = useState(null);
   const [igcResult, setIgcResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
+  // Cache der Schirme-Liste (schirme:list) für die Dauer eines IGC-Imports
+  // — vermeidet, bei jeder einzelnen Datei erneut zu laden/zu speichern,
+  // und stellt sicher, dass zwei Dateien mit demselben (neuen) Schirm im
+  // selben Batch nicht versehentlich zwei separate Einträge anlegen.
+  // Wird bei jedem frischen Import-Lauf neu geladen (siehe processIGCFiles).
+  const schirmeListRef = useRef(null);
   const [pdfDragOver, setPdfDragOver] = useState(false);
   const [pdfResult, setPdfResult] = useState(null);
   const [pendingDups, setPendingDups] = useState([]);
@@ -4546,11 +4574,14 @@ function FlugbuchApp() {
   // Datums-Zuordnung, Mehrdeutigkeiten usw.
   const [igcDirScanning, setIgcDirScanning] = useState(false);
   const [igcDirResult, setIgcDirResult] = useState(null);
-  const runIgcDirImport = useCallback(async () => {
-    if (!igcDirHandle) return;
+  const runIgcDirImport = useCallback(async (handleOverride) => {
+    // handleOverride erlaubt den Aufruf direkt nach chooseIgcDir(), bevor
+    // der State igcDirHandle im selben Tick bereits aktualisiert ist.
+    const handle = handleOverride || igcDirHandle;
+    if (!handle) return;
     setIgcDirScanning(true); setIgcDirResult(null);
     try {
-      const allFiles = await scanIgcDirRecursive(igcDirHandle);
+      const allFiles = await scanIgcDirRecursive(handle);
       const knownNames = new Set(
         flights.map(f => f.customFields?.igcFilename).filter(Boolean)
       );
@@ -4565,6 +4596,51 @@ function FlugbuchApp() {
     }
   }, [igcDirHandle, flights, doImport]);
 
+
+  // Nimmt den rohen Schirm-Namen aus dem IGC-Header (HFGTY), trennt das
+  // erste Wort als Hersteller ab und sucht/erzeugt in der Schirme-Liste
+  // (schirme:list, dieselbe Liste wie auf der Schirme-Seite) den
+  // zugehörigen Eintrag — siehe schirme.jsx (generateFromFlights/
+  // matchesSchirm) für die analoge Logik dort. Gibt den bereinigten Namen
+  // (ohne Hersteller-Wort) und die schirmId zurück, die dann in
+  // customFields.schirmId abgelegt wird, damit die Schirme-Seite den Flug
+  // robust zuordnen kann.
+  const resolveSchirmForGlider = useCallback(async (rawGlider) => {
+    const { hersteller, cleaned } = splitFirstWordAsHersteller(rawGlider);
+    if (!cleaned) return { name: "", schirmId: null };
+    let list = schirmeListRef.current;
+    if (!list) {
+      try {
+        const r = await window.storage.get(SCHIRME_KEY);
+        list = r ? JSON.parse(r.value) : [];
+      } catch (e) { console.error("Schirme-Liste laden fehlgeschlagen:", e); list = []; }
+      schirmeListRef.current = list;
+    }
+    const norm = s => (s || "").trim().toLowerCase();
+    let entry = list.find(s => norm(s.name) === norm(cleaned));
+    let changed = false;
+    if (entry) {
+      // Hersteller nachtragen, falls beim gefundenen Eintrag noch leer.
+      if (!entry.hersteller && hersteller) {
+        entry = { ...entry, hersteller };
+        list = list.map(s => s.id === entry.id ? entry : s);
+        changed = true;
+      }
+    } else {
+      entry = { id: `schirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        name: cleaned, hersteller: hersteller || "", typ: "", letzterCheck: "", materialEntryId: null };
+      list = [...list, entry];
+      changed = true;
+    }
+    schirmeListRef.current = list;
+    if (changed) {
+      try {
+        await window.storage.set(SCHIRME_KEY, JSON.stringify(list));
+        await window.storage.set("settings:backupDirty", "1");
+      } catch (e) { console.error("Schirme-Liste speichern fehlgeschlagen:", e); }
+    }
+    return { name: cleaned, schirmId: entry.id };
+  }, []);
 
   // Applies parsed IGC data onto an existing flight (shared by both the
   // filename-match and the date-match paths, so they stay in sync).
@@ -4581,6 +4657,15 @@ function FlugbuchApp() {
     // flight's "Nummer" (name) is always a plain sequential number rather
     // than doubling as the filename.
     if (igcFilename) cf.igcFilename = igcFilename;
+    // Schirm-Zuordnung: nur auflösen, wenn diesem Flug noch keine schirmId
+    // zugeordnet ist — ein bereits verknüpfter Flug (z.B. manuell auf der
+    // Schirme-Seite korrigiert) wird hier nie überschrieben.
+    let cleanedGlider = "";
+    if (!cf.schirmId) {
+      const resolved = await resolveSchirmForGlider(glider);
+      cleanedGlider = resolved.name;
+      if (resolved.schirmId) cf.schirmId = resolved.schirmId;
+    }
     // Startplatz/Landeplatz/Land automatisch von einem nahegelegenen
     // bereits vorhandenen Flug übernehmen (bzw. Land per MapTiler
     // bestimmen) — nur für Felder, die hier noch leer sind; ein bereits
@@ -4606,7 +4691,7 @@ function FlugbuchApp() {
     const updated = {
       ...existing, track, customFields: cf,
       pilot: (existing.pilot||"").trim() ? existing.pilot : (pilot||existing.pilot),
-      glider: (existing.glider||"").trim() ? existing.glider : (glider||existing.glider),
+      glider: (existing.glider||"").trim() ? existing.glider : (cleanedGlider||existing.glider),
       site: needsSite && inferredSite ? inferredSite : existing.site,
       maxAlt: existing.maxAlt || igcData.maxAlt,
       minAlt: existing.minAlt || igcData.minAlt,
@@ -4623,10 +4708,13 @@ function FlugbuchApp() {
     await saveFlight(updated);
     setFlights(prev=>prev.map(f=>f.id===updated.id?updated:f));
     if (selected?.id===updated.id) setSelected(updated);
-  }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey]);
+  }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
 
   const processIGCFiles = useCallback(async (igcFiles) => {
     setImporting(true); setImportProgress({done:0,total:igcFiles.length});
+    // Frischer Batch → Schirme-Liste neu laden, statt eine evtl. veraltete
+    // Kopie von einem vorherigen Import weiterzuverwenden.
+    schirmeListRef.current = null;
     const newFlights = [];
     let updatedCount = 0;
     const dateAmbiguous = [];
@@ -4685,10 +4773,13 @@ function FlugbuchApp() {
           // bereits vorhandenen Flug übernehmen (bzw. Land per MapTiler
           // bestimmen, falls kein Treffer) — siehe inferPlaceAndCountry.
           const inferred = await inferPlaceAndCountry(igcData.startPt, igcData.endPt, flights, placeMatchRadiusKm, mapTilerKey);
+          // Hersteller-Wort abtrennen und den Rest in der Schirme-Liste
+          // finden/anlegen — siehe resolveSchirmForGlider oben.
+          const { name: cleanedGlider, schirmId } = await resolveSchirmForGlider(glider);
           const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr), pdfOnly:false,
-            date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:inferred.site||"",glider:glider||"",
+            date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:inferred.site||"",glider:cleanedGlider||"",
             startTime:"", endTime:"", comment:"", rating:0, notes:"", track,
-            customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,
+            customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,schirmId:schirmId||"",
               hGew: igcData.totalGain ? String(igcData.totalGain) : "",
               hDiff: igcData.hDiff ? String(igcData.hDiff) : "",
               maxSteigen: igcData.maxClimb ? String(igcData.maxClimb) : "",
@@ -4708,7 +4799,7 @@ function FlugbuchApp() {
     setIgcResult({ created: newFlights.length, updated: updatedCount, total: igcFiles.length, deferred: dateAmbiguous.length });
     setTimeout(() => setIgcResult(null), 6000);
     setImporting(false); setImportProgress(null);
-  }, [flights, selected, saveFlight, attachIgcToFlight, placeMatchRadiusKm, mapTilerKey]);
+  }, [flights, selected, saveFlight, attachIgcToFlight, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
 
   const importIGCFiles = useCallback(async (files) => {
     const igc = files.filter(f=>f.name.toLowerCase().endsWith(".igc"));
@@ -4948,7 +5039,15 @@ function FlugbuchApp() {
             title={igcDirFsapiSupported
               ? (igcDirHandle ? `Ordner „${igcDirName}" nach neuen IGC-Dateien durchsuchen (rekursiv, bereits bekannte werden übersprungen) — oder einzelne .igc-Dateien direkt hierher ziehen` : "IGC-Ordner einmalig auswählen (z.B. dein Vario-Laufwerk D:\\) — durchsucht künftig alle Unterordner automatisch. Oder einzelne .igc-Dateien direkt hierher ziehen.")
               : "IGC-Dateien auswählen oder hierher ziehen"}
-            style={{flex:1,border:`2px dashed ${dragOver?"#fcd34d":"rgba(245,158,11,0.25)"}`,borderRadius:10,padding:"10px 8px",textAlign:"center",background:dragOver?"rgba(245,158,11,0.08)":"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3}}>
+            style={{flex:1,border:`2px dashed ${dragOver?"#fcd34d":"rgba(245,158,11,0.25)"}`,borderRadius:10,padding:"10px 8px",textAlign:"center",background:dragOver?"rgba(245,158,11,0.08)":"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,position:"relative"}}>
+            {igcDirFsapiSupported && (
+              <button
+                onClick={e=>{e.stopPropagation();fileRef.current?.click();}}
+                title="Einzelne(s) IGC-Datei(en) direkt über die Dateiauswahl wählen (statt Ordner-Scan)"
+                style={{position:"absolute",top:3,right:3,width:20,height:20,padding:0,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.3)",borderRadius:6,color:"#fcd34d",fontSize:10,cursor:"pointer"}}>
+                📄
+              </button>
+            )}
             <div style={{fontSize:15}}>📂</div>
             <div style={{color:dragOver?"#fcd34d":"rgba(252,211,77,0.5)",fontSize:10}}>
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing ? "⏳ Importiere…" : igcDirScanning ? "⏳ Suche…" : "IGC"}
@@ -5013,10 +5112,11 @@ function FlugbuchApp() {
             }, 0);
             const backfill = computeDistanceSpeedBackfill(0, {}, item.igcData.scoreDistanceKm, item.igcData.durationSec);
             const inferred = await inferPlaceAndCountry(item.igcData.startPt, item.igcData.endPt, flights, placeMatchRadiusKm, mapTilerKey);
+            const { name: cleanedGlider, schirmId } = await resolveSchirmForGlider(item.glider);
             const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr+1), pdfOnly:false,
-              date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:inferred.site||"",glider:item.glider||"",
+              date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:inferred.site||"",glider:cleanedGlider||"",
               startTime:"", endTime:"", comment:"", rating:0, notes:"", track:item.track,
-              customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,
+              customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,schirmId:schirmId||"",
                 hGew: item.igcData.totalGain ? String(item.igcData.totalGain) : "",
                 hDiff: item.igcData.hDiff ? String(item.igcData.hDiff) : "",
                 maxSteigen: item.igcData.maxClimb ? String(item.igcData.maxClimb) : "",
