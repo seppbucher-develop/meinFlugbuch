@@ -4665,6 +4665,14 @@ function FlugbuchApp() {
   // filename-match and the date-match paths, so they stay in sync).
   const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, igcData, igcFilename) => {
     const cf = { ...(existing.customFields||{}) };
+    // Gleiche Regel wie der Typ-Auto-Effekt in FlightDetail: nur setzen,
+    // wenn noch kein Typ vorhanden ist und der Flug nicht explizit vom
+    // automatischen Typ abgemeldet wurde (typAuto:false, z.B. nach
+    // manueller Korrektur). So bekommt auch ein Flug, der z.B. per Excel
+    // ohne Typ importiert und danach per IGC nachträglich mit einem Track
+    // versehen wird, sofort einen durchsuchbaren Typ statt erst beim
+    // ersten Öffnen der Detailansicht.
+    if (!(cf.typ||"").trim() && cf.typAuto !== false) { cf.typ = "GS"; cf.typAuto = true; }
     if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) cf.hGew = String(igcData.totalGain);
     if (igcData.hDiff) cf.hDiff = String(igcData.hDiff);
     if (!(cf.maxSteigen||"").trim() && igcData.maxClimb) cf.maxSteigen = String(igcData.maxClimb);
@@ -4799,6 +4807,13 @@ function FlugbuchApp() {
             date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:inferred.site||"",glider:cleanedGlider||"",
             startTime:"", endTime:"", comment:"", rating:0, notes:"", track,
             customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,schirmId:schirmId||"",
+              // Typ direkt beim Import setzen (wie beim manuellen Neuanlegen
+              // eines Flugs) — vorher wurde "GS" erst beim ersten Öffnen der
+              // Detailansicht gesetzt (siehe useEffect in FlightDetail), was
+              // frisch importierte, noch nie geöffnete Flüge bei der Suche
+              // nach Typ=GS unauffindbar machte, obwohl die Detailansicht
+              // "GS" angezeigt hätte, sobald man sie geöffnet hätte.
+              typ: "GS", typAuto: true,
               hGew: igcData.totalGain ? String(igcData.totalGain) : "",
               hDiff: igcData.hDiff ? String(igcData.hDiff) : "",
               maxSteigen: igcData.maxClimb ? String(igcData.maxClimb) : "",
@@ -5136,6 +5151,9 @@ function FlugbuchApp() {
               date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:inferred.site||"",glider:cleanedGlider||"",
               startTime:"", endTime:"", comment:"", rating:0, notes:"", track:item.track,
               customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,schirmId:schirmId||"",
+                // Siehe processIGCFiles weiter oben — Typ direkt beim Import
+                // setzen statt erst beim ersten Öffnen der Detailansicht.
+                typ: "GS", typAuto: true,
                 hGew: item.igcData.totalGain ? String(item.igcData.totalGain) : "",
                 hDiff: item.igcData.hDiff ? String(item.igcData.hDiff) : "",
                 maxSteigen: item.igcData.maxClimb ? String(item.igcData.maxClimb) : "",
