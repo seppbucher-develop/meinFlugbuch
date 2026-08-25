@@ -402,7 +402,7 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
 }
 
 
-function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, controlsSlot, isWide, mapTilerKey, gpsvColorBy, setGpsvColorBy }) {
+function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, controlsSlot, isWide, mapTilerKey }) {
   const previewDivRef = useRef(null);
   const previewMapRef = useRef(null);
   const previewRefMarkerRef = useRef(null);
@@ -514,6 +514,53 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // was lost" errors, since browsers cap how many live contexts can exist
   // at once. Camera position and the reference marker are instead updated
   // in place by the separate effect below.
+  // Baut den MapTiler/MapLibre "line-gradient"-Ausdruck für die Kartenlinie
+  // — dieselbe Einfärbungslogik wie im Höhenprofil darunter (Höhe: rot=tief
+  // bis blau=hoch; Steigen/Sinken: rot=Sinken bis grün=Steigen), damit
+  // Karte und Profil beim Umschalten immer übereinstimmen. line-gradient
+  // statt tausender Einzelsegmente: eine einzige Linie, deren Farbe entlang
+  // ihrer eigenen Länge (0 bis 1, "line-progress") interpoliert wird — dafür
+  // muss die Quelle mit lineMetrics:true angelegt werden (siehe unten).
+  // Anzahl der Farb-Stützstellen wird auf ~400 begrenzt (Stride-Downsampling),
+  // da ein Ausdruck mit tausenden Stopps unnötig gross und langsam zu
+  // parsen wäre — für eine glatte Farbverlauf-Linie reicht das reichlich.
+  // Baut den MapTiler/MapLibre "line-gradient"-Ausdruck für die Kartenlinie
+  // — färbt nach Steig-/Sinkrate zwischen den GPS-Punkten (rot=Sinken,
+  // gelb=neutral, grün=Steigen). line-gradient statt tausender Einzel-
+  // segmente: eine einzige Linie, deren Farbe entlang ihrer eigenen Länge
+  // (0 bis 1, "line-progress") interpoliert wird — dafür muss die Quelle
+  // mit lineMetrics:true angelegt werden (siehe unten). Stopp-Anzahl auf
+  // ~400 begrenzt (Stride-Downsampling), da ein Ausdruck mit tausenden
+  // Stopps unnötig gross und langsam zu parsen wäre.
+  const buildLineGradient = (pts) => {
+    if (pts.length < 2) return null;
+    const cum = [0];
+    for (let i=1;i<pts.length;i++) cum.push(cum[i-1] + (haversineDistKm(pts[i-1], pts[i]) || 0));
+    const total = cum[cum.length-1] || 1;
+
+    const colorFor = (i) => {
+      if (i === 0) return "hsl(70,90%,50%)"; // erster Punkt: neutral (keine Vorgänger-Rate)
+      const dt = pts[i].timeSec - pts[i-1].timeSec;
+      const rate = dt > 0 ? (pts[i].gpsAlt - pts[i-1].gpsAlt) / dt : 0;
+      const t = (Math.max(-4, Math.min(4, rate)) + 4) / 8;
+      return `hsl(${t*140},90%,50%)`;
+    };
+
+    const stride = Math.max(1, Math.ceil(pts.length / 400));
+    const expr = ["interpolate", ["linear"], ["line-progress"]];
+    let lastProgress = -1;
+    for (let i=0; i<pts.length; i += stride) {
+      const progress = total > 0 ? cum[i] / total : 0;
+      if (progress <= lastProgress) continue; // Stopps müssen strikt steigen
+      expr.push(progress, colorFor(i));
+      lastProgress = progress;
+    }
+    // Letzten Punkt garantiert mit aufnehmen, sonst bricht die Linie am
+    // Ende ggf. vor der eigentlichen Landung farblich ab.
+    if (lastProgress < 1) expr.push(1, colorFor(pts.length-1));
+    return expr;
+  };
+
   const buildMap = (container, mapRefObj, readyRef) => {
     if (!container || !window.maptilersdk || !hasMap || !mapTilerKey) return;
     const sdk = window.maptilersdk;
@@ -558,14 +605,16 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       if (fullTrace.length > 1) {
         map.addSource("track", {
           type: "geojson",
+          lineMetrics: true,
           data: { type: "Feature", geometry: { type: "LineString", coordinates: fullTrace.map(p=>[p.lon,p.lat]) } },
         });
         map.addLayer({ id: "track-casing", type: "line", source: "track",
           layout: { "line-join": "round", "line-cap": "round" },
           paint: { "line-color": "rgba(255,255,255,0.55)", "line-width": 6.5 } });
+        const gradient = buildLineGradient(fullTrace);
         map.addLayer({ id: "track-line", type: "line", source: "track",
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "#1e40af", "line-width": 3.5 } });
+          paint: gradient ? { "line-gradient": gradient, "line-width": 3.5 } : { "line-color": "#1e40af", "line-width": 3.5 } });
       }
       if (track.length) {
         addMarker(track[0], "#22c55e", "S");
@@ -776,49 +825,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (onPlaybackPositionChange) onPlaybackPositionChange(null);
   }, [flight?.id]);
 
-  // Opens the track in GPS Visualizer as an alternative map view — POSTs the
-  // data directly (no file hosting needed, per gpsvisualizer.com/misc/
-  // post_example.html), so it works straight from whatever's already in
-  // IndexedDB. CSV rather than GPX since GPS Visualizer's own docs recommend
-  // it for on-the-fly data ("easiest to deal with"), and the track is
-  // thinned to a sane point count first — thousands of raw 1-second fixes
-  // don't add visible detail a few hundred evenly-spaced points wouldn't,
-  // and GPS Visualizer's own docs warn that very long tracklogs (especially
-  // with colorization on) can make the browser struggle.
-  const openInGpsVisualizer = (e) => {
-    e.stopPropagation();
-    if (!track.length) return;
-    const maxPoints = 1500;
-    const step = Math.max(1, Math.ceil(track.length / maxPoints));
-    const rows = ["type,latitude,longitude,altitude,time"];
-    for (let i = 0; i < track.length; i += step) {
-      const p = track[i];
-      const iso = new Date(p.timeSec*1000).toISOString();
-      rows.push(`T,${p.lat},${p.lon},${p.gpsAlt},${iso}`);
-    }
-    const csv = rows.join("\n");
-    const form = document.createElement("form");
-    form.action = "https://www.gpsvisualizer.com/map";
-    form.method = "POST";
-    form.target = "_blank";
-    const fields = {
-      format: "leaflet",
-      trk_colorize: gpsvColorBy,
-      units: "metric",
-      filename: `${flight?.name || "flug"}.csv`,
-      data: csv,
-    };
-    for (const [name, value] of Object.entries(fields)) {
-      const input = document.createElement("input");
-      input.type = "hidden";
-      input.name = name;
-      input.value = value;
-      form.appendChild(input);
-    }
-    document.body.appendChild(form);
-    form.submit();
-    document.body.removeChild(form);
-  };
 
   return (
     <>
@@ -871,22 +877,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
               )}
             </>
           )}
-          {flight?.track?.length > 0 && (
-            <>
-              <button onClick={openInGpsVisualizer} title="In GPS Visualizer öffnen"
-                style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,color:"rgba(232,244,253,0.7)",fontSize:15,cursor:"pointer"}}>
-                🗺️
-              </button>
-              <button onClick={()=>setGpsvColorBy("altitude")} title="Höhe"
-                style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:gpsvColorBy==="altitude"?"rgba(125,211,252,0.25)":"rgba(255,255,255,0.05)",border:`1px solid ${gpsvColorBy==="altitude"?"rgba(125,211,252,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:8,color:gpsvColorBy==="altitude"?"#7dd3fc":"rgba(232,244,253,0.6)",fontSize:14,cursor:"pointer"}}>
-                📈
-              </button>
-              <button onClick={()=>setGpsvColorBy("climb")} title="Steigen/Sinken"
-                style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:gpsvColorBy==="climb"?"rgba(125,211,252,0.25)":"rgba(255,255,255,0.05)",border:`1px solid ${gpsvColorBy==="climb"?"rgba(125,211,252,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:8,color:gpsvColorBy==="climb"?"#7dd3fc":"rgba(232,244,253,0.6)",fontSize:14,cursor:"pointer"}}>
-                📊
-              </button>
-            </>
-          )}
         </>,
         controlsSlot
       )}
@@ -928,12 +918,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
               )}
             </div>
           )}
-          {flight?.track?.length > 0 && (
-            <button onClick={openInGpsVisualizer}
-              style={{position:"absolute",bottom:"calc(15vh + 10px)",left:14,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:20,padding:"6px 14px",color:"#fff",fontSize:12,fontWeight:700,cursor:"pointer"}}>
-              🗺️ GPS Visualizer
-            </button>
-          )}
           <button onClick={()=>setIsFullscreen(false)}
             style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",right:14,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:20,width:32,height:32,color:"#fff",fontSize:16,cursor:"pointer"}}>
             ✕
@@ -954,7 +938,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
 // are sent (one batched request) rather than the whole track, since terrain
 // doesn't need 1-second resolution to look right and Open-Meteo caps
 // batches at 100 coordinates anyway.
-function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybackActive, controlsSlot, isWide, colorBy }) {
+function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybackActive, controlsSlot, isWide }) {
   const canvasRef = useRef(null);
   const [groundProfile, setGroundProfile] = useState(null);
   const [groundError, setGroundError] = useState(false);
@@ -1319,30 +1303,18 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
       ctx.stroke();
     }
 
-    // Flight segment — colour-coded line. "altitude": red=low, blue=high
-    // (wie bisher). "climb": rot=Sinken, gelb=neutral, grün=Steigen,
-    // je Segment aus der Höhenänderung pro Sekunde zwischen zwei
-    // aufeinanderfolgenden Punkten (dieselbe rohe Punkt-zu-Punkt-Rate wie
-    // beim Max.Steigen/Max.Sinken-Feld, nicht geglättet).
+    // Flight segment — height-colour-coded line (red=low, blue=high).
     for (let i=1;i<track.length;i++) {
       if (distances[i] < visStart && distances[i-1] < visStart) continue;
       if (distances[i-1] > visEnd && distances[i] > visEnd) continue;
-      if (colorBy === "climb") {
-        const dt = track[i].timeSec - track[i-1].timeSec;
-        const rate = dt > 0 ? (track[i].gpsAlt - track[i-1].gpsAlt) / dt : 0;
-        const clamped = Math.max(-4, Math.min(4, rate));
-        const t = (clamped + 4) / 8; // 0 = starkes Sinken, 1 = starkes Steigen
-        ctx.strokeStyle = `hsl(${t*140},90%,50%)`; ctx.lineWidth = 2.5*dpr;
-      } else {
-        const t = (track[i].gpsAlt-minA)/altRange;
-        ctx.strokeStyle = `hsl(${t*240},100%,50%)`; ctx.lineWidth = 2.5*dpr;
-      }
+      const t = (track[i].gpsAlt-minA)/altRange;
+      ctx.strokeStyle = `hsl(${t*240},100%,50%)`; ctx.lineWidth = 2.5*dpr;
       ctx.beginPath();
       ctx.moveTo(xPos(distances[i-1]), yPos(track[i-1].gpsAlt));
       ctx.lineTo(xPos(distances[i]), yPos(track[i].gpsAlt));
       ctx.stroke();
     }
-  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceKm, isPlaybackActive, colorBy]);
+  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceKm, isPlaybackActive]);
 
   if (!track.length) return null;
 
@@ -3224,11 +3196,6 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
     const [notesEditing, setNotesEditing] = useState(false);
     const [profileRange, setProfileRange] = useState(null);
     const [playbackDistance, setPlaybackDistance] = useState(null);
-    // Von FlightMap (Buttons) UND FlightProfile (Einfärbung der Linie)
-    // gemeinsam genutzt — muss deshalb hier liegen, eine Ebene über beiden
-    // Geschwister-Komponenten, statt (wie zuvor) isoliert innerhalb von
-    // FlightMap, wo FlightProfile keinen Zugriff darauf hatte.
-    const [gpsvColorBy, setGpsvColorBy] = useState("altitude"); // "altitude" | "climb"
     // Map and profile each keep owning their own controls' state, but the
     // actual buttons render into this shared slot below the profile
     // (via portals) instead of their original positions between map and
@@ -3426,8 +3393,8 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
 
           {/* Map */}
           <div data-no-swipe="true">
-            <div style={{borderRadius:14,marginBottom:14,border:"1px solid rgba(100,180,255,0.12)"}}><FlightMap flight={fl} highlightRange={profileRange} onPlaybackPositionChange={setPlaybackDistance} onPlaybackActiveChange={setIsPlaybackActive} onPlaybackPhaseChange={setPlaybackPhase} controlsSlot={controlsSlotEl} isWide={isWide} mapTilerKey={mapTilerKey} gpsvColorBy={gpsvColorBy} setGpsvColorBy={setGpsvColorBy} /></div>
-            <FlightProfile flight={fl} onPositionChange={setProfileRange} playbackDistanceKm={playbackDistance} isPlaybackActive={isPlaybackActive} playbackPhase={playbackPhase} controlsSlot={controlsSlotEl} isWide={isWide} colorBy={gpsvColorBy} />
+            <div style={{borderRadius:14,marginBottom:14,border:"1px solid rgba(100,180,255,0.12)"}}><FlightMap flight={fl} highlightRange={profileRange} onPlaybackPositionChange={setPlaybackDistance} onPlaybackActiveChange={setIsPlaybackActive} onPlaybackPhaseChange={setPlaybackPhase} controlsSlot={controlsSlotEl} isWide={isWide} mapTilerKey={mapTilerKey} /></div>
+            <FlightProfile flight={fl} onPositionChange={setProfileRange} playbackDistanceKm={playbackDistance} isPlaybackActive={isPlaybackActive} playbackPhase={playbackPhase} controlsSlot={controlsSlotEl} isWide={isWide} />
           </div>
           {/* Shared row: every control from both the map (play/speed/reset/
               GPS Visualizer/Höhe·Steigen-Sinken) and the profile (Zoom/Zoom
