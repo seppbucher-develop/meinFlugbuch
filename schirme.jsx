@@ -97,14 +97,51 @@ function SchirmeApp() {
     return best ? best[0] : "";
   };
 
-  // Bereinigung: durchsucht alle Flüge nach bekannten Hersteller-Präfixen
-  // im Schirm-Feld, entfernt den Präfix aus dem Flug-Feld "Schirm" und legt
-  // (bzw. aktualisiert) den passenden Schirme-Eintrag mit dem erkannten
-  // Hersteller an. Manuell ausgelöst (kein automatischer Lauf beim Start).
+  // Die eigentliche, robuste Referenz: jeder Flug bekommt (unsichtbar, in
+  // customFields.schirmId) die ID des Schirme-Eintrags, dem er zugeordnet
+  // ist — statt sich bei jeder Zählung erneut auf den Namens-TEXT zu
+  // verlassen (der durch Leerzeichen, Gross-/Kleinschreibung o.ä. leicht
+  // uneindeutig wird, wie sich gezeigt hat). Verknüpft alle Flüge, deren
+  // aktueller Schirm-Text zum übergebenen Eintrag passt, aber noch nicht
+  // (oder noch falsch) referenziert sind. Läuft bei jedem Erzeugen/
+  // Reparieren erneut, damit auch neu importierte Flüge automatisch
+  // nachgezogen werden.
+  const linkFlightsToSchirm = async (fl, schirmEntry) => {
+    const targetName = (schirmEntry.name || "").trim();
+    const toLink = fl.filter(f =>
+      (f.glider || "").trim() === targetName && f.customFields?.schirmId !== schirmEntry.id
+    );
+    if (!toLink.length) return { updated: [], count: 0 };
+    const updated = toLink.map(f => ({ ...f, customFields: { ...(f.customFields || {}), schirmId: schirmEntry.id } }));
+    await Promise.all(updated.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
+    return { updated, count: updated.length };
+  };
+
+  // Repariert die schirmId-Verknüpfung für ALLE Schirme-Einträge in einem
+  // Durchgang — verknüpft nach aktuellem Namens-Text (einmaliger
+  // Textabgleich pro Aufruf), danach zählt für die Anzeige ausschliesslich
+  // noch die ID. Gibt die Gesamtzahl neu verknüpfter Flüge zurück.
+  const relinkAll = async (fl, schirmeList) => {
+    let working = fl;
+    let total = 0;
+    for (const s of schirmeList) {
+      const { updated, count } = await linkFlightsToSchirm(working, s);
+      if (count) {
+        const byId = new Map(updated.map(f => [f.id, f]));
+        working = working.map(f => byId.get(f.id) || f);
+        total += count;
+      }
+    }
+    return { flights: working, count: total };
+  };
+
   // Benennt einen Schirm-Namen bei ALLEN betroffenen Flügen im Flugbuch um
   // — verwendet sowohl beim manuellen Umbenennen im Editor als auch von der
-  // Schnellkorrektur-Liste unten. Gibt die Anzahl aktualisierter Flüge
-  // zurück.
+  // Schnellkorrektur-Liste unten. Aktualisiert bewusst weiterhin den
+  // Flug-Text (glider), da flugbuch.jsx selbst nur diesen Text kennt und
+  // anzeigt/durchsucht — die schirmId ist eine zusätzliche, für flugbuch.jsx
+  // unsichtbare Absicherung nur für diese Seite hier. Gibt die Anzahl
+  // aktualisierter Flüge zurück.
   const renameGliderEverywhere = async (oldName, newName) => {
     const fl = flights || await loadAllFlights();
     // Bugfix: der Flug-Schirm-Wert wurde getrimmt verglichen, oldName aber
@@ -120,21 +157,21 @@ function SchirmeApp() {
     return updated.length;
   };
 
-  // Findet Schirme-Einträge, deren Namen sich normalisiert (getrimmt,
-  // mehrfache Leerzeichen zusammengefasst) gleichen — sie sehen für den
-  // Menschen identisch aus (z.B. "Sigma 11" doppelt), sind aber intern
-  // unterschiedliche Zeichenketten (typischerweise durch ein Leerzeichen
-  // am Rand, aus Excel-Import oder mehrfachem "Schirme erzeugen"
-  // entstanden). Führt sie zusammen: EIN Eintrag (der mit den meisten
-  // Flügen) wird zum Ziel, auf das alle betroffenen Flüge umgeschrieben
-  // werden — danach hat genau ein Eintrag alle Flüge, der/die anderen
-  // 0 Flüge und können manuell gelöscht werden.
+  // Führt Schirme mit gleichem (getrimmtem) Namen zusammen — jetzt anhand
+  // der schirmId, nicht mehr per Text: robust auch dann, wenn beide
+  // Einträge zwischenzeitlich exakt denselben Namen tragen (z.B. weil
+  // einer davon einmal geöffnet und ungewollt getrimmt gespeichert wurde).
+  // Alle Flüge, die per schirmId ODER (als Rückfallebene) per Namens-Text
+  // auf den "anderen" Eintrag verweisen, werden auf den kanonischen
+  // Eintrag umgehängt — Text UND schirmId werden beide aktualisiert.
   const normalizeName = (n) => (n || "").trim().replace(/\s+/g, " ");
   const mergeDuplicates = async () => {
     setBusy(true); setMsg(null);
     try {
-      const fl = flights || await loadAllFlights();
-      const countFor = (rawName) => fl.filter(f => (f.glider || "").trim() === rawName).length;
+      let fl = flights || await loadAllFlights();
+      const countFor = (s) => fl.filter(f =>
+        f.customFields?.schirmId === s.id || (f.glider || "").trim() === (s.name || "").trim()
+      ).length;
       const groups = {};
       schirme.forEach(s => {
         const key = normalizeName(s.name).toLowerCase();
@@ -149,13 +186,25 @@ function SchirmeApp() {
       let mergedGroups = 0, updatedFlightsTotal = 0;
       let nextSchirme = [...schirme];
       for (const group of dupGroups) {
-        const withCounts = group.map(s => ({ s, count: countFor(s.name) }));
+        const withCounts = group.map(s => ({ s, count: countFor(s) }));
         withCounts.sort((a, b) => b.count - a.count);
         const canonical = withCounts[0].s;
         const others = withCounts.slice(1).map(x => x.s);
         for (const other of others) {
-          if (other.name !== canonical.name) {
-            updatedFlightsTotal += await renameGliderEverywhere(other.name, canonical.name);
+          // Jeder Flug, der per ID ODER per Text auf "other" verweist, wird
+          // vollständig auf "canonical" umgehängt (Text UND schirmId).
+          const affected = fl.filter(f =>
+            f.customFields?.schirmId === other.id || (f.glider || "").trim() === (other.name || "").trim()
+          );
+          if (affected.length) {
+            const updated = affected.map(f => ({
+              ...f, glider: canonical.name,
+              customFields: { ...(f.customFields || {}), schirmId: canonical.id },
+            }));
+            await Promise.all(updated.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
+            const byId = new Map(updated.map(f => [f.id, f]));
+            fl = fl.map(f => byId.get(f.id) || f);
+            updatedFlightsTotal += updated.length;
           }
         }
         // Fehlende Angaben (Hersteller/Typ/letzterCheck/Material-Link) aus
@@ -171,9 +220,8 @@ function SchirmeApp() {
         mergedGroups++;
       }
       await saveSchirme(nextSchirme);
-      const updatedFl = await loadAllFlights();
-      setFlights(updatedFl);
-      setMsg({ type: "ok", text: `✓ ${mergedGroups} Dublette(n) zusammengeführt, ${updatedFlightsTotal} Flüge aktualisiert. Die übrig gebliebenen Einträge mit 0 Flügen kannst du jetzt löschen.` });
+      setFlights(fl);
+      setMsg({ type: "ok", text: `✓ ${mergedGroups} Dublette(n) zusammengeführt, ${updatedFlightsTotal} Flüge umgehängt (Text + interne Referenz). Die übrig gebliebenen Einträge mit 0 Flügen kannst du jetzt löschen.` });
     } catch (e) {
       setMsg({ type: "error", text: "Fehler beim Zusammenführen: " + (e.message || String(e)) });
     } finally {
@@ -187,7 +235,14 @@ function SchirmeApp() {
       const count = await renameGliderEverywhere(from, to);
       const next = schirme.map(s => s.name === from ? { ...s, name: to } : s);
       await saveSchirme(next);
-      const updatedFl = await loadAllFlights();
+      let updatedFl = await loadAllFlights();
+      // Nach der Textumbenennung sofort auch die schirmId nachziehen, damit
+      // die Zählung ab jetzt wieder robust über die ID läuft.
+      const targetEntry = next.find(s => s.name === to);
+      if (targetEntry) {
+        const { flights: relinked } = await relinkAll(updatedFl, [targetEntry]);
+        updatedFl = relinked;
+      }
       setFlights(updatedFl);
       setMsg({ type: "ok", text: `✓ „${from}" → „${to}": ${count} Flüge aktualisiert.` });
     } catch (e) {
@@ -217,7 +272,13 @@ function SchirmeApp() {
       let updatedFlights = 0;
       const flightUpdates = fl
         .filter(f => renameMap[(f.glider || "").trim()])
-        .map(f => ({ ...f, glider: renameMap[(f.glider || "").trim()].cleaned }));
+        .map(f => ({
+          ...f, glider: renameMap[(f.glider || "").trim()].cleaned,
+          // Text ändert sich hier — eine evtl. vorhandene schirmId würde
+          // sonst auf den falschen (alten) Eintrag zeigen. Zurückgesetzt,
+          // "Schirme aus Flugbuch erzeugen" verknüpft danach sauber neu.
+          customFields: { ...(f.customFields || {}), schirmId: undefined },
+        }));
       await Promise.all(flightUpdates.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
       updatedFlights = flightUpdates.length;
 
@@ -257,11 +318,6 @@ function SchirmeApp() {
       const names = [...new Set(fl.map(f => (f.glider || "").trim()).filter(Boolean))];
       const existingNames = new Set(schirme.map(s => (s.name || "").trim()));
       const missing = names.filter(n => !existingNames.has(n));
-      if (!missing.length) {
-        setMsg({ type: "ok", text: "Alle Schirm-Namen aus den Flügen sind bereits erfasst — nichts zu erzeugen." });
-        setBusy(false);
-        return;
-      }
       let linked = 0;
       const newEntries = missing.map(n => {
         // Eindeutiger Namens-Treffer im Material-Feld "Was" (Gross-/
@@ -275,8 +331,19 @@ function SchirmeApp() {
           name: n, hersteller: "", typ: "", letzterCheck: "", materialEntryId,
         };
       });
-      await saveSchirme([...schirme, ...newEntries]);
-      setMsg({ type: "ok", text: `✓ ${newEntries.length} Schirm(e) erzeugt${linked ? `, davon ${linked} automatisch mit Material verknüpft` : ""}.` });
+      const allSchirme = [...schirme, ...newEntries];
+      if (newEntries.length) await saveSchirme(allSchirme);
+      // Zusätzlich zum Erzeugen neuer Einträge: die schirmId-Verknüpfung
+      // für ALLE Einträge (auch bereits bestehende) einmal reparieren —
+      // fängt neu importierte Flüge ein, die textlich schon zu einem
+      // bestehenden Schirm passen, aber noch nie durch diese Seite
+      // gelaufen sind und daher noch keine schirmId tragen.
+      const { flights: relinked, count: relinkCount } = await relinkAll(fl, allSchirme);
+      setFlights(relinked);
+      const parts = [];
+      if (newEntries.length) parts.push(`${newEntries.length} Schirm(e) erzeugt${linked ? ` (${linked}× mit Material verknüpft)` : ""}`);
+      if (relinkCount) parts.push(`${relinkCount} Flug-Verknüpfung(en) ergänzt`);
+      setMsg({ type: "ok", text: parts.length ? `✓ ${parts.join(", ")}.` : "Alles bereits aktuell — nichts zu erzeugen oder zu verknüpfen." });
     } catch (e) {
       setMsg({ type: "error", text: "Fehler beim Erzeugen: " + (e.message || String(e)) });
     } finally {
@@ -284,10 +351,18 @@ function SchirmeApp() {
     }
   };
 
-  const flightCountFor = (name) => (flights || []).filter(f => (f.glider || "").trim() === name).length;
-  const durationFor = (name) => (flights || [])
-    .filter(f => (f.glider || "").trim() === name)
-    .reduce((sum, f) => sum + (f.durationSec || 0), 0);
+  // Primär über die schirmId (robust, eindeutig) — Text-Vergleich nur noch
+  // als Rückfallebene für Flüge, die diese Seite noch nie durchlaufen hat
+  // (z.B. druckfrisch importiert, "Erzeugen"/"Reparieren" noch nicht
+  // erneut ausgeführt). Ein Flug zählt nie doppelt: sobald er per ID
+  // verknüpft ist, greift ausschliesslich diese Zeile, unabhängig davon,
+  // ob sein Text zufällig auch bei einem anderen Eintrag passen würde.
+  const matchesSchirm = (f, entry) => f.customFields?.schirmId
+    ? f.customFields.schirmId === entry.id
+    : (f.glider || "").trim() === (entry.name || "").trim();
+  const flightsFor = (entry) => (flights || []).filter(f => matchesSchirm(f, entry));
+  const flightCountFor = (entry) => flightsFor(entry).length;
+  const durationFor = (entry) => flightsFor(entry).reduce((sum, f) => sum + (f.durationSec || 0), 0);
   const materialFor = (id) => material.find(m => m.id === id) || null;
 
   if (flights === null) {
@@ -361,7 +436,7 @@ function SchirmeApp() {
               style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: "12px 14px", marginBottom: 8, cursor: "pointer" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
                 <span style={{ fontSize: 14, fontWeight: 700, color: "#7dd3fc" }}>{s.name}</span>
-                <span style={{ fontSize: 11, color: "rgba(232,244,253,0.4)" }}>{flightCountFor(s.name)} Flüge · {formatFlightHours(durationFor(s.name))}</span>
+                <span style={{ fontSize: 11, color: "rgba(232,244,253,0.4)" }}>{flightCountFor(s)} Flüge · {formatFlightHours(durationFor(s))}</span>
               </div>
               <div style={{ fontSize: 12, color: "rgba(232,244,253,0.7)", display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <span>{s.hersteller || "— Hersteller —"}</span>
