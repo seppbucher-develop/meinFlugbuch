@@ -7,6 +7,11 @@
 
 <meta name="theme-color" content="#040e20" />
 
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png" />
+<link rel="icon" type="image/png" sizes="96x96" href="icons/icon-96.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+<link rel="manifest" href="manifest.json" />
+
 <style>
   html, body {
     margin: 0; padding: 0; background: #040e20;
@@ -175,5 +180,30 @@
       });
     })();
   </script>
+
+<script>
+  // Service Worker: ermöglicht Offline-Nutzung ab dem zweiten Online-Start.
+  // Siehe sw.js für die Cache-Strategie (network-first, cache-fallback).
+  window.addEventListener("load", function() {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.js").catch(function(e) {
+        console.error("Service-Worker-Registrierung fehlgeschlagen:", e);
+      });
+    }
+  });
+</script>
+
+<div id="offline-banner" style="display:none;position:fixed;bottom:calc(10px + env(safe-area-inset-bottom, 0px));left:10px;right:10px;background:rgba(245,158,11,0.8);color:#1a1200;font-weight:700;text-align:center;padding:7px 16px;border-radius:10px;z-index:9999;font-family:system-ui,sans-serif;font-size:14px;">
+  📴 Offline — zuletzt gespeicherter Stand
+</div>
+<script>
+  function updateOfflineBanner() {
+    var el = document.getElementById("offline-banner");
+    if (el) el.style.display = navigator.onLine ? "none" : "block";
+  }
+  window.addEventListener("online", updateOfflineBanner);
+  window.addEventListener("offline", updateOfflineBanner);
+  updateOfflineBanner();
+</script>
 </body>
 </html>
