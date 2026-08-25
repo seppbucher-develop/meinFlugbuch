@@ -402,7 +402,7 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
 }
 
 
-function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, controlsSlot, isWide, mapTilerKey }) {
+function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, controlsSlot, isWide, mapTilerKey, gpsvColorBy, setGpsvColorBy }) {
   const previewDivRef = useRef(null);
   const previewMapRef = useRef(null);
   const previewRefMarkerRef = useRef(null);
@@ -454,7 +454,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   const previewPlayMarkerRef = useRef(null);
   const playRafRef = useRef(null);
   const playLastTsRef = useRef(null);
-  const [gpsvColorBy, setGpsvColorBy] = useState("altitude"); // "altitude" | "climb"
 
   const togglePlay = () => setIsPlaying(p => !p);
 
@@ -955,7 +954,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
 // are sent (one batched request) rather than the whole track, since terrain
 // doesn't need 1-second resolution to look right and Open-Meteo caps
 // batches at 100 coordinates anyway.
-function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybackActive, controlsSlot, isWide }) {
+function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybackActive, controlsSlot, isWide, colorBy }) {
   const canvasRef = useRef(null);
   const [groundProfile, setGroundProfile] = useState(null);
   const [groundError, setGroundError] = useState(false);
@@ -1320,18 +1319,30 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
       ctx.stroke();
     }
 
-    // Flight segment — height-colour-coded line (red=low, blue=high).
+    // Flight segment — colour-coded line. "altitude": red=low, blue=high
+    // (wie bisher). "climb": rot=Sinken, gelb=neutral, grün=Steigen,
+    // je Segment aus der Höhenänderung pro Sekunde zwischen zwei
+    // aufeinanderfolgenden Punkten (dieselbe rohe Punkt-zu-Punkt-Rate wie
+    // beim Max.Steigen/Max.Sinken-Feld, nicht geglättet).
     for (let i=1;i<track.length;i++) {
       if (distances[i] < visStart && distances[i-1] < visStart) continue;
       if (distances[i-1] > visEnd && distances[i] > visEnd) continue;
-      const t = (track[i].gpsAlt-minA)/altRange;
-      ctx.strokeStyle = `hsl(${t*240},100%,50%)`; ctx.lineWidth = 2.5*dpr;
+      if (colorBy === "climb") {
+        const dt = track[i].timeSec - track[i-1].timeSec;
+        const rate = dt > 0 ? (track[i].gpsAlt - track[i-1].gpsAlt) / dt : 0;
+        const clamped = Math.max(-4, Math.min(4, rate));
+        const t = (clamped + 4) / 8; // 0 = starkes Sinken, 1 = starkes Steigen
+        ctx.strokeStyle = `hsl(${t*140},90%,50%)`; ctx.lineWidth = 2.5*dpr;
+      } else {
+        const t = (track[i].gpsAlt-minA)/altRange;
+        ctx.strokeStyle = `hsl(${t*240},100%,50%)`; ctx.lineWidth = 2.5*dpr;
+      }
       ctx.beginPath();
       ctx.moveTo(xPos(distances[i-1]), yPos(track[i-1].gpsAlt));
       ctx.lineTo(xPos(distances[i]), yPos(track[i].gpsAlt));
       ctx.stroke();
     }
-  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceKm, isPlaybackActive]);
+  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceKm, isPlaybackActive, colorBy]);
 
   if (!track.length) return null;
 
@@ -3213,6 +3224,11 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
     const [notesEditing, setNotesEditing] = useState(false);
     const [profileRange, setProfileRange] = useState(null);
     const [playbackDistance, setPlaybackDistance] = useState(null);
+    // Von FlightMap (Buttons) UND FlightProfile (Einfärbung der Linie)
+    // gemeinsam genutzt — muss deshalb hier liegen, eine Ebene über beiden
+    // Geschwister-Komponenten, statt (wie zuvor) isoliert innerhalb von
+    // FlightMap, wo FlightProfile keinen Zugriff darauf hatte.
+    const [gpsvColorBy, setGpsvColorBy] = useState("altitude"); // "altitude" | "climb"
     // Map and profile each keep owning their own controls' state, but the
     // actual buttons render into this shared slot below the profile
     // (via portals) instead of their original positions between map and
@@ -3410,8 +3426,8 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
 
           {/* Map */}
           <div data-no-swipe="true">
-            <div style={{borderRadius:14,marginBottom:14,border:"1px solid rgba(100,180,255,0.12)"}}><FlightMap flight={fl} highlightRange={profileRange} onPlaybackPositionChange={setPlaybackDistance} onPlaybackActiveChange={setIsPlaybackActive} onPlaybackPhaseChange={setPlaybackPhase} controlsSlot={controlsSlotEl} isWide={isWide} mapTilerKey={mapTilerKey} /></div>
-            <FlightProfile flight={fl} onPositionChange={setProfileRange} playbackDistanceKm={playbackDistance} isPlaybackActive={isPlaybackActive} playbackPhase={playbackPhase} controlsSlot={controlsSlotEl} isWide={isWide} />
+            <div style={{borderRadius:14,marginBottom:14,border:"1px solid rgba(100,180,255,0.12)"}}><FlightMap flight={fl} highlightRange={profileRange} onPlaybackPositionChange={setPlaybackDistance} onPlaybackActiveChange={setIsPlaybackActive} onPlaybackPhaseChange={setPlaybackPhase} controlsSlot={controlsSlotEl} isWide={isWide} mapTilerKey={mapTilerKey} gpsvColorBy={gpsvColorBy} setGpsvColorBy={setGpsvColorBy} /></div>
+            <FlightProfile flight={fl} onPositionChange={setProfileRange} playbackDistanceKm={playbackDistance} isPlaybackActive={isPlaybackActive} playbackPhase={playbackPhase} controlsSlot={controlsSlotEl} isWide={isWide} colorBy={gpsvColorBy} />
           </div>
           {/* Shared row: every control from both the map (play/speed/reset/
               GPS Visualizer/Höhe·Steigen-Sinken) and the profile (Zoom/Zoom
