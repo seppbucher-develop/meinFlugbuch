@@ -218,7 +218,10 @@ function buildGpxFromFlight(flight) {
 // Separate from FlightMap's own custom canvas renderer used in the flight
 // detail view, which stays exactly as it was (it needs the height-profile
 // zoom sync, which this map has no equivalent of).
-const MAPTILER_API_KEY = "HFElbKEufz9KOHI4w2jB";
+// Standard-Schlüssel, falls in Service noch kein eigener hinterlegt wurde
+// (siehe FlugbuchApp: lädt "settings:maptilerApiKey" und überschreibt
+// diesen Default, sobald einer gespeichert ist).
+const MAPTILER_API_KEY_DEFAULT = "HFElbKEufz9KOHI4w2jB";
 
 // Stylised paraglider wing icon (top-down view, transparent background,
 // user-provided photo/render) used as the profile-sync reference marker in
@@ -261,7 +264,7 @@ function removeStrayMapTilerWarnings() {
 }
 
 
-function WorldMapView({ flights, selectedIds, onBack }) {
+function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
   const mapDivRef = useRef(null);
   const mapRef = useRef(null);
   const [showSP, setShowSP] = useState(true);
@@ -311,7 +314,7 @@ function WorldMapView({ flights, selectedIds, onBack }) {
       if (mapDivRef.current) mapDivRef.current.innerHTML = "";
       const map = new sdk.Map({
         container: mapDivRef.current,
-        apiKey: MAPTILER_API_KEY,
+        apiKey: mapTilerKey || MAPTILER_API_KEY_DEFAULT,
         style: sdk.MapStyle.OUTDOOR,
         language: "de",
         center: [points[0].lon, points[0].lat],
@@ -392,7 +395,7 @@ function WorldMapView({ flights, selectedIds, onBack }) {
 }
 
 
-function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, controlsSlot, isWide }) {
+function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, controlsSlot, isWide, mapTilerKey }) {
   const previewDivRef = useRef(null);
   const previewMapRef = useRef(null);
   const previewRefMarkerRef = useRef(null);
@@ -517,7 +520,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     readyRef.current = false;
     const initialCenter = track.length ? [track[0].lon, track[0].lat] : [sP.lon, sP.lat];
     const map = new sdk.Map({
-      container, apiKey: MAPTILER_API_KEY, style: sdk.MapStyle.OUTDOOR,
+      container, apiKey: mapTilerKey || MAPTILER_API_KEY_DEFAULT, style: sdk.MapStyle.OUTDOOR,
       language: "de", center: initialCenter, zoom: 11,
     });
     mapRefObj.current = map;
@@ -3072,7 +3075,7 @@ function SchirmSelect({ value, onSave, extra }) {
 
 
 
-function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, setSelected, setView, setEditData, saveFlight, showFieldEditor, setShowFieldEditor, handleSaveFields, confirmDelete, setConfirmDelete, hideBackButton, isWide, returnTo }) {
+function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, setSelected, setView, setEditData, saveFlight, showFieldEditor, setShowFieldEditor, handleSaveFields, confirmDelete, setConfirmDelete, hideBackButton, isWide, returnTo, mapTilerKey }) {
 
     const autoFields = customFieldDefs.filter(d=>d.formula).map(d=>({...d, value:evalFormula(d.formula,fl,flights)}));
     const manualFields = customFieldDefs.filter(d=>!d.formula);
@@ -3369,11 +3372,6 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
             </div>
             <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginLeft:"auto",justifyContent:"flex-end"}}>
               {fl.track?.length>1&&<span style={{background:"rgba(30,64,175,0.22)",color:"#60a5fa",borderRadius:20,padding:"2px 10px",fontSize:10,fontWeight:700,flexShrink:0}}>IGC</span>}
-              <button onClick={()=>window.open("https://www.xcontest.org/world/en/my-flights/","_blank")}
-                title="XContest — Meine Flüge"
-                style={{background:"rgba(245,158,11,0.18)",border:"1px solid rgba(245,158,11,0.4)",color:"#fcd34d",borderRadius:20,padding:"2px 10px",fontSize:10,fontWeight:700,flexShrink:0,cursor:"pointer"}}>
-                XContest
-              </button>
             </div>
           </div>
 
@@ -3398,7 +3396,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
 
           {/* Map */}
           <div data-no-swipe="true">
-            <div style={{borderRadius:14,marginBottom:14,border:"1px solid rgba(100,180,255,0.12)"}}><FlightMap flight={fl} highlightRange={profileRange} onPlaybackPositionChange={setPlaybackDistance} onPlaybackActiveChange={setIsPlaybackActive} onPlaybackPhaseChange={setPlaybackPhase} controlsSlot={controlsSlotEl} isWide={isWide} /></div>
+            <div style={{borderRadius:14,marginBottom:14,border:"1px solid rgba(100,180,255,0.12)"}}><FlightMap flight={fl} highlightRange={profileRange} onPlaybackPositionChange={setPlaybackDistance} onPlaybackActiveChange={setIsPlaybackActive} onPlaybackPhaseChange={setPlaybackPhase} controlsSlot={controlsSlotEl} isWide={isWide} mapTilerKey={mapTilerKey} /></div>
             <FlightProfile flight={fl} onPositionChange={setProfileRange} playbackDistanceKm={playbackDistance} isPlaybackActive={isPlaybackActive} playbackPhase={playbackPhase} controlsSlot={controlsSlotEl} isWide={isWide} />
           </div>
           {/* Shared row: every control from both the map (play/speed/reset/
@@ -3851,6 +3849,18 @@ function DateAmbiguousResolver({ item, onAssign, onCreateNew, onClose, descripti
 function FlugbuchApp() {
   const isWide = useIsWide();
   const [flights, setFlights] = useState([]);
+  // Eigener MapTiler-Schlüssel, falls unter Service → API-Zugangsdaten
+  // hinterlegt — sonst bleibt es beim eingebauten Default (siehe
+  // MAPTILER_API_KEY_DEFAULT weiter oben in dieser Datei).
+  const [mapTilerKey, setMapTilerKey] = useState("");
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("settings:maptilerApiKey");
+        if (r && r.value) setMapTilerKey(r.value);
+      } catch {}
+    })();
+  }, []);
   // Derived once whenever the flight list changes — entfernungSL needs
   // every flight's start/end points to compute (great-circle distance),
   // so it's precomputed here rather than in the per-flight sort/search
@@ -4556,7 +4566,7 @@ function FlugbuchApp() {
 
   const enrichedSelected = selected ? (flightsWithRanks.find(f=>f.id===selected.id) || selected) : null;
 
-  if (view==="worldmap") return <WorldMapView flights={filteredFlights} selectedIds={selectedIds} onBack={()=>setView("list")} />;
+  if (view==="worldmap") return <WorldMapView flights={filteredFlights} selectedIds={selectedIds} onBack={()=>setView("list")} mapTilerKey={mapTilerKey} />;
 
   // ── DETAIL VIEW ─────────────────────────────────────────────────────────
   if (view==="detail" && selected && isWide) {
@@ -4570,7 +4580,7 @@ function FlugbuchApp() {
             setEditData={setEditData}
             saveFlight={saveFlight} showFieldEditor={showFieldEditor} setShowFieldEditor={setShowFieldEditor}
             handleSaveFields={handleSaveFields} confirmDelete={confirmDelete} setConfirmDelete={setConfirmDelete}
-            returnTo={returnTo}
+            returnTo={returnTo} mapTilerKey={mapTilerKey}
             hideBackButton={true} isWide={true} />
         </div>
       </div>
@@ -4582,7 +4592,7 @@ function FlugbuchApp() {
       setEditData={setEditData}
       saveFlight={saveFlight} showFieldEditor={showFieldEditor} setShowFieldEditor={setShowFieldEditor}
       handleSaveFields={handleSaveFields} confirmDelete={confirmDelete} setConfirmDelete={setConfirmDelete}
-      returnTo={returnTo}
+      returnTo={returnTo} mapTilerKey={mapTilerKey}
       isWide={isWide} />;
   }
 

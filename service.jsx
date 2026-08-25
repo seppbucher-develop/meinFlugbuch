@@ -19,6 +19,34 @@ function ServiceApp() {
   const [stats, setStats] = React.useState(null); // {flights, material, keys}
   const fileRef = React.useRef(null);
 
+  // API-Zugangsdaten (aktuell: MapTiler) — zentral hier hinterlegt statt
+  // fest im Quellcode von flugbuch.jsx, damit ein eigener Schlüssel nicht
+  // bei jeder Code-Änderung neu eingetragen werden muss. flugbuch.jsx liest
+  // "settings:maptilerApiKey" beim Start und nutzt, falls vorhanden, diesen
+  // statt des eingebauten Standard-Schlüssels.
+  const [maptilerKey, setMaptilerKey] = React.useState("");
+  const [maptilerKeySaved, setMaptilerKeySaved] = React.useState(false);
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("settings:maptilerApiKey");
+        if (r && r.value) { setMaptilerKey(r.value); setMaptilerKeySaved(true); }
+      } catch {}
+    })();
+  }, []);
+  const saveMaptilerKey = async () => {
+    const trimmed = maptilerKey.trim();
+    try {
+      if (trimmed) await window.storage.set("settings:maptilerApiKey", trimmed);
+      else await window.storage.delete("settings:maptilerApiKey");
+      await window.storage.set("settings:backupDirty", "1");
+      setMaptilerKeySaved(!!trimmed);
+      setMsg({ type: "ok", text: trimmed ? "✓ MapTiler-Schlüssel gespeichert." : "✓ MapTiler-Schlüssel entfernt — Flugbuch nutzt wieder den eingebauten Standard-Schlüssel." });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Speichern: " + (e.message || String(e)) });
+    }
+  };
+
   // Lokaler Backup-Ordner (File System Access API) — nur Chrome/Edge
   // Desktop unterstützen das; auf allen anderen Browsern (Safari, Firefox,
   // jedes Handy) bleibt es beim Teilen/Download-Weg weiter unten.
@@ -289,6 +317,26 @@ function ServiceApp() {
       </div>
 
       <div style={{ padding: "16px" }}>
+        <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>🔑 API-Zugangsdaten</div>
+          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+            MapTiler-Schlüssel für die Karten im Flugbuch (Outdoor-Kartenstil). Ohne eigenen Schlüssel läuft die App mit einem eingebauten Standard-Schlüssel weiter.
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>MapTiler API Key</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input value={maptilerKey} onChange={e => setMaptilerKey(e.target.value)}
+              placeholder="eigenen Schlüssel von cloud.maptiler.com einfügen"
+              style={{ flex: "1 1 220px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
+            <button onClick={saveMaptilerKey}
+              style={{ flexShrink: 0, background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 10, padding: "10px 16px", color: "#4ade80", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Speichern
+            </button>
+          </div>
+          {maptilerKeySaved && (
+            <div style={{ fontSize: 11, color: "rgba(74,222,128,0.8)", marginTop: 8 }}>✓ Eigener Schlüssel aktiv — Feld leeren und speichern, um wieder den Standard-Schlüssel zu nutzen.</div>
+          )}
+        </div>
+
         {fsapiSupported && (
           <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📁 Backup-Ordner (automatisch, dieser PC)</div>
