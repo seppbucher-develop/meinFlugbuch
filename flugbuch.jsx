@@ -3934,7 +3934,6 @@ function FlugbuchApp() {
   const [showRowImport, setShowRowImport] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
-  const [showBackupMenu, setShowBackupMenu] = useState(false);
   const [csvColumns, setCsvColumns] = useState(
     CSV_COLUMN_DEFS.map(c => ({ key: c.key, enabled: true }))
   );
@@ -3982,28 +3981,12 @@ function FlugbuchApp() {
   const [copyMsg, setCopyMsg] = useState("");
   const [rowImportText, setRowImportText] = useState("");
   const [rowImportError, setRowImportError] = useState("");
-  const [backupMsg, setBackupMsg] = useState("");
-  const backupFileRef = useRef(null);
   const fileRef = useRef(null);
   const pdfFileRef = useRef(null);
   const excelFileRef = useRef(null);
   const [excelDragOver, setExcelDragOver] = useState(false);
   const [importingExcel, setImportingExcel] = useState(false);
   const [excelResult, setExcelResult] = useState(null);
-  // Einmaliger Nachlauf: berechnet Distanz (analog XContest, bis zu 3
-  // Wendepunkte) und Ø Speed für alle bereits im Flugbuch stehenden Flüge
-  // mit IGC-Track, bei denen eines der beiden Felder noch leer ist. Läuft
-  // zusätzlich automatisch bei jedem künftigen IGC-Import mit (siehe
-  // attachIgcToFlight/computeDistanceSpeedBackfill).
-  const [backfillRunning, setBackfillRunning] = useState(false);
-  const [backfillResult, setBackfillResult] = useState(null);
-  // Liste aller Flüge, die ursprünglich aus einer IGC-Datei stammen
-  // (customFields.igcFilename gesetzt), aber aktuell keinen GPS-Track
-  // haben — betrifft Flüge, die durch einen früheren Bug beim Direkt-
-  // Import ohne Track angelegt wurden. Reines Anzeige-Feature, ändert
-  // nichts an den Daten — die Reparatur selbst passiert durch erneuten
-  // Import derselben IGC-Datei (dann per igcFilename wiedererkannt).
-  const [showMissingTracks, setShowMissingTracks] = useState(false);
   // Backup-Hinweis: zeigt einen Punkt am 💾-Button, sobald sich Flüge oder
   // Feld-Definitionen seit dem letzten Backup geändert haben. Persistiert
   // über window.storage, damit der Hinweis auch nach einem Neustart der
@@ -4064,87 +4047,6 @@ function FlugbuchApp() {
       }
       const sorted = loaded.sort((a,b) =>
         (parseInt((b.name||"").match(/\d+/)?.[0]||"0",10)) - (parseInt((a.name||"").match(/\d+/)?.[0]||"0",10)));
-      // One-time repair: flights imported from Excel before the mapping was
-      // fixed still carry raw values under old, unused field names ("typ"
-      // fell back to the Passagier-based auto-derivation instead of using
-      // "excelTyp"; "Kurs" was stored under "kurs" instead of the app's
-      // existing "reise" field). Migrate those over automatically so the
-      // person doesn't need to delete and re-import 2000+ flights just to
-      // pick up each mapping fix.
-      const toRepair = sorted.filter(f => {
-        const cf = f.customFields;
-        if (!cf?.excelImportKey) return false;
-        const needsTyp = cf.excelTyp && cf.typ !== cf.excelTyp;
-        const needsReise = cf.kurs && cf.reise !== cf.kurs;
-        return needsTyp || needsReise;
-      });
-      if (toRepair.length) {
-        for (const f of toRepair) {
-          const cf = f.customFields;
-          const patch = {};
-          if (cf.excelTyp && cf.typ !== cf.excelTyp) { patch.typ = cf.excelTyp; patch.typAuto = false; }
-          if (cf.kurs && cf.reise !== cf.kurs) { patch.reise = cf.kurs; }
-          f.customFields = { ...cf, ...patch };
-        }
-        const BATCH = 50;
-        for (let i = 0; i < toRepair.length; i += BATCH) {
-          await Promise.all(toRepair.slice(i, i+BATCH).map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f)).catch(()=>{})));
-        }
-      }
-      // One-time repair: "Solo" (the app's old default/auto-derived Typ
-      // value for a flight with no Passagier) is renamed to "GS" — applies
-      // to every flight still carrying the old value, not just Excel-
-      // imported ones.
-      const soloFlights = sorted.filter(f => f.customFields?.typ === "Solo");
-      if (soloFlights.length) {
-        for (const f of soloFlights) f.customFields = { ...f.customFields, typ: "GS" };
-        const BATCH = 50;
-        for (let i = 0; i < soloFlights.length; i += BATCH) {
-          await Promise.all(soloFlights.slice(i, i+BATCH).map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f)).catch(()=>{})));
-        }
-      }
-      // One-time migration: flights created directly from an IGC file
-      // (before this fix) had the raw IGC filename as their Nummer
-      // (name) — e.g. "2025-06-20-XXX-01" — instead of a plain sequential
-      // number like every other flight. Detected as "name isn't purely
-      // digits". Renamed to the next free sequential number, chronological
-      // by Datum so the new numbering still reads naturally; the original
-      // filename is preserved in customFields.igcFilename (shown in the
-      // Detail view) so future re-imports of that same file still find
-      // this exact flight.
-      // detected via a leading ISO-date pattern ("2025-06-20-...", exactly
-      // what flight instruments name their IGC exports) rather than just
-      // "not purely digits" — a person can freely rename a flight to any
-      // text via the title in the Detail view, and that deliberate choice
-      // must never get swept up here and overwritten.
-      const filenameNamed = sorted.filter(f => f.name && /^\d{4}-\d{2}-\d{2}/.test(f.name));
-      if (filenameNamed.length) {
-        let maxNr = sorted.reduce((m, f) => {
-          const n = /^\d+$/.test(f.name||"") ? parseInt(f.name, 10) : 0;
-          return n > m ? n : m;
-        }, 0);
-        const toParseDate = d => {
-          const p = (d||"").split(".");
-          return p.length === 3 ? new Date(+p[2], +p[1]-1, +p[0]).getTime() : 0;
-        };
-        const chronological = [...filenameNamed].sort((a,b) => toParseDate(a.date) - toParseDate(b.date));
-        for (const f of chronological) {
-          const oldName = f.name;
-          maxNr += 1;
-          f.name = String(maxNr);
-          if (!f.customFields?.igcFilename) {
-            f.customFields = { ...(f.customFields||{}), igcFilename: oldName };
-          }
-        }
-        const BATCH = 50;
-        for (let i = 0; i < chronological.length; i += BATCH) {
-          await Promise.all(chronological.slice(i, i+BATCH).map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f)).catch(()=>{})));
-        }
-        // Renumbering changes sort order (name-based, desc by number) —
-        // re-sort so the freshly-renamed flights land in the right place
-        // instead of wherever they happened to be before.
-        sorted.sort((a,b) => (parseInt((b.name||"").match(/\d+/)?.[0]||"0",10)) - (parseInt((a.name||"").match(/\d+/)?.[0]||"0",10)));
-      }
       setFlights(sorted);
       try {
         const params = new URLSearchParams(window.location.search);
@@ -4177,160 +4079,6 @@ function FlugbuchApp() {
 
     const saveFlight = useCallback(async (f) => {
     try { await window.storage.set(`flight:${f.id}`, JSON.stringify(f)); } catch {}
-  }, []);
-
-  const exportBackup = useCallback(async () => {
-    // Include everything stored under "service:*" (Reserve, Schirm) and any
-    // future "reisen:*" data automatically, so a single backup restores the
-    // whole app, not just the flight list.
-    let serviceData = {}, reisenData = {}, notesData = "";
-    try {
-      const keys = await window.storage.list("");
-      for (const k of (keys?.keys || [])) {
-        if (k.startsWith("service:")) {
-          const r = await window.storage.get(k);
-          if (r) { try { serviceData[k] = JSON.parse(r.value); } catch {} }
-        } else if (k.startsWith("reisen:")) {
-          const r = await window.storage.get(k);
-          if (r) { try { reisenData[k] = JSON.parse(r.value); } catch {} }
-        } else if (k === "settings:notes") {
-          const r = await window.storage.get(k);
-          if (r) notesData = r.value || "";
-        }
-      }
-    } catch (e) { console.error("Backup: error collecting service/reisen data:", e); }
-
-    // savedViews (💡) come straight from React state (already the live,
-    // up-to-date value) rather than another window.storage.list() round
-    // trip — same reasoning as flights/customFieldDefs above.
-    const payload = {
-      exportedAt: new Date().toISOString(),
-      flights,
-      customFieldDefs,
-      service: serviceData,
-      reisen: reisenData,
-      notes: notesData,
-      savedViews,
-    };
-    const json = JSON.stringify(payload, null, 0);
-    const dateStamp = new Date().toISOString().slice(0,10);
-
-    // Gzip the JSON before writing it out, when the browser supports the
-    // Compression Streams API (all current browsers, incl. iOS Safari) —
-    // typically shrinks the backup file to a fraction of its plain-text
-    // size. Falls back to plain, uncompressed JSON on anything older, so
-    // the export never breaks even on an unsupported browser.
-    let blob, filename;
-    try {
-      if (typeof CompressionStream !== "undefined") {
-        const gzStream = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
-        blob = await new Response(gzStream).blob();
-        filename = `flugbuch-backup-${dateStamp}.json.gz`;
-      }
-    } catch (e) { console.error("Backup: gzip compression failed, falling back to plain JSON:", e); }
-    if (!blob) {
-      blob = new Blob([json], { type: "application/json" });
-      filename = `flugbuch-backup-${dateStamp}.json`;
-    }
-
-    const markBackedUp = () => {
-      setBackupDirty(false);
-      try { window.storage.set("settings:backupDirty", "0"); } catch {}
-    };
-
-    // Prefer the native share sheet (lets the user pick "Save to Files" → iCloud Drive)
-    if (navigator.share && navigator.canShare) {
-      try {
-        const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
-        if (navigator.canShare({ files: [file] })) {
-          await navigator.share({ files: [file] });
-          setBackupMsg("✓ Backup geteilt.");
-          markBackedUp();
-          return;
-        }
-      } catch (e) {
-        // User cancelled the share sheet, or share failed — fall through to download.
-        if (e && e.name === "AbortError") { return; }
-      }
-    }
-
-    // Fallback: plain download link (older browsers / desktop)
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    markBackedUp();
-  }, [flights, customFieldDefs, savedViews]);
-
-  const importBackup = useCallback(async (file) => {
-    try {
-      // Backups may be plain JSON (older exports, or gzip unsupported at
-      // export time) or gzip-compressed (current default) — detected via
-      // the gzip magic bytes rather than trusting the file extension alone,
-      // since a person may have renamed the file.
-      const buf = await file.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      const isGzip = bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
-      let text;
-      if (isGzip) {
-        if (typeof DecompressionStream === "undefined") {
-          throw new Error("Dieses gzip-komprimierte Backup kann auf diesem Browser nicht gelesen werden (Decompression Streams API fehlt).");
-        }
-        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
-        text = await new Response(stream).text();
-      } else {
-        text = new TextDecoder("utf-8").decode(bytes);
-      }
-      const data = JSON.parse(text);
-      if (!Array.isArray(data.flights)) throw new Error("Ungültiges Backup-Format (kein 'flights'-Array).");
-      // Persist every flight back into storage
-      for (const f of data.flights) {
-        await window.storage.set(`flight:${f.id}`, JSON.stringify(f));
-      }
-      if (Array.isArray(data.customFieldDefs) && data.customFieldDefs.length) {
-        await window.storage.set("customFieldDefs", JSON.stringify(data.customFieldDefs));
-        setCustomFieldDefs(data.customFieldDefs);
-      }
-      // Restore Service (Reserve/Schirm) data, if present in this backup.
-      let restoredExtras = 0;
-      if (data.service && typeof data.service === "object") {
-        for (const [key, value] of Object.entries(data.service)) {
-          await window.storage.set(key, JSON.stringify(value));
-          restoredExtras++;
-        }
-      }
-      if (data.reisen && typeof data.reisen === "object") {
-        for (const [key, value] of Object.entries(data.reisen)) {
-          await window.storage.set(key, JSON.stringify(value));
-          restoredExtras++;
-        }
-      }
-      if (typeof data.notes === "string" && data.notes) {
-        await window.storage.set("settings:notes", data.notes);
-        restoredExtras++;
-      }
-      if (Array.isArray(data.savedViews) && data.savedViews.length) {
-        await window.storage.set("flugbuchSavedViews", JSON.stringify(data.savedViews));
-        setSavedViewsRaw(data.savedViews);
-        restoredExtras++;
-      }
-      const sorted = [...data.flights].sort((a,b)=>
-        (parseInt((b.name||"").match(/\d+/)?.[0]||"0",10)) - (parseInt((a.name||"").match(/\d+/)?.[0]||"0",10)));
-      // A freshly imported backup is, by definition, an up-to-date snapshot
-      // — skip the next dirty-tracking pass (which would otherwise treat
-      // this bulk restore as "unbacked-up changes") and clear the flag.
-      suppressNextDirtyRef.current = true;
-      setFlights(sorted);
-      setBackupDirty(false);
-      try { window.storage.set("settings:backupDirty", "0"); } catch {}
-      setBackupMsg(`✓ ${data.flights.length} Flüge${restoredExtras?` + Service/Reisen-Daten`:""} wiederhergestellt.`);
-    } catch (e) {
-      setBackupMsg("Fehler beim Import: " + e.message);
-    }
   }, []);
 
   const addNewFlight = useCallback(async () => {
@@ -4633,46 +4381,6 @@ function FlugbuchApp() {
     }
   }, [flights, saveFlight]);
 
-  // Einmaliger Nachlauf über alle Flüge, die bereits einen IGC-Track haben
-  // (unabhängig davon, wann/wie der importiert wurde) — trägt Distanz
-  // (analog XContest) und Ø Speed nach, aber nur wo eines der Felder noch
-  // leer ist. Ein kurzer Zwischen-Yield alle paar Flüge hält die UI
-  // responsiv, da die Distanzberechnung selbst pro Flug spürbar CPU-Zeit
-  // braucht (Douglas-Peucker + O(k²)-DP über den ganzen Track).
-  const backfillDistanceSpeed = useCallback(async () => {
-    setBackfillRunning(true);
-    setBackfillResult(null);
-    let updatedCount = 0, skipped = 0, noTrack = 0, n = 0;
-    const updates = [];
-    for (const f of flights) {
-      if (!(f.track && f.track.length > 1)) { noTrack++; continue; }
-      const cf = f.customFields || {};
-      const hasDist = (f.totalDist > 0) || !!(cf.distKm||"").trim();
-      const hasSpeed = !!(cf.kmh||"").trim();
-      if (hasDist && hasSpeed) { skipped++; continue; }
-      const scoreDistanceKm = computeOpenDistanceKm(f.track);
-      const backfill = computeDistanceSpeedBackfill(f.totalDist, cf, scoreDistanceKm, f.durationSec);
-      if (backfill.distKm == null && backfill.kmh == null) { skipped++; continue; }
-      const newCf = { ...cf };
-      if (backfill.distKm != null) newCf.distKm = backfill.distKm;
-      if (backfill.kmh != null) newCf.kmh = backfill.kmh;
-      updates.push({ ...f, customFields: newCf, totalDist: backfill.totalDist != null ? backfill.totalDist : f.totalDist });
-      updatedCount++;
-      n++;
-      if (n % 15 === 0) await new Promise(r => setTimeout(r, 0));
-    }
-    const BATCH = 25;
-    for (let i = 0; i < updates.length; i += BATCH) {
-      await Promise.all(updates.slice(i, i+BATCH).map(f => saveFlight(f).catch(()=>{})));
-    }
-    if (updates.length) {
-      const byId = new Map(updates.map(f => [f.id, f]));
-      setFlights(prev => prev.map(f => byId.get(f.id) || f));
-    }
-    setBackfillResult({ updated: updatedCount, skipped, noTrack });
-    setBackfillRunning(false);
-  }, [flights, saveFlight]);
-
   const doImport = useCallback(async (igcFiles) => {
     if (!igcFiles.length) return;
     setImporting(true); setImportProgress({done:0,total:igcFiles.length});
@@ -4960,18 +4668,18 @@ function FlugbuchApp() {
           Panel gewandert, seit Jahr nur noch ein wählbares Gruppieren-Feld
           unter mehreren ist statt eines fest verdrahteten Extra-Buttons. */}
       <div style={{padding:"10px 16px 0",display:"flex",gap:8}}>
-        <button onClick={()=>{ setShowImportMenu(m=>!m); setShowBackupMenu(false); }} title="Import"
+        <button onClick={()=>{ setShowImportMenu(m=>!m); }} title="Import"
           style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:showImportMenu?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${showImportMenu?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:30,cursor:"pointer"}}>
           📥
         </button>
-        <button onClick={()=>{ setShowBackupMenu(m=>!m); setShowImportMenu(false); }} title="Backup"
-          style={{position:"relative",flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:showBackupMenu?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${showBackupMenu?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:30,cursor:"pointer"}}>
+        <a href="service.html" title="Service (Backup/Restore)"
+          style={{position:"relative",flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,color:"#fff",fontSize:30,textDecoration:"none"}}>
           💾
           {backupDirty && (
             <span title="Ungesicherte Änderungen seit dem letzten Backup"
               style={{position:"absolute",top:6,right:8,width:10,height:10,borderRadius:"50%",background:"#f87171",border:"1.5px solid #040e20"}} />
           )}
-        </button>
+        </a>
         <button onClick={()=>{ setSelectMode(m=>!m); setSelectedIds(new Set()); setCopyMsg(""); }} title="Auswahl"
           style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:selectMode?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${selectMode?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:34,cursor:"pointer"}}>
           {selectMode?"✕":"☑"}
@@ -4980,11 +4688,11 @@ function FlugbuchApp() {
           style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,color:"#fff",fontSize:30,cursor:"pointer"}}>
           🗺️
         </button>
-        <button onClick={()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setShowBackupMenu(false); setViewsMode("none"); setSavingViewName(null); }} title="Gespeicherte Darstellungen"
+        <button onClick={()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }} title="Gespeicherte Darstellungen"
           style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:showViewsMenu?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${showViewsMenu?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:26,cursor:"pointer"}}>
           💡
         </button>
-        <button onClick={()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); setShowBackupMenu(false); }} title="Suchen/Sortieren"
+        <button onClick={()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }} title="Suchen/Sortieren"
           style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:searchRowOpen?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${searchRowOpen?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:26,cursor:"pointer"}}>
           🔍
         </button>
@@ -5077,10 +4785,6 @@ function FlugbuchApp() {
         </div>
       )}
 
-      {/* Backup + selection: badges collapse into menus, shown together with Import badge below */}
-      <input ref={backupFileRef} type="file" accept=".json,.gz,.json.gz" style={{display:"none"}}
-        onChange={e=>{ if(e.target.files[0]) importBackup(e.target.files[0]); e.target.value=""; }} />
-
       {showCsvColumnConfig && (
         <CsvColumnConfigModal columns={csvColumns} onSave={saveCsvColumns} onClose={()=>setShowCsvColumnConfig(false)} />
       )}
@@ -5129,90 +4833,6 @@ function FlugbuchApp() {
           }}
         />
       )}
-
-      {showBackupMenu && (
-        <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
-          <div style={{display:"flex",gap:8}}>
-            <button onClick={exportBackup}
-              style={{flex:1,background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 6px",color:"rgba(232,244,253,0.8)",fontSize:12,cursor:"pointer",textAlign:"center"}}>
-              ☁️ Backup sichern
-            </button>
-            <button onClick={()=>backupFileRef.current?.click()}
-              style={{flex:1,background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:8,padding:"8px 6px",color:"rgba(232,244,253,0.8)",fontSize:12,cursor:"pointer",textAlign:"center"}}>
-              ⬆ Backup importieren
-            </button>
-          </div>
-          <button onClick={backfillDistanceSpeed} disabled={backfillRunning}
-            title="Berechnet Distanz (analog XContest, bis zu 3 Wendepunkte) und Ø Speed für alle Flüge mit IGC-Track, bei denen eines der Felder noch leer ist."
-            style={{background:"rgba(125,211,252,0.1)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:8,padding:"8px 6px",color:"#7dd3fc",fontSize:12,cursor:backfillRunning?"default":"pointer",textAlign:"center"}}>
-            {backfillRunning ? "⏳ Berechne…" : "📐 Distanz/Speed berechnen (alle IGC-Flüge)"}
-          </button>
-          <button onClick={()=>setShowMissingTracks(true)}
-            title="Zeigt alle Flüge, die ursprünglich aus einer IGC-Datei stammen, aktuell aber keinen GPS-Track haben (betroffen von einem früheren Import-Bug)."
-            style={{background:"rgba(248,113,113,0.1)",border:"1px solid rgba(248,113,113,0.25)",borderRadius:8,padding:"8px 6px",color:"#f87171",fontSize:12,cursor:"pointer",textAlign:"center"}}>
-            🔍 Flüge ohne Track finden
-          </button>
-        </div>
-      )}
-      {backfillResult && (
-        <div style={{margin:"8px 16px 0",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:12,color:"#7dd3fc"}}>
-            ✅ {backfillResult.updated} Flüge ergänzt · {backfillResult.skipped} bereits vollständig · {backfillResult.noTrack} ohne IGC-Track
-          </span>
-          <button onClick={()=>setBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
-        </div>
-      )}
-
-      {showMissingTracks && (() => {
-        const affected = flights
-          .filter(f => f.customFields?.igcFilename && (!f.track || f.track.length <= 1))
-          .sort((a,b) => (parseInt((b.name||"").match(/\d+/)?.[0]||"0",10)) - (parseInt((a.name||"").match(/\d+/)?.[0]||"0",10)));
-        const copyList = async () => {
-          const text = affected.map(f => `${f.name}\t${f.date}\t${f.customFields.igcFilename}.igc`).join("\n");
-          try { await navigator.clipboard.writeText(text); setCopyMsg("✓ Liste kopiert."); }
-          catch { setCopyMsg("Kopieren fehlgeschlagen."); }
-        };
-        return (
-          <div onClick={()=>setShowMissingTracks(false)}
-            style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:24}}>
-            <div onClick={e=>e.stopPropagation()}
-              style={{background:"#14253a",borderRadius:16,padding:"20px 22px",maxWidth:420,width:"100%",border:"1px solid rgba(255,255,255,0.1)",maxHeight:"80vh",display:"flex",flexDirection:"column"}}>
-              <div style={{fontSize:16,fontWeight:700,marginBottom:4}}>Flüge ohne Track ({affected.length})</div>
-              <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:14}}>
-                Diese Flüge stammen ursprünglich aus einer IGC-Datei, haben aber aktuell keinen GPS-Track gespeichert. Importiere die jeweilige Datei erneut — sie wird über den Dateinamen wiedererkannt und automatisch ergänzt, statt einen neuen Flug anzulegen.
-              </div>
-              {affected.length === 0 ? (
-                <div style={{fontSize:13,color:"rgba(232,244,253,0.5)",padding:"12px 0"}}>Keine betroffenen Flüge gefunden. 🎉</div>
-              ) : (
-                <div style={{overflowY:"auto",flex:1,marginBottom:14,border:"1px solid rgba(255,255,255,0.08)",borderRadius:10}}>
-                  {affected.map(f => (
-                    <div key={f.id} onClick={()=>{setSelected(f);setView("detail");setShowMissingTracks(false);}}
-                      style={{padding:"9px 12px",borderBottom:"1px solid rgba(255,255,255,0.05)",cursor:"pointer",fontSize:12}}>
-                      <div style={{display:"flex",justifyContent:"space-between"}}>
-                        <span style={{fontWeight:700,color:"#e8f4fd"}}>Nr. {f.name}</span>
-                        <span style={{color:"rgba(232,244,253,0.5)"}}>{f.date}</span>
-                      </div>
-                      <div style={{color:"#f87171",fontSize:11,marginTop:2,wordBreak:"break-all"}}>{f.customFields.igcFilename}.igc</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div style={{display:"flex",gap:10}}>
-                {affected.length > 0 && (
-                  <button onClick={copyList}
-                    style={{flex:1,background:"rgba(125,211,252,0.15)",border:"1px solid rgba(125,211,252,0.3)",borderRadius:10,padding:"10px",color:"#7dd3fc",fontSize:13,fontWeight:700,cursor:"pointer"}}>
-                    📋 Liste kopieren
-                  </button>
-                )}
-                <button onClick={()=>setShowMissingTracks(false)}
-                  style={{flex:1,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px",color:"#e8f4fd",fontSize:13,cursor:"pointer"}}>
-                  Schliessen
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
 
       {selectMode && (
         <div style={{padding:"8px 16px 0",display:"flex",gap:8}}>
@@ -5429,9 +5049,9 @@ function FlugbuchApp() {
           </div>
         );
       })()}
-      {(backupMsg || copyMsg) && (
-        <div style={{padding:"6px 16px 0",fontSize:11,color:(backupMsg||copyMsg).startsWith("✓")?"#4ade80":"#f87171"}}>
-          {backupMsg || copyMsg}
+      {copyMsg && (
+        <div style={{padding:"6px 16px 0",fontSize:11,color:copyMsg.startsWith("✓")?"#4ade80":"#f87171"}}>
+          {copyMsg}
         </div>
       )}
 
