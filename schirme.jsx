@@ -13,8 +13,8 @@ const SCHIRME_KEY = "schirme:list";
 // riskieren (z.B. ein Modellname, der zufällig mit einem Wort beginnt,
 // das auch ein Herstellername sein könnte).
 const KNOWN_PREFIXES = ["UP", "Supair", "Ozone", "Nova", "MacPara"];
-const TYP_OPTIONS = ["GS", "BP", "SF", "NS"];
-const TYP_LABELS = { GS: "GS (Gleitschirm)", BP: "BP (Biplace)", SF: "SF (Schulung)", NS: "NS (Notschirm)" };
+const TYP_OPTIONS = ["GS", "BP", "SF", "NS", "Div"];
+const TYP_LABELS = { GS: "GS (Gleitschirm)", BP: "BP (Biplace)", SF: "SF (Speedflyer)", NS: "NS (Notschirm)", Div: "Div (Diverses)" };
 // Bekannte Falschschreibungen/Dubletten im Schirm-Feld — vom Nutzer
 // bestätigte Korrekturen (04.2026). Nur als Vorschlag: erscheint auf der
 // Seite nur, solange noch ein Schirm-Eintrag mit dem "von"-Namen existiert.
@@ -107,6 +107,67 @@ function SchirmeApp() {
     const updated = affected.map(f => ({ ...f, glider: newName }));
     await Promise.all(updated.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
     return updated.length;
+  };
+
+  // Findet Schirme-Einträge, deren Namen sich normalisiert (getrimmt,
+  // mehrfache Leerzeichen zusammengefasst) gleichen — sie sehen für den
+  // Menschen identisch aus (z.B. "Sigma 11" doppelt), sind aber intern
+  // unterschiedliche Zeichenketten (typischerweise durch ein Leerzeichen
+  // am Rand, aus Excel-Import oder mehrfachem "Schirme erzeugen"
+  // entstanden). Führt sie zusammen: EIN Eintrag (der mit den meisten
+  // Flügen) wird zum Ziel, auf das alle betroffenen Flüge umgeschrieben
+  // werden — danach hat genau ein Eintrag alle Flüge, der/die anderen
+  // 0 Flüge und können manuell gelöscht werden.
+  const normalizeName = (n) => (n || "").trim().replace(/\s+/g, " ");
+  const mergeDuplicates = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const fl = flights || await loadAllFlights();
+      const countFor = (rawName) => fl.filter(f => (f.glider || "").trim() === rawName).length;
+      const groups = {};
+      schirme.forEach(s => {
+        const key = normalizeName(s.name).toLowerCase();
+        (groups[key] = groups[key] || []).push(s);
+      });
+      const dupGroups = Object.values(groups).filter(g => g.length > 1);
+      if (!dupGroups.length) {
+        setMsg({ type: "ok", text: "Keine doppelten Schirm-Namen gefunden." });
+        setBusy(false);
+        return;
+      }
+      let mergedGroups = 0, updatedFlightsTotal = 0;
+      let nextSchirme = [...schirme];
+      for (const group of dupGroups) {
+        const withCounts = group.map(s => ({ s, count: countFor(s.name) }));
+        withCounts.sort((a, b) => b.count - a.count);
+        const canonical = withCounts[0].s;
+        const others = withCounts.slice(1).map(x => x.s);
+        for (const other of others) {
+          if (other.name !== canonical.name) {
+            updatedFlightsTotal += await renameGliderEverywhere(other.name, canonical.name);
+          }
+        }
+        // Fehlende Angaben (Hersteller/Typ/letzterCheck/Material-Link) aus
+        // den Dubletten übernehmen, falls beim Ziel-Eintrag noch leer.
+        const merged = { ...canonical };
+        for (const other of others) {
+          if (!merged.hersteller && other.hersteller) merged.hersteller = other.hersteller;
+          if (!merged.typ && other.typ) merged.typ = other.typ;
+          if (!merged.letzterCheck && other.letzterCheck) merged.letzterCheck = other.letzterCheck;
+          if (!merged.materialEntryId && other.materialEntryId) merged.materialEntryId = other.materialEntryId;
+        }
+        nextSchirme = nextSchirme.map(s => s.id === canonical.id ? merged : s);
+        mergedGroups++;
+      }
+      await saveSchirme(nextSchirme);
+      const updatedFl = await loadAllFlights();
+      setFlights(updatedFl);
+      setMsg({ type: "ok", text: `✓ ${mergedGroups} Dublette(n) zusammengeführt, ${updatedFlightsTotal} Flüge aktualisiert. Die übrig gebliebenen Einträge mit 0 Flügen kannst du jetzt löschen.` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Zusammenführen: " + (e.message || String(e)) });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const applyCorrection = async (from, to) => {
@@ -239,6 +300,11 @@ function SchirmeApp() {
           title="Sucht bekannte Hersteller-Präfixe (UP, Supair, Ozone, Nova, MacPara) im Schirm-Feld der Flüge, entfernt sie dort und trägt sie hier als Hersteller ein."
           style={{ background: "rgba(250,204,21,0.12)", border: "1px solid rgba(250,204,21,0.3)", borderRadius: 8, padding: "9px 14px", color: "#facc15", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
           {busy ? "⏳ …" : "🧹 Hersteller aus Schirm-Namen bereinigen"}
+        </button>
+        <button onClick={mergeDuplicates} disabled={busy}
+          title="Führt Schirme mit optisch gleichem, aber intern leicht unterschiedlichem Namen zusammen (z.B. durch ein Leerzeichen). Ein Eintrag bekommt danach alle Flüge, der/die anderen 0."
+          style={{ background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 8, padding: "9px 14px", color: "#a78bfa", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+          {busy ? "⏳ …" : "🔗 Doppelte Schirme zusammenführen"}
         </button>
       </div>
 
