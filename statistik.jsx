@@ -108,6 +108,7 @@ function StatistikApp() {
   // dass der Persistierungs-Effekt unten die gerade erst geladenen
   // Filter sofort wieder mit den (noch leeren) Default-Werten überschreibt.
   const [settingsLoaded, setSettingsLoaded] = React.useState(false);
+  const filtersReadyRef = React.useRef(false);
   React.useEffect(() => {
     (async () => {
       try {
@@ -132,6 +133,15 @@ function StatistikApp() {
         typ: [...typF], reise: [...reiseF], schirm: [...schirmF],
         landeplatz: [...landeplatzF], land: [...landF], training: trainingF,
       }));
+      // Nur bei echten, vom Nutzer ausgelösten Filteränderungen als
+      // "ungesichert" markieren — nicht schon beim ersten Schreiben direkt
+      // nach dem Laden der zuvor gespeicherten Werte (das wäre keine
+      // Änderung, nur ein Wiederherstellen des letzten Zustands).
+      if (filtersReadyRef.current) {
+        window.storage.set("settings:backupDirty", "1");
+      } else {
+        filtersReadyRef.current = true;
+      }
     } catch (e) {}
   }, [settingsLoaded, typF, reiseF, schirmF, landeplatzF, landF, trainingF]);
 

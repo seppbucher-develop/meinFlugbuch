@@ -91,6 +91,18 @@
   .card .title { font-size: 16px; font-weight: 700; margin-bottom: 2px; }
   .card .desc { font-size: 12px; color: rgba(232,244,253,0.5); }
   .card .arrow { font-size: 18px; color: rgba(232,244,253,0.3); flex-shrink: 0; }
+
+  .card .icon { position: relative; }
+  .dirty-dot {
+    position: absolute;
+    top: -3px; right: -3px;
+    width: 13px; height: 13px;
+    border-radius: 50%;
+    background: #f87171;
+    border: 2px solid #040e20;
+    display: none;
+  }
+  .dirty-dot.show { display: block; }
 </style>
 </head>
 <body>
@@ -123,7 +135,7 @@
         <div class="arrow">›</div>
       </a>
       <a class="card service" href="service.html">
-        <div class="icon">🛠️</div>
+        <div class="icon">🛠️<span id="serviceDirtyDot" class="dirty-dot"></span></div>
         <div class="text">
           <div class="title">Service</div>
           <div class="desc">Backup & Restore für Flugbuch, Statistik und Material</div>
@@ -132,5 +144,43 @@
       </a>
     </div>
   </div>
+
+  <script>
+    // Identischer Storage-Zugriff (nur lesend) wie in flugbuch.html/
+    // service.html/etc. — zeigt einen roten Punkt auf der Service-Karte,
+    // sobald irgendeine Seite seit dem letzten Backup Daten geändert hat
+    // (settings:backupDirty, zentral von allen Seiten gemeinsam gepflegt).
+    (function () {
+      const DB_NAME = "flugbuch-db";
+      const STORE = "kv";
+      const PREFIX = "flugbuch:";
+      function openDb() {
+        return new Promise((resolve, reject) => {
+          if (!window.indexedDB) { reject(new Error("IndexedDB not available")); return; }
+          const req = indexedDB.open(DB_NAME, 1);
+          req.onupgradeneeded = () => { req.result.createObjectStore(STORE); };
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+      }
+      async function getFlag() {
+        try {
+          const db = await openDb();
+          return await new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE, "readonly");
+            const req = tx.objectStore(STORE).get(PREFIX + "settings:backupDirty");
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+          });
+        } catch { return null; }
+      }
+      getFlag().then(value => {
+        if (value === "1") {
+          const dot = document.getElementById("serviceDirtyDot");
+          if (dot) dot.classList.add("show");
+        }
+      });
+    })();
+  </script>
 </body>
 </html>

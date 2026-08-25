@@ -4010,33 +4010,16 @@ function FlugbuchApp() {
   const [excelDragOver, setExcelDragOver] = useState(false);
   const [importingExcel, setImportingExcel] = useState(false);
   const [excelResult, setExcelResult] = useState(null);
-  // Backup-Hinweis: zeigt einen Punkt am 💾-Button, sobald sich Flüge oder
-  // Feld-Definitionen seit dem letzten Backup geändert haben. Persistiert
-  // über window.storage, damit der Hinweis auch nach einem Neustart der
-  // App noch stimmt. Erfasst bewusst nur Änderungen, die über diese Seite
-  // (Flugliste/-detail) laufen — Wartung/Reisen/Notizen sind eigene Seiten
-  // mit eigenem Speicherzugriff und lösen den Hinweis hier nicht aus.
-  const [backupDirty, setBackupDirty] = useState(false);
-  // Starts false; flips permanently true a short moment after the initial
-  // flights/customFieldDefs load below has fully settled, so the load
-  // itself is never mistaken for an unbacked-up change. suppressNextDirtyRef
-  // is a separate one-shot flag (auto-resets after one skip) used by
-  // importBackup, whose bulk restore is a deliberate full-snapshot load,
-  // not a change that should trigger the "please back up" hint.
+  // Backup-Hinweis-Flag: geschrieben (nicht mehr lokal angezeigt — der rote
+  // Punkt lebt jetzt auf der Startseite, direkt auf der Service-Karte, und
+  // wird dort zentral aus diesem einen Schlüssel für ALLE Seiten gelesen).
+  // suppressNextDirtyRef verhindert, dass der initiale Lade-Vorgang selbst
+  // als "ungesicherte Änderung" gilt.
   const dirtyTrackingReadyRef = useRef(false);
   const suppressNextDirtyRef = useRef(false);
   useEffect(() => {
-    (async () => {
-      try {
-        const r = await window.storage.get("settings:backupDirty");
-        if (r && r.value === "1") setBackupDirty(true);
-      } catch {}
-    })();
-  }, []);
-  useEffect(() => {
     if (!dirtyTrackingReadyRef.current) return;
     if (suppressNextDirtyRef.current) { suppressNextDirtyRef.current = false; return; }
-    setBackupDirty(true);
     try { window.storage.set("settings:backupDirty", "1"); } catch {}
   }, [flights, customFieldDefs]);
 
@@ -4695,14 +4678,6 @@ function FlugbuchApp() {
           style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:showImportMenu?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${showImportMenu?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:30,cursor:"pointer"}}>
           📥
         </button>
-        <a href="service.html" title="Service (Backup/Restore)"
-          style={{position:"relative",flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,color:"#fff",fontSize:30,textDecoration:"none"}}>
-          💾
-          {backupDirty && (
-            <span title="Ungesicherte Änderungen seit dem letzten Backup"
-              style={{position:"absolute",top:6,right:8,width:10,height:10,borderRadius:"50%",background:"#f87171",border:"1.5px solid #040e20"}} />
-          )}
-        </a>
         <button onClick={()=>{ setSelectMode(m=>!m); setSelectedIds(new Set()); setCopyMsg(""); }} title="Auswahl"
           style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:selectMode?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${selectMode?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:34,cursor:"pointer"}}>
           {selectMode?"✕":"☑"}

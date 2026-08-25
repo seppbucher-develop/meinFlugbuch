@@ -123,6 +123,8 @@ function MaterialApp() {
 
   React.useEffect(() => { load(); }, [load]);
 
+  const markDirty = () => { try { window.storage.set("settings:backupDirty", "1"); } catch {} };
+
   const saveEntry = async (data) => {
     const isNew = !data.id;
     const toSave = isNew ? { ...data, id: `mat_${Date.now()}` } : data;
@@ -132,12 +134,14 @@ function MaterialApp() {
       return exists ? prev.map(e => e.id === toSave.id ? toSave : e) : [toSave, ...prev];
     });
     setEditing(null);
+    markDirty();
   };
 
   const deleteEntry = async (id) => {
     await window.storage.delete(`entry:${id}`);
     setEntries(prev => prev.filter(e => e.id !== id));
     setConfirmDelete(null);
+    markDirty();
   };
 
   const importExcel = async (file) => {
@@ -159,7 +163,7 @@ function MaterialApp() {
         await window.storage.set(`entry:${entry.id}`, JSON.stringify(entry));
         newEntries.push(entry);
       }
-      if (newEntries.length) setEntries(prev => [...newEntries, ...prev]);
+      if (newEntries.length) { setEntries(prev => [...newEntries, ...prev]); markDirty(); }
       setImportResult({ created: newEntries.length, skipped, total: rows.length });
     } catch (e) {
       setImportResult({ error: e.message || String(e) });

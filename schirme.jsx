@@ -78,9 +78,12 @@ function SchirmeApp() {
 
   React.useEffect(() => { load(); }, [load]);
 
+  const markDirty = () => { try { window.storage.set("settings:backupDirty", "1"); } catch {} };
+
   const saveSchirme = async (list) => {
     setSchirme(list);
     try { await window.storage.set(SCHIRME_KEY, JSON.stringify(list)); } catch {}
+    markDirty();
   };
 
   // Häufigster Typ-Wert unter den Flügen mit diesem Schirm — als Vorschlag,
@@ -340,6 +343,7 @@ function SchirmeApp() {
       // gelaufen sind und daher noch keine schirmId tragen.
       const { flights: relinked, count: relinkCount } = await relinkAll(fl, allSchirme);
       setFlights(relinked);
+      if (relinkCount) markDirty();
       const parts = [];
       if (newEntries.length) parts.push(`${newEntries.length} Schirm(e) erzeugt${linked ? ` (${linked}× mit Material verknüpft)` : ""}`);
       if (relinkCount) parts.push(`${relinkCount} Flug-Verknüpfung(en) ergänzt`);
