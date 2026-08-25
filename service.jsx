@@ -47,6 +47,39 @@ function ServiceApp() {
     }
   };
 
+  // Radius (km), innerhalb dessen ein neu importierter IGC-Flug einen
+  // Start-/Landeplatz-Namen bzw. ein Land von einem bereits vorhandenen
+  // Flug mit ähnlichen Koordinaten übernehmen darf. 0.5 km Standard —
+  // klein genug, um nicht zwei unterschiedliche, nahe beieinanderliegende
+  // Startplätze zu verwechseln, aber gross genug, um GPS-Ungenauigkeiten
+  // und leichtes Verschieben des Startpunkts (z.B. anderer Startbereich
+  // am selben Hang) abzudecken.
+  const [placeRadius, setPlaceRadius] = React.useState("0.5");
+  const [placeRadiusSaved, setPlaceRadiusSaved] = React.useState(false);
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("settings:placeMatchRadiusKm");
+        if (r && r.value) { setPlaceRadius(r.value); setPlaceRadiusSaved(true); }
+      } catch {}
+    })();
+  }, []);
+  const savePlaceRadius = async () => {
+    const num = parseFloat(placeRadius.replace(",", "."));
+    if (!isFinite(num) || num <= 0) {
+      setMsg({ type: "error", text: "Bitte eine Zahl grösser 0 eingeben (z.B. 0.5)." });
+      return;
+    }
+    try {
+      await window.storage.set("settings:placeMatchRadiusKm", String(num));
+      await window.storage.set("settings:backupDirty", "1");
+      setPlaceRadiusSaved(true);
+      setMsg({ type: "ok", text: `✓ Radius gespeichert: ${num} km.` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Speichern: " + (e.message || String(e)) });
+    }
+  };
+
   // Lokaler Backup-Ordner (File System Access API) — nur Chrome/Edge
   // Desktop unterstützen das; auf allen anderen Browsern (Safari, Firefox,
   // jedes Handy) bleibt es beim Teilen/Download-Weg weiter unten.
@@ -337,6 +370,26 @@ function ServiceApp() {
           </div>
           {maptilerKeySaved && (
             <div style={{ fontSize: 11, color: "rgba(74,222,128,0.8)", marginTop: 8 }}>✓ Eigener Schlüssel aktiv — Feld leeren und speichern, um wieder den Standard-Schlüssel zu nutzen.</div>
+          )}
+        </div>
+
+        <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📍 IGC-Import: Start-/Landeplatz &amp; Land</div>
+          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+            Beim Import einer neuen IGC-Datei übernimmt das Flugbuch Startplatz, Landeplatz und Land automatisch von einem bereits vorhandenen Flug, dessen Koordinaten innerhalb dieses Radius liegen. Findet sich kein Treffer, wird das Land zusätzlich per MapTiler bestimmt (benötigt den Schlüssel oben).
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Radius (km)</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input value={placeRadius} onChange={e => setPlaceRadius(e.target.value)}
+              inputMode="decimal" placeholder="0.5"
+              style={{ flex: "1 1 120px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
+            <button onClick={savePlaceRadius}
+              style={{ flexShrink: 0, background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 10, padding: "10px 16px", color: "#4ade80", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Speichern
+            </button>
+          </div>
+          {placeRadiusSaved && (
+            <div style={{ fontSize: 11, color: "rgba(74,222,128,0.8)", marginTop: 8 }}>✓ Aktueller Radius: {placeRadius} km.</div>
           )}
         </div>
 

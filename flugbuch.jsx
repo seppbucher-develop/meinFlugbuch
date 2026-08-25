@@ -2007,6 +2007,53 @@ function haversineDistKm(a, b) {
   const x = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
 }
+// ── AUTOMATISCHE ORTS-/LAND-ZUORDNUNG BEIM IGC-IMPORT ────────────────────
+// Findet unter den vorhandenen Flügen den nächstgelegenen mit gefülltem
+// Feld innerhalb des konfigurierten Radius (unter Service einstellbar) —
+// dient sowohl für Startplatz (gegen startPt anderer Flüge), Landeplatz
+// (gegen endPt) als auch Land (ebenfalls gegen startPt, da das Land eines
+// Flugs sich üblicherweise nach dem Startort richtet).
+function findNearbyFieldValue(pt, flights, getPoint, getValue, radiusKm) {
+  if (!pt) return "";
+  let best = "", bestDist = Infinity;
+  for (const f of flights) {
+    const fp = getPoint(f);
+    if (!fp) continue;
+    const val = (getValue(f) || "").trim();
+    if (!val) continue;
+    const d = haversineDistKm(pt, fp);
+    if (d != null && d <= radiusKm && d < bestDist) { bestDist = d; best = val; }
+  }
+  return best;
+}
+// Reverse-Geocoding via MapTiler — nur als Rückfallebene, wenn kein
+// bestehender Flug in der Nähe ein Land liefert. Liefert den (deutschen)
+// Ländernamen, oder "" bei Fehler/fehlendem Schlüssel — ein Fehler hier
+// darf den Import nie blockieren, deshalb wird jede Exception abgefangen.
+async function reverseGeocodeCountry(pt, apiKey) {
+  if (!pt || !apiKey) return "";
+  try {
+    const url = `https://api.maptiler.com/geocoding/${pt.lon},${pt.lat}.json?key=${apiKey}&types=country&language=de`;
+    const res = await fetch(url);
+    if (!res.ok) return "";
+    const data = await res.json();
+    const feature = data?.features?.[0];
+    return (feature?.text || feature?.place_name || "").trim();
+  } catch (e) {
+    console.error("MapTiler reverse geocoding failed:", e);
+    return "";
+  }
+}
+// Kombiniert beides zu einem Aufruf — der Aufrufer trägt die Werte nur in
+// tatsächlich leere Felder ein, überschreibt also nie bereits vorhandene
+// (z.B. aus Excel importierte) Angaben.
+async function inferPlaceAndCountry(startPt, endPt, flights, radiusKm, apiKey) {
+  const site = findNearbyFieldValue(startPt, flights, f=>f.startPt, f=>f.site, radiusKm);
+  const landung = findNearbyFieldValue(endPt, flights, f=>f.endPt, f=>f.customFields?.landung, radiusKm);
+  let land = findNearbyFieldValue(startPt, flights, f=>f.startPt, f=>f.customFields?.land, radiusKm);
+  if (!land && startPt) land = await reverseGeocodeCountry(startPt, apiKey);
+  return { site, landung, land };
+}
 // Compass bearing (0°=North, 90°=East, ...) from point a to point b —
 // used to rotate the glider reference marker to face the actual flight
 // direction at that point in the track.
@@ -3859,6 +3906,19 @@ function FlugbuchApp() {
       } catch {}
     })();
   }, []);
+  // Radius (km) für die automatische Start-/Landeplatz- und Land-Zuordnung
+  // beim IGC-Import — unter Service → "IGC-Import: Start-/Landeplatz & Land"
+  // einstellbar. 0.5 km Standard, falls dort noch nichts gespeichert wurde.
+  const [placeMatchRadiusKm, setPlaceMatchRadiusKm] = useState(0.5);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("settings:placeMatchRadiusKm");
+        const n = r && r.value ? parseFloat(r.value) : NaN;
+        if (isFinite(n) && n > 0) setPlaceMatchRadiusKm(n);
+      } catch {}
+    })();
+  }, []);
   // Derived once whenever the flight list changes — entfernungSL needs
   // every flight's start/end points to compute (great-circle distance),
   // so it's precomputed here rather than in the per-flight sort/search
@@ -4432,6 +4492,22 @@ function FlugbuchApp() {
     // flight's "Nummer" (name) is always a plain sequential number rather
     // than doubling as the filename.
     if (igcFilename) cf.igcFilename = igcFilename;
+    // Startplatz/Landeplatz/Land automatisch von einem nahegelegenen
+    // bereits vorhandenen Flug übernehmen (bzw. Land per MapTiler
+    // bestimmen) — nur für Felder, die hier noch leer sind; ein bereits
+    // erfasster Wert (z.B. aus Excel) wird nie überschrieben.
+    const startPtForInfer = existing.startPt || igcData.startPt;
+    const endPtForInfer = existing.endPt || igcData.endPt;
+    const needsSite = !(existing.site||"").trim();
+    const needsLandung = !(cf.landung||"").trim();
+    const needsLand = !(cf.land||"").trim();
+    let inferredSite = "", inferredLandung = "";
+    if (needsSite || needsLandung || needsLand) {
+      const inferred = await inferPlaceAndCountry(startPtForInfer, endPtForInfer, flights, placeMatchRadiusKm, mapTilerKey);
+      inferredSite = inferred.site; inferredLandung = inferred.landung;
+      if (needsLandung && inferred.landung) cf.landung = inferred.landung;
+      if (needsLand && inferred.land) cf.land = inferred.land;
+    }
     // Distanz (analog XContest, bis zu 3 Wendepunkte) und Ø Speed nur
     // nachtragen, wenn beide Felder noch leer sind — ein bereits erfasster
     // (z.B. manuell von XContest übernommener) Wert wird nie überschrieben.
@@ -4442,6 +4518,7 @@ function FlugbuchApp() {
       ...existing, track, customFields: cf,
       pilot: (existing.pilot||"").trim() ? existing.pilot : (pilot||existing.pilot),
       glider: (existing.glider||"").trim() ? existing.glider : (glider||existing.glider),
+      site: needsSite && inferredSite ? inferredSite : existing.site,
       maxAlt: existing.maxAlt || igcData.maxAlt,
       minAlt: existing.minAlt || igcData.minAlt,
       startPt: existing.startPt || igcData.startPt,
@@ -4457,7 +4534,7 @@ function FlugbuchApp() {
     await saveFlight(updated);
     setFlights(prev=>prev.map(f=>f.id===updated.id?updated:f));
     if (selected?.id===updated.id) setSelected(updated);
-  }, [selected, saveFlight]);
+  }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey]);
 
   const processIGCFiles = useCallback(async (igcFiles) => {
     setImporting(true); setImportProgress({done:0,total:igcFiles.length});
@@ -4515,10 +4592,14 @@ function FlugbuchApp() {
           // (Detail-Ansicht), not as the flight's Nummer/name.
           maxNr += 1;
           const backfill = computeDistanceSpeedBackfill(0, {}, igcData.scoreDistanceKm, igcData.durationSec);
+          // Startplatz/Landeplatz/Land automatisch von einem nahegelegenen
+          // bereits vorhandenen Flug übernehmen (bzw. Land per MapTiler
+          // bestimmen, falls kein Treffer) — siehe inferPlaceAndCountry.
+          const inferred = await inferPlaceAndCountry(igcData.startPt, igcData.endPt, flights, placeMatchRadiusKm, mapTilerKey);
           const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr), pdfOnly:false,
-            date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:"",glider:glider||"",
+            date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:inferred.site||"",glider:glider||"",
             startTime:"", endTime:"", comment:"", rating:0, notes:"", track,
-            customFields:{landung:"",igcFilename:baseName,
+            customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,
               hGew: igcData.totalGain ? String(igcData.totalGain) : "",
               hDiff: igcData.hDiff ? String(igcData.hDiff) : "",
               maxSteigen: igcData.maxClimb ? String(igcData.maxClimb) : "",
@@ -4538,7 +4619,7 @@ function FlugbuchApp() {
     setIgcResult({ created: newFlights.length, updated: updatedCount, total: igcFiles.length, deferred: dateAmbiguous.length });
     setTimeout(() => setIgcResult(null), 6000);
     setImporting(false); setImportProgress(null);
-  }, [flights, selected, saveFlight, attachIgcToFlight]);
+  }, [flights, selected, saveFlight, attachIgcToFlight, placeMatchRadiusKm, mapTilerKey]);
 
   const importIGCFiles = useCallback(async (files) => {
     const igc = files.filter(f=>f.name.toLowerCase().endsWith(".igc"));
@@ -4821,10 +4902,11 @@ function FlugbuchApp() {
               return n > m ? n : m;
             }, 0);
             const backfill = computeDistanceSpeedBackfill(0, {}, item.igcData.scoreDistanceKm, item.igcData.durationSec);
+            const inferred = await inferPlaceAndCountry(item.igcData.startPt, item.igcData.endPt, flights, placeMatchRadiusKm, mapTilerKey);
             const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr+1), pdfOnly:false,
-              date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:"",glider:item.glider||"",
+              date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:inferred.site||"",glider:item.glider||"",
               startTime:"", endTime:"", comment:"", rating:0, notes:"", track:item.track,
-              customFields:{landung:"",igcFilename:baseName,
+              customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,
                 hGew: item.igcData.totalGain ? String(item.igcData.totalGain) : "",
                 hDiff: item.igcData.hDiff ? String(item.igcData.hDiff) : "",
                 maxSteigen: item.igcData.maxClimb ? String(item.igcData.maxClimb) : "",
