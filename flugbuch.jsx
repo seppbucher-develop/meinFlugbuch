@@ -3919,6 +3919,64 @@ function FlugbuchApp() {
       } catch {}
     })();
   }, []);
+  // ── Vario-Direktimport (File System Access API, nur Chrome/Edge Desktop)
+  // Einmalig den Ordner wählen, unter dem der Flug-Instrument-Speicher
+  // eingehängt ist (bei dir z.B. D:\) — die App merkt sich diesen Ordner
+  // dauerhaft (wie den Backup-Ordner in Service) und durchsucht ihn beim
+  // Import rekursiv nach .igc-Dateien, unabhängig von der genauen Tiefe der
+  // \flights\<Jahr>\<Monat>\<Tag>-Struktur. Dateien, deren Name bereits bei
+  // einem vorhandenen Flug als igcFilename hinterlegt ist, werden VOR dem
+  // eigentlichen Import (ohne sie überhaupt zu lesen) aussortiert — nur
+  // wirklich neue Flüge landen im bestehenden Import-Ablauf (doImport),
+  // der Dubletten/Datums-Zuordnung ohnehin schon zuverlässig übernimmt.
+  const varioFsapiSupported = typeof window !== "undefined" && !!window.showDirectoryPicker;
+  const [varioDirHandle, setVarioDirHandle] = useState(null);
+  const [varioDirName, setVarioDirName] = useState(null);
+  useEffect(() => {
+    if (!varioFsapiSupported) return;
+    (async () => {
+      try {
+        const handle = await window.fsapiHandle.get("varioDir");
+        if (handle) { setVarioDirHandle(handle); setVarioDirName(handle.name); }
+      } catch (e) { console.error("Vario-Ordner laden fehlgeschlagen:", e); }
+    })();
+  }, [varioFsapiSupported]);
+  const chooseVarioDir = async () => {
+    if (!varioFsapiSupported) return;
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "read" });
+      await window.fsapiHandle.set("varioDir", handle);
+      setVarioDirHandle(handle);
+      setVarioDirName(handle.name);
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      console.error("Vario-Ordnerauswahl fehlgeschlagen:", e);
+    }
+  };
+  const clearVarioDir = async () => {
+    await window.fsapiHandle.delete("varioDir");
+    setVarioDirHandle(null);
+    setVarioDirName(null);
+  };
+  // Läuft rekursiv durch alle Unterordner (Jahr/Monat/Tag, beliebig tief)
+  // und sammelt jede gefundene .igc-Datei als echtes File-Objekt — dieselbe
+  // Form, die auch der bestehende Datei-Auswahl-Import liefert, sodass sie
+  // direkt an doImport() weitergereicht werden können, ohne dort irgendwas
+  // anpassen zu müssen.
+  const scanVarioDirRecursive = async (dirHandle) => {
+    const files = [];
+    const walk = async (handle) => {
+      for await (const [name, entry] of handle.values()) {
+        if (entry.kind === "directory") { await walk(entry); continue; }
+        if (entry.kind === "file" && /\.igc$/i.test(name)) {
+          try { files.push(await entry.getFile()); } catch (e) { console.error("IGC-Datei lesen fehlgeschlagen:", name, e); }
+        }
+      }
+    };
+    await walk(dirHandle);
+    return files;
+  };
+
   // Derived once whenever the flight list changes — entfernungSL needs
   // every flight's start/end points to compute (great-circle distance),
   // so it's precomputed here rather than in the per-flight sort/search
@@ -4477,6 +4535,34 @@ function FlugbuchApp() {
     await processIGCFiles(toImport);
   }, [flights]);
 
+  // Vario-Direktimport: scannt den gewählten Ordner rekursiv, sortiert
+  // Dateien, deren Name bereits als igcFilename bei einem vorhandenen Flug
+  // hinterlegt ist, LEISE aus (kein Dubletten-Dialog für hunderte alte
+  // Dateien) und übergibt nur die wirklich neuen an den bestehenden
+  // Import-Ablauf (doImport) — der kümmert sich danach wie gewohnt um
+  // Datums-Zuordnung, Mehrdeutigkeiten usw.
+  const [varioScanning, setVarioScanning] = useState(false);
+  const [varioResult, setVarioResult] = useState(null);
+  const runVarioImport = useCallback(async () => {
+    if (!varioDirHandle) return;
+    setVarioScanning(true); setVarioResult(null);
+    try {
+      const allFiles = await scanVarioDirRecursive(varioDirHandle);
+      const knownNames = new Set(
+        flights.map(f => f.customFields?.igcFilename).filter(Boolean)
+      );
+      const newFiles = allFiles.filter(f => !knownNames.has(f.name.replace(/\.igc$/i,"")));
+      setVarioScanning(false);
+      setVarioResult({ total: allFiles.length, neu: newFiles.length });
+      if (newFiles.length) await doImport(newFiles);
+    } catch (e) {
+      console.error("Vario-Import fehlgeschlagen:", e);
+      setVarioScanning(false);
+      setVarioResult({ error: e.message || String(e) });
+    }
+  }, [varioDirHandle, flights, doImport]);
+
+
   // Applies parsed IGC data onto an existing flight (shared by both the
   // filename-match and the date-match paths, so they stay in sync).
   const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, igcData, igcFilename) => {
@@ -4869,6 +4955,31 @@ function FlugbuchApp() {
               {importingExcel?"⏳ Importiere…":"Excel"}
             </div>
           </div>
+          {varioFsapiSupported && (
+            <div onClick={varioDirHandle ? runVarioImport : chooseVarioDir}
+              title={varioDirHandle ? `Vario-Ordner „${varioDirName}" nach neuen IGC-Dateien durchsuchen (rekursiv, bereits bekannte werden übersprungen)` : "Vario-Ordner einmalig auswählen (z.B. D:\\)"}
+              style={{flex:1,border:`2px dashed ${varioDirHandle?"rgba(167,139,250,0.4)":"rgba(167,139,250,0.25)"}`,borderRadius:10,padding:"10px 8px",textAlign:"center",background:"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3}}>
+              <div style={{fontSize:15}}>🛩️</div>
+              <div style={{color:"rgba(167,139,250,0.7)",fontSize:10}}>
+                {varioScanning ? "⏳ Suche…" : varioDirHandle ? "Vario" : "Vario wählen"}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {varioResult && (
+        <div style={{margin:"8px 16px 0",background:varioResult.error?"rgba(239,68,68,0.08)":"rgba(167,139,250,0.1)",border:`1px solid ${varioResult.error?"rgba(239,68,68,0.3)":"rgba(167,139,250,0.3)"}`,borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:12,color:varioResult.error?"#f87171":"#a78bfa"}}>
+            {varioResult.error ? "❌ "+varioResult.error : `✅ ${varioResult.total} IGC-Dateien im Vario-Ordner · ${varioResult.neu} davon neu`}
+          </span>
+          <button onClick={()=>setVarioResult(null)} style={{background:"none",border:"none",color:"rgba(167,139,250,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
+        </div>
+      )}
+      {varioDirHandle && showImportMenu && (
+        <div style={{margin:"4px 16px 0",fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span>📁 Vario-Ordner: {varioDirName}</span>
+          <button onClick={clearVarioDir} style={{background:"none",border:"none",color:"rgba(248,113,113,0.6)",fontSize:11,cursor:"pointer"}}>ändern</button>
         </div>
       )}
 

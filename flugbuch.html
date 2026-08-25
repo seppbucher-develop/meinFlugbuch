@@ -194,6 +194,69 @@
     };
   })();
 
+  // Separate, eigenständige kleine Datenbank NUR für lokal gewählte Ordner
+  // (File System Access API, Chrome/Edge Desktop) — z.B. den Vario-Ordner
+  // für den Direkt-Import. Bewusst NICHT in "flugbuch-db"/"kv" mit abgelegt:
+  // ein FileSystemDirectoryHandle ist kein per JSON.stringify
+  // serialisierbarer String (den window.storage durchgängig erwartet),
+  // sondern ein eigenes strukturiert-klonbares Objekt — eine zweite
+  // Datenbank vermeidet jedes Risiko, das gemeinsame Schema zu verändern.
+  // Dieselbe Datenbank/derselbe Store wie in service.html (dort für den
+  // Backup-Ordner) — nur der Schlüssel unterscheidet sich ("varioDir" hier
+  // vs. "backupDir" dort), beide Seiten können sie parallel nutzen.
+  (function () {
+    const DB_NAME = "flugbuch-fsapi";
+    let dbPromise = null;
+    function openDb() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise((resolve, reject) => {
+        if (!window.indexedDB) { reject(new Error("IndexedDB not available")); return; }
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = () => { req.result.createObjectStore("handles"); };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      return dbPromise;
+    }
+    window.fsapiHandle = {
+      async get(key) {
+        try {
+          const db = await openDb();
+          return await new Promise((resolve, reject) => {
+            const tx = db.transaction("handles", "readonly");
+            const req = tx.objectStore("handles").get(key);
+            req.onsuccess = () => resolve(req.result !== undefined ? req.result : null);
+            req.onerror = () => reject(req.error);
+          });
+        } catch { return null; }
+      },
+      async set(key, handle) {
+        try {
+          const db = await openDb();
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction("handles", "readwrite");
+            tx.objectStore("handles").put(handle, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+          return true;
+        } catch { return false; }
+      },
+      async delete(key) {
+        try {
+          const db = await openDb();
+          await new Promise((resolve, reject) => {
+            const tx = db.transaction("handles", "readwrite");
+            tx.objectStore("handles").delete(key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+          });
+          return true;
+        } catch { return false; }
+      },
+    };
+  })();
+
   window.addEventListener("error", function (e) {
     const el = document.getElementById("load-status");
     el.style.display = "block";
