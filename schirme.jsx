@@ -7,6 +7,11 @@
 // werden von dort live übernommen, nicht dupliziert).
 
 const SCHIRME_KEY = "schirme:list";
+function formatFlightHours(sec) {
+  const m = Math.round((sec || 0) / 60);
+  const h = Math.floor(m / 60), rem = m % 60;
+  return `${h}h ${String(rem).padStart(2, "0")}m`;
+}
 // Aus den tatsächlichen Schirm-Werten der Excel-Daten verifizierte
 // Hersteller-Präfixe — bewusst eine kleine, geprüfte Liste statt eines
 // allgemeinen Herstellerverzeichnisses, um keine falschen Treffer zu
@@ -102,9 +107,15 @@ function SchirmeApp() {
   // zurück.
   const renameGliderEverywhere = async (oldName, newName) => {
     const fl = flights || await loadAllFlights();
-    const affected = fl.filter(f => (f.glider || "").trim() === oldName);
+    // Bugfix: der Flug-Schirm-Wert wurde getrimmt verglichen, oldName aber
+    // nicht — bei einem Leerzeichen-Unterschied (z.B. "Sigma 11 " als
+    // gespeicherter Schirm-Name) griff der Vergleich dadurch nie, und es
+    // wurde still und leise nichts umbenannt.
+    const target = (oldName || "").trim();
+    const affected = fl.filter(f => (f.glider || "").trim() === target);
     if (!affected.length) return 0;
-    const updated = affected.map(f => ({ ...f, glider: newName }));
+    const cleanedNewName = (newName || "").trim();
+    const updated = affected.map(f => ({ ...f, glider: cleanedNewName }));
     await Promise.all(updated.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
     return updated.length;
   };
@@ -244,7 +255,7 @@ function SchirmeApp() {
       const fl = flights || await loadAllFlights();
       const mat = material.length ? material : await loadAllMaterial();
       const names = [...new Set(fl.map(f => (f.glider || "").trim()).filter(Boolean))];
-      const existingNames = new Set(schirme.map(s => s.name));
+      const existingNames = new Set(schirme.map(s => (s.name || "").trim()));
       const missing = names.filter(n => !existingNames.has(n));
       if (!missing.length) {
         setMsg({ type: "ok", text: "Alle Schirm-Namen aus den Flügen sind bereits erfasst — nichts zu erzeugen." });
@@ -274,6 +285,9 @@ function SchirmeApp() {
   };
 
   const flightCountFor = (name) => (flights || []).filter(f => (f.glider || "").trim() === name).length;
+  const durationFor = (name) => (flights || [])
+    .filter(f => (f.glider || "").trim() === name)
+    .reduce((sum, f) => sum + (f.durationSec || 0), 0);
   const materialFor = (id) => material.find(m => m.id === id) || null;
 
   if (flights === null) {
@@ -347,7 +361,7 @@ function SchirmeApp() {
               style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 12, padding: "12px 14px", marginBottom: 8, cursor: "pointer" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
                 <span style={{ fontSize: 14, fontWeight: 700, color: "#7dd3fc" }}>{s.name}</span>
-                <span style={{ fontSize: 11, color: "rgba(232,244,253,0.4)" }}>{flightCountFor(s.name)} Flüge</span>
+                <span style={{ fontSize: 11, color: "rgba(232,244,253,0.4)" }}>{flightCountFor(s.name)} Flüge · {formatFlightHours(durationFor(s.name))}</span>
               </div>
               <div style={{ fontSize: 12, color: "rgba(232,244,253,0.7)", display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <span>{s.hersteller || "— Hersteller —"}</span>
