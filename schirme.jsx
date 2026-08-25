@@ -443,7 +443,10 @@ function SchirmeApp() {
         <a href="service.html" style={{ color: "#7dd3fc", fontSize: 24, textDecoration: "none", flexShrink: 0, lineHeight: 1 }}>‹</a>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: "rgba(232,244,253,0.4)", marginBottom: 2 }}>Flugbuch · Service</div>
-          <h1 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 4px" }}>🪂 Schirme</h1>
+          <h1 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 4px", display: "flex", alignItems: "center", gap: 8 }}>
+            <img src="icons/icon-header-128.png?v=2" alt="" style={{ width: 24, height: 24, flexShrink: 0 }} />
+            Schirme
+          </h1>
           <div style={{ fontSize: 12, color: "rgba(232,244,253,0.45)" }}>{sortedSchirme.length} Schirme</div>
         </div>
       </div>

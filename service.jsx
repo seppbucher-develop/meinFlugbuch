@@ -470,7 +470,7 @@ function ServiceApp() {
 
         <a href="schirme.html"
           style={{ display: "flex", alignItems: "center", gap: 14, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14, textDecoration: "none", color: "inherit" }}>
-          <div style={{ fontSize: 26, flexShrink: 0 }}>🪂</div>
+          <img src="icons/icon-header-128.png?v=2" alt="" style={{ width: 26, height: 26, flexShrink: 0 }} />
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 2 }}>Schirme</div>
             <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)" }}>Hersteller, Typ, letzter Check — verknüpft mit Material</div>
