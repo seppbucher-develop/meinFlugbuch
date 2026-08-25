@@ -2514,44 +2514,58 @@ const TILE_FIELD_OPTIONS = [
 ];
 const DEFAULT_TILE_KEYS = ["duration","maxAlt","distanz","startAlt","endAlt","hDiff","maxSinken","maxSteigen","speed"];
 
-function buildAdvancedQuery(rows, combine) {
+function buildAdvancedQuery(rows) {
   // Values containing whitespace must be quoted — the query tokenizer
   // (matchFlights/evalToken) splits on spaces outside quotes, so an
   // unquoted "field:Advance Pi 23" silently became three unrelated terms
   // ("field:Advance", "Pi", "23") that essentially never all matched.
   const quoteIfNeeded = v => /\s/.test(v) ? `"${v}"` : v;
-  const parts = rows
-    .filter(r => r.value !== "" && r.value != null)
-    .map(r => {
-      const fieldDef = SEARCH_FIELDS.find(f => f.id === r.field);
-      const isNumeric = fieldDef?.type === "number" || fieldDef?.type === "date" || fieldDef?.type === "time";
-      const op = r.op || (isNumeric ? "=" : ":");
-      if (op === "between") {
-        if (r.value2 === "" || r.value2 == null) return `${r.field}>=${String(r.value).trim()}`;
-        // Joined with && so this pair always stays a unit even when the
-        // outer rows are combined with OR — the query engine splits on ||
-        // first, so an && inside one row's own part never gets separated
-        // from its partner by an OR elsewhere in the query.
-        return `${r.field}>=${String(r.value).trim()} && ${r.field}<=${String(r.value2).trim()}`;
-      }
-      return `${r.field}${op}${quoteIfNeeded(String(r.value).trim())}`;
-    });
-  if (!parts.length) return "";
-  return parts.join(combine === "OR" ? " || " : " && ");
+  const termFor = (r) => {
+    const fieldDef = SEARCH_FIELDS.find(f => f.id === r.field);
+    const isNumeric = fieldDef?.type === "number" || fieldDef?.type === "date" || fieldDef?.type === "time";
+    const op = r.op || (isNumeric ? "=" : ":");
+    if (op === "between") {
+      if (r.value2 === "" || r.value2 == null) return `${r.field}>=${String(r.value).trim()}`;
+      // Joined with && so this pair always stays a unit no matter which
+      // connector (UND/ODER) this row itself uses towards the row before
+      // it — matchFlights splits on || first, so an && inside one row's
+      // own part never gets separated from its partner by an OR elsewhere.
+      return `${r.field}>=${String(r.value).trim()} && ${r.field}<=${String(r.value2).trim()}`;
+    }
+    return `${r.field}${op}${quoteIfNeeded(String(r.value).trim())}`;
+  };
+  // Each row (from the second non-empty one onward) carries its OWN
+  // connector to whatever came before it — this is what allows mixed
+  // UND/ODER chains (e.g. "Zeile1 UND Zeile2 ODER Zeile3") instead of one
+  // global operator for the whole list. matchFlights already evaluates
+  // && with higher precedence than || (splits on || first, then && within
+  // each group), so a plain left-to-right chain here already means the
+  // same thing a person reading "A UND B ODER C" would expect.
+  let out = "";
+  for (const r of rows) {
+    if (r.value === "" || r.value == null) continue; // empty rows are skipped entirely, like before
+    const term = termFor(r);
+    if (!out) { out = term; continue; }
+    out += (r.connector === "OR" ? " || " : " && ") + term;
+  }
+  return out;
 }
 
-function newSearchRow() { return { field: "site", op: ":", value: "" }; }
+function newSearchRow(connector) { return { field: "site", op: ":", value: "", connector: connector || "AND" }; }
 
-// Reconstructs the row-builder's rows/combine from a query string — used
-// when the search panel is reopened after being hidden, so a previously
-// built multi-row search reappears as those same rows instead of just the
-// raw filterText string the person would otherwise have to decode by eye
-// to edit further.
+// Reconstructs the row-builder's rows (each with its own connector to the
+// previous row) from a query string — used when the search panel is
+// reopened after being hidden, so a previously built multi-row search
+// reappears as those same rows instead of just the raw filterText string
+// the person would otherwise have to decode by eye to edit further.
 function parseQueryToRows(query) {
-  if (!query || !query.trim()) return { rows: [newSearchRow()], combine: "AND" };
-  const combine = query.includes(" || ") ? "OR" : "AND";
-  const parts = query.split(combine === "OR" ? / \|\| / : / && /);
-  const parsed = parts.map(part => {
+  if (!query || !query.trim()) return [newSearchRow()];
+  // Split on && / || while keeping the delimiter itself in the result
+  // (capturing group in the regex), so each term stays paired with the
+  // connector that led into it — needed to reconstruct mixed UND/ODER
+  // chains rather than assuming one operator for the whole query.
+  const pieces = query.trim().split(/\s*(&&|\|\|)\s*/).filter(p => p !== "");
+  const parseTerm = (part) => {
     const m = part.trim().match(/^([\wäöü]+)\s*(>=|<=|!=|≠|>|<|=|:)\s*(.+)$/i);
     if (!m) return null;
     const field = m[1].toLowerCase();
@@ -2559,21 +2573,28 @@ function parseQueryToRows(query) {
     const op = m[2] === "≠" ? "!=" : m[2];
     const value = m[3].trim().replace(/^"(.*)"$/, "$1");
     return { field, op, value };
-  });
-  if (parsed.some(p => !p)) return { rows: [newSearchRow()], combine: "AND" };
+  };
+  const terms = [];
+  const connectors = []; // connector leading into terms[i]; connectors[0] is unused
+  for (let i = 0; i < pieces.length; i += 2) {
+    const t = parseTerm(pieces[i]);
+    if (!t) return [newSearchRow()];
+    terms.push(t);
+    connectors.push(i === 0 ? "AND" : (pieces[i - 1] === "||" ? "OR" : "AND"));
+  }
   // Merge a "between" pair back into one row — buildAdvancedQuery always
   // emits these as two consecutive same-field >=/<= entries joined by &&.
   const rows = [];
-  for (let i = 0; i < parsed.length; i++) {
-    const cur = parsed[i], next = parsed[i+1];
-    if (combine === "AND" && next && cur.field === next.field && cur.op === ">=" && next.op === "<=") {
-      rows.push({ field: cur.field, op: "between", value: cur.value, value2: next.value });
+  for (let i = 0; i < terms.length; i++) {
+    const cur = terms[i], next = terms[i + 1];
+    if (next && connectors[i + 1] === "AND" && cur.field === next.field && cur.op === ">=" && next.op === "<=") {
+      rows.push({ field: cur.field, op: "between", value: cur.value, value2: next.value, connector: connectors[i] });
       i++;
     } else {
-      rows.push(cur);
+      rows.push({ ...cur, connector: connectors[i] });
     }
   }
-  return { rows: rows.length ? rows : [newSearchRow()], combine };
+  return rows.length ? rows : [newSearchRow()];
 }
 
 // Collapsed: a single search line (existing behaviour). Expanding it reveals
@@ -2588,15 +2609,11 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
   // panel to flicker open/closed on every keystroke. Closing only happens
   // via the explicit ✓ button below.
   const [advOpen, setAdvOpen] = useState(false);
-  const [{ rows, combine }, setRowState] = useState(() => parseQueryToRows(filterText));
-  const setRows = (nextRows) => setRowState(s => ({ ...s, rows: nextRows }));
-  const setCombine = (nextCombine) => setRowState(s => ({ ...s, combine: nextCombine }));
+  const [rows, setRows] = useState(() => parseQueryToRows(filterText));
 
-  const applyRows = (nextRows, nextCombine) => {
+  const applyRows = (nextRows) => {
     setRows(nextRows);
-    const useCombine = nextCombine || combine;
-    if (nextCombine) setCombine(nextCombine);
-    setFilterText(buildAdvancedQuery(nextRows, useCombine));
+    setFilterText(buildAdvancedQuery(nextRows));
   };
   const updateRow = (idx, patch) => applyRows(rows.map((r,i)=> i===idx ? {...r, ...patch} : r));
   const addRow = () => applyRows([...rows, newSearchRow()]);
@@ -2623,9 +2640,15 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
               const fieldDef = SEARCH_FIELDS.find(f=>f.id===row.field);
               return (
                 <div key={idx} style={{display:"flex",gap:6,alignItems:"center"}}>
-                  <span style={{fontSize:10,fontWeight:700,color:"#7dd3fc",minWidth:34,textAlign:"center",flexShrink:0}}>
-                    {idx===0 ? "" : (combine==="OR"?"ODER":"UND")}
-                  </span>
+                  {idx===0 ? (
+                    <span style={{minWidth:34,flexShrink:0}} />
+                  ) : (
+                    <button onClick={()=>updateRow(idx,{connector: row.connector==="OR" ? "AND" : "OR"})}
+                      title="UND/ODER für diese Zeile umschalten"
+                      style={{fontSize:10,fontWeight:700,minWidth:34,textAlign:"center",flexShrink:0,background:row.connector==="OR"?"rgba(167,139,250,0.18)":"rgba(125,211,252,0.15)",border:`1px solid ${row.connector==="OR"?"rgba(167,139,250,0.4)":"rgba(125,211,252,0.35)"}`,borderRadius:6,padding:"4px 2px",color:row.connector==="OR"?"#a78bfa":"#7dd3fc",cursor:"pointer"}}>
+                      {row.connector==="OR" ? "ODER" : "UND"}
+                    </button>
+                  )}
                   <select value={row.field}
                     onChange={e=>{
                       const nf = SEARCH_FIELDS.find(f=>f.id===e.target.value);
@@ -2670,16 +2693,8 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
           </div>
           <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8}}>
             <button onClick={addRow} style={{background:"rgba(125,211,252,0.12)",border:"1px solid rgba(125,211,252,0.3)",borderRadius:8,padding:"5px 10px",color:"#7dd3fc",fontSize:11,fontWeight:700,cursor:"pointer"}}>+ Zeile</button>
-            <div style={{display:"flex",gap:8,alignItems:"center"}}>
-              {rows.length>1 && (
-                <div style={{display:"flex",background:"rgba(255,255,255,0.06)",borderRadius:8,padding:2}}>
-                  <button onClick={()=>applyRows(rows,"AND")} style={{background:combine==="AND"?"rgba(125,211,252,0.25)":"transparent",border:"none",borderRadius:6,padding:"4px 10px",color:combine==="AND"?"#7dd3fc":"rgba(232,244,253,0.5)",fontSize:11,fontWeight:700,cursor:"pointer"}}>UND</button>
-                  <button onClick={()=>applyRows(rows,"OR")} style={{background:combine==="OR"?"rgba(125,211,252,0.25)":"transparent",border:"none",borderRadius:6,padding:"4px 10px",color:combine==="OR"?"#7dd3fc":"rgba(232,244,253,0.5)",fontSize:11,fontWeight:700,cursor:"pointer"}}>ODER</button>
-                </div>
-              )}
-              <button onClick={()=>setAdvOpen(false)} title="Schliessen"
-                style={{background:"rgba(34,197,94,0.18)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,width:30,height:30,color:"#4ade80",fontSize:14,fontWeight:900,cursor:"pointer",flexShrink:0}}>✓</button>
-            </div>
+            <button onClick={()=>setAdvOpen(false)} title="Schliessen"
+              style={{background:"rgba(34,197,94,0.18)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,width:30,height:30,color:"#4ade80",fontSize:14,fontWeight:900,cursor:"pointer",flexShrink:0}}>✓</button>
           </div>
         </div>
       )}
