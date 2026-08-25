@@ -353,7 +353,7 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
   }, [pointsKey]);
 
   return (
-    <div style={{minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"-apple-system,BlinkMacSystemFont,sans-serif",paddingBottom:24}}>
+    <div style={{minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"system-ui,sans-serif",paddingBottom:24}}>
       <div style={{display:"flex",alignItems:"center",gap:10,padding:"calc(20px + env(safe-area-inset-top, 0px)) 16px 14px",borderBottom:"1px solid rgba(100,180,255,0.1)",marginBottom:12}}>
         <button onClick={()=>{window.location.href="index.html";}} title="Zur Startseite"
           style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,color:"rgba(232,244,253,0.8)",cursor:"pointer",flexShrink:0}}>
@@ -784,7 +784,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
         }
         if (showAlt) {
           const altEl = document.createElement("span");
-          altEl.style.cssText = `position:absolute;left:calc(100% + 4px);top:50%;transform:translateY(-50%);color:#dc2626;font:800 13px -apple-system,sans-serif;white-space:nowrap;`;
+          altEl.style.cssText = `position:absolute;left:calc(100% + 4px);top:50%;transform:translateY(-50%);color:#dc2626;font:800 13px system-ui,sans-serif;white-space:nowrap;`;
           el.appendChild(altEl);
           ref._altEl = altEl;
         } else {
@@ -1194,7 +1194,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     ctx.strokeStyle = "rgba(255,255,255,0.15)"; ctx.lineWidth = 1*dpr;
     ctx.beginPath(); ctx.moveTo(padL,padT); ctx.lineTo(padL,padT+plotH); ctx.lineTo(padL+plotW,padT+plotH); ctx.stroke();
 
-    ctx.fillStyle = "rgba(232,244,253,0.5)"; ctx.font = `${10*dpr}px -apple-system,sans-serif`;
+    ctx.fillStyle = "rgba(232,244,253,0.5)"; ctx.font = `${10*dpr}px system-ui,sans-serif`;
     ctx.textAlign = "right";
     ctx.fillText(Math.round(maxA)+"m", padL-4*dpr, padT+9*dpr);
     ctx.fillText(Math.round(minA)+"m", padL-4*dpr, padT+plotH);
@@ -1236,12 +1236,12 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     }
     if (centerAlt != null) {
       const cy = Math.max(padT+9*dpr, Math.min(padT+plotH, yPos(centerAlt)));
-      ctx.fillStyle = "#dc2626"; ctx.font = `bold ${10*dpr}px -apple-system,sans-serif`;
+      ctx.fillStyle = "#dc2626"; ctx.font = `bold ${10*dpr}px system-ui,sans-serif`;
       ctx.textAlign = "right";
       ctx.fillText(Math.round(centerAlt)+"m", padL-4*dpr, cy);
     }
     if (centerLabel) {
-      ctx.fillStyle = "#dc2626"; ctx.font = `bold ${10*dpr}px -apple-system,sans-serif`;
+      ctx.fillStyle = "#dc2626"; ctx.font = `bold ${10*dpr}px system-ui,sans-serif`;
       ctx.textAlign = "center";
       ctx.fillText(centerLabel, padL+plotW/2, padT+plotH+29*dpr);
     }
@@ -3235,7 +3235,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
 
     return (
       <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}
-        style={{maxWidth:isWide?1100:480,margin:"0 auto",padding:"0 0 32px",background:"#040e20",minHeight:"100vh",color:"#e8f4fd",fontFamily:"-apple-system,BlinkMacSystemFont,sans-serif"}}>
+        style={{maxWidth:isWide?1100:480,margin:"0 auto",padding:"0 0 32px",background:"#040e20",minHeight:"100vh",color:"#e8f4fd",fontFamily:"system-ui,sans-serif"}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"calc(16px + env(safe-area-inset-top, 0px)) 16px 10px"}}>
           {!hideBackButton && <button onClick={()=>{ if (returnTo) { window.location.href = returnTo; } else { setView("list"); } }} style={{background:"none",border:"none",color:"#7dd3fc",fontSize:22,cursor:"pointer"}}>←</button>}
           {hideBackButton && <button onClick={()=>{ if (returnTo) { window.location.href = returnTo; } else { setView("list"); } }} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:20,padding:"6px 14px",color:"rgba(232,244,253,0.6)",fontSize:13,cursor:"pointer"}}>✕ Liste</button>}
@@ -3643,7 +3643,7 @@ function SidebarList({ flights, selectedId, onSelect, longestId }) {
     if (el) el.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }, [selectedId]);
   return (
-    <div style={{width:"clamp(340px, 22vw, 440px)",minWidth:340,height:"100vh",overflowY:"auto",borderRight:"1px solid rgba(255,255,255,0.08)",background:"#040e20",fontFamily:"-apple-system,BlinkMacSystemFont,sans-serif"}}>
+    <div style={{width:"clamp(340px, 22vw, 440px)",minWidth:340,height:"100vh",overflowY:"auto",borderRight:"1px solid rgba(255,255,255,0.08)",background:"#040e20",fontFamily:"system-ui,sans-serif"}}>
       <div style={{padding:"calc(14px + env(safe-area-inset-top, 0px)) 14px 8px",position:"sticky",top:0,background:"#040e20",zIndex:5,borderBottom:"1px solid rgba(255,255,255,0.06)"}}>
         <div style={{marginBottom:6}}>
           <SearchBar filterText={filterText} setFilterText={setFilterText} knownGliders={[...new Set(flights.map(f=>f.glider).filter(Boolean))].sort()} />
@@ -4563,7 +4563,7 @@ function FlugbuchApp() {
 
   // ── LIST VIEW ─────────────────────────────────────────────────────────────
   return (
-    <div style={{maxWidth:isWide?1400:480,margin:"0 auto",minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"-apple-system,BlinkMacSystemFont,sans-serif"}}>
+    <div style={{maxWidth:isWide?1400:480,margin:"0 auto",minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"system-ui,sans-serif"}}>
       <input ref={fileRef} type="file" accept=".igc" multiple style={{display:"none"}} onChange={e=>importIGCFiles(Array.from(e.target.files))} />
 
       {/* Header */}

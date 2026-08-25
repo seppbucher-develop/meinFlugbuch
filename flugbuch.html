@@ -5,20 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
 <title>Flugbuch</title>
 
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="Flugbuch" />
-<link rel="apple-touch-icon" href="apple-touch-icon.png" />
-<link rel="apple-touch-icon" sizes="120x120" href="apple-touch-icon-120.png" />
-<link rel="apple-touch-icon" sizes="152x152" href="apple-touch-icon-152.png" />
-<link rel="apple-touch-icon" sizes="167x167" href="apple-touch-icon-167.png" />
 <meta name="theme-color" content="#040e20" />
 
 <style>
   html, body { margin:0; padding:0; background:#040e20; -webkit-tap-highlight-color: transparent; }
   #root { min-height: 100vh; }
-  * { -webkit-touch-callout: none; }
-  input, textarea, button { -webkit-user-select: text; user-select: text; }
   #load-status { color:#fcd34d; font-family:monospace; font-size:11px; padding:14px; white-space:pre-wrap; }
   /* MapTiler/MapLibre marker popup text was rendering low-contrast (light
      grey on white) — make it clearly legible. */
@@ -44,10 +35,9 @@
   // Storage backed by IndexedDB (much higher quota than localStorage — often
   // 50MB+ vs. ~5-10MB shared across the whole origin). Falls back to
   // localStorage automatically if IndexedDB is unavailable for any reason.
-  // Note: this does NOT protect against iOS resetting the whole storage
-  // container when a Home Screen icon is removed and re-added — that's a
-  // platform-level behaviour, not something any web storage API can prevent.
-  // Use the app's iCloud backup feature after importing data as the real
+  // Note: no web storage API can fully protect against the OS clearing app
+  // data (e.g. if storage is low or the app/shortcut is removed and
+  // re-added) — use the Service-Seite's Backup-Funktion as the real
   // safety net against that.
   (function () {
     const DB_NAME = "flugbuch-db";
@@ -283,7 +273,11 @@
 
     let appSource;
     try {
-      const resp = await fetch("flugbuch.jsx");
+      // Cache-Buster: hängt bei jedem Laden einen neuen Zeitstempel an, damit
+      // nach einem git push immer die aktuelle Version geladen wird statt
+      // einer vom Browser zwischengespeicherten alten Fassung (GitHub Pages
+      // liefert Dateien mit einem 10-Minuten-Cache aus).
+      const resp = await fetch("flugbuch.jsx?v=" + Date.now());
       if (!resp.ok) { status.textContent = "FEHLER beim Laden von flugbuch.jsx: HTTP " + resp.status; status.style.color = "#f87171"; return; }
       appSource = await resp.text();
       status.textContent = "App-Code geladen ✓ (" + appSource.length + " Zeichen) — kompiliere…";
@@ -334,7 +328,7 @@
   });
 </script>
 
-<div id="offline-banner" style="display:none;position:fixed;bottom:calc(10px + env(safe-area-inset-bottom, 0px));left:10px;right:10px;background:rgba(245,158,11,0.8);color:#1a1200;font-weight:700;text-align:center;padding:7px 16px;border-radius:10px;z-index:9999;font-family:-apple-system,BlinkMacSystemFont,sans-serif;font-size:14px;">
+<div id="offline-banner" style="display:none;position:fixed;bottom:calc(10px + env(safe-area-inset-bottom, 0px));left:10px;right:10px;background:rgba(245,158,11,0.8);color:#1a1200;font-weight:700;text-align:center;padding:7px 16px;border-radius:10px;z-index:9999;font-family:system-ui,sans-serif;font-size:14px;">
   📴 Offline — zuletzt gespeicherter Stand
 </div>
 <script>

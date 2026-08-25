@@ -5,16 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
 <title>Service — Flugbuch</title>
 
-<meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="Service" />
 <meta name="theme-color" content="#040e20" />
 
 <style>
   html, body { margin:0; padding:0; background:#040e20; -webkit-tap-highlight-color: transparent; }
   #root { min-height: 100vh; }
-  * { -webkit-touch-callout: none; }
-  input, textarea, button { -webkit-user-select: text; user-select: text; }
   #load-status { color:#fcd34d; font-family:monospace; font-size:11px; padding:14px; white-space:pre-wrap; }
 </style>
 
@@ -235,7 +230,11 @@
 
     let appSource;
     try {
-      const resp = await fetch("service.jsx");
+      // Cache-Buster: hängt bei jedem Laden einen neuen Zeitstempel an, damit
+      // nach einem git push immer die aktuelle Version geladen wird statt
+      // einer vom Browser zwischengespeicherten alten Fassung (GitHub Pages
+      // liefert Dateien mit einem 10-Minuten-Cache aus).
+      const resp = await fetch("service.jsx?v=" + Date.now());
       if (!resp.ok) { status.textContent = "FEHLER beim Laden von service.jsx: HTTP " + resp.status; status.style.color = "#f87171"; return; }
       appSource = await resp.text();
       status.textContent = "Code geladen ✓ (" + appSource.length + " Zeichen) — kompiliere…";
