@@ -369,6 +369,68 @@ function SchirmeApp() {
   const durationFor = (entry) => flightsFor(entry).reduce((sum, f) => sum + (f.durationSec || 0), 0);
   const materialFor = (id) => material.find(m => m.id === id) || null;
 
+  // "Verwaiste" Schirm-Bezeichnungen: Namen, die bei mindestens einem Flug
+  // im Feld "glider" stehen, aber zu KEINEM aktuellen Schirme-Eintrag mehr
+  // passen (weder per Text noch per schirmId) — typischerweise, weil der
+  // zugehörige Schirme-Eintrag früher direkt gelöscht statt umbenannt
+  // wurde (Löschen hängt die betroffenen Flüge nicht um, im Gegensatz zum
+  // Umbenennen/den Korrektur-Werkzeugen oben). Macht sichtbar, woher ein
+  // scheinbar "gelöschter" Schirm-Name in Statistik-Filtern noch stammt.
+  const orphanGliders = React.useMemo(() => {
+    if (!flights) return [];
+    const knownIds = new Set(schirme.map(s => s.id));
+    const knownNames = new Set(schirme.map(s => (s.name || "").trim()));
+    const map = new Map();
+    flights.forEach(f => {
+      const name = (f.glider || "").trim();
+      if (!name) return;
+      const sid = f.customFields?.schirmId;
+      const hasValidLink = sid && knownIds.has(sid);
+      if (hasValidLink || knownNames.has(name)) return; // sauber zugeordnet
+      if (!map.has(name)) map.set(name, []);
+      map.get(name).push(f);
+    });
+    return [...map.entries()]
+      .map(([name, fl]) => ({ name, flights: fl }))
+      .sort((a, b) => b.flights.length - a.flights.length);
+  }, [flights, schirme]);
+
+  const [orphanTarget, setOrphanTarget] = React.useState({}); // name -> gewählte Ziel-schirmId
+  const reassignOrphan = async (name, targetId) => {
+    if (!targetId) return;
+    setBusy(true); setMsg(null);
+    try {
+      const target = schirme.find(s => s.id === targetId);
+      if (!target) return;
+      const count = await renameGliderEverywhere(name, target.name);
+      let updatedFl = await loadAllFlights();
+      const { flights: relinked } = await relinkAll(updatedFl, [target]);
+      setFlights(relinked);
+      setMsg({ type: "ok", text: `✓ „${name}" → „${target.name}": ${count} Flug(e) umgehängt.` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Zuordnen: " + (e.message || String(e)) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const recreateOrphan = async (name) => {
+    setBusy(true); setMsg(null);
+    try {
+      const entry = { id: `schirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        name, hersteller: "", typ: "", letzterCheck: "", materialEntryId: null };
+      const next = [...schirme, entry];
+      await saveSchirme(next);
+      const fl = flights || await loadAllFlights();
+      const { flights: relinked } = await relinkAll(fl, [entry]);
+      setFlights(relinked);
+      setMsg({ type: "ok", text: `✓ „${name}" wieder als eigenständigen Schirm angelegt.` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Anlegen: " + (e.message || String(e)) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   if (flights === null) {
     return <div style={{ padding: 24, color: "rgba(232,244,253,0.5)", fontFamily: "system-ui,sans-serif" }}>Lade…</div>;
   }
@@ -407,6 +469,40 @@ function SchirmeApp() {
       {msg && (
         <div style={{ margin: "0 16px 14px", background: msg.type === "ok" ? "rgba(74,222,128,0.1)" : "rgba(239,68,68,0.1)", border: `1px solid ${msg.type === "ok" ? "rgba(74,222,128,0.3)" : "rgba(239,68,68,0.3)"}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: msg.type === "ok" ? "#4ade80" : "#f87171" }}>
           {msg.text}
+        </div>
+      )}
+
+      {orphanGliders.length > 0 && (
+        <div style={{ margin: "0 16px 14px", background: "rgba(248,113,113,0.06)", border: "1px solid rgba(248,113,113,0.25)", borderRadius: 12, padding: 14 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#f87171", marginBottom: 4 }}>⚠️ Schirm-Bezeichnungen ohne Eintrag in der Liste</div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.55)", marginBottom: 10 }}>
+            Diese Namen stehen noch bei Flügen, haben aber keinen (mehr) passenden Eintrag oben — meist weil ein Schirm-Eintrag gelöscht statt umbenannt wurde. Zu einem bestehenden Schirm zuordnen, oder als eigenen Eintrag wiederherstellen.
+          </div>
+          {orphanGliders.map(o => (
+            <div key={o.name} style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 0", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              <div style={{ flex: "1 1 140px", minWidth: 0 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#e8f4fd", overflow: "hidden", textOverflow: "ellipsis" }}>„{o.name}"</div>
+                <div style={{ fontSize: 10, color: "rgba(232,244,253,0.4)" }}>{o.flights.length} Flug(e) · z.B. {o.flights[0]?.date || "—"}</div>
+              </div>
+              <select value={orphanTarget[o.name] || ""} disabled={busy}
+                onChange={e => setOrphanTarget(t => ({ ...t, [o.name]: e.target.value }))}
+                style={{ background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 8px", color: "#e8f4fd", fontSize: 11, minWidth: 130 }}>
+                <option value="" style={{ background: "#14253a" }}>— Ziel-Schirm —</option>
+                {sortedSchirme.map(s => (
+                  <option key={s.id} value={s.id} style={{ background: "#14253a" }}>{s.name}</option>
+                ))}
+              </select>
+              <button onClick={() => reassignOrphan(o.name, orphanTarget[o.name])} disabled={busy || !orphanTarget[o.name]}
+                style={{ background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "6px 10px", color: "#4ade80", fontSize: 11, fontWeight: 700, cursor: busy || !orphanTarget[o.name] ? "default" : "pointer" }}>
+                Zuordnen
+              </button>
+              <button onClick={() => recreateOrphan(o.name)} disabled={busy}
+                title="Legt diesen Namen wieder als eigenständigen Schirm-Eintrag an, statt ihn einem anderen zuzuordnen."
+                style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 10px", color: "rgba(232,244,253,0.7)", fontSize: 11, cursor: busy ? "default" : "pointer" }}>
+                Wiederherstellen
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -475,6 +571,13 @@ function SchirmeApp() {
             setFlights(updatedFl);
           }}
           onDelete={async (id) => {
+            const entry = schirme.find(s => s.id === id);
+            const affected = entry ? flightsFor(entry) : [];
+            if (affected.length > 0) {
+              setEditing(null);
+              setMsg({ type: "error", text: `„${entry.name}" kann nicht gelöscht werden — ${affected.length} Flug(e) tragen diesen Schirm noch. Bitte zuerst oben umbenennen (z.B. zu einem bestehenden Schirm), das hängt die Flüge automatisch um. Erst ein Schirm ohne Flüge lässt sich löschen.` });
+              return;
+            }
             const next = schirme.filter(s => s.id !== id);
             await saveSchirme(next);
             setEditing(null);
