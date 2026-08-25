@@ -19,6 +19,87 @@ function ServiceApp() {
   const [stats, setStats] = React.useState(null); // {flights, material, keys}
   const fileRef = React.useRef(null);
 
+  // Lokaler Backup-Ordner (File System Access API) — nur Chrome/Edge
+  // Desktop unterstützen das; auf allen anderen Browsern (Safari, Firefox,
+  // jedes Handy) bleibt es beim Teilen/Download-Weg weiter unten.
+  const fsapiSupported = typeof window !== "undefined" && !!window.showDirectoryPicker;
+  const [dirHandle, setDirHandle] = React.useState(null);
+  const [dirName, setDirName] = React.useState(null);
+  const [dirPermission, setDirPermission] = React.useState("prompt"); // "granted" | "denied" | "prompt"
+
+  React.useEffect(() => {
+    if (!fsapiSupported) return;
+    (async () => {
+      try {
+        const handle = await window.fsapiHandle.get("backupDir");
+        if (handle) {
+          setDirHandle(handle);
+          setDirName(handle.name);
+          // Nur prüfen (nicht neu anfragen) — eine echte Anfrage
+          // (requestPermission) braucht eine Nutzer-Geste und passiert
+          // deshalb erst beim tatsächlichen Backup-Klick weiter unten.
+          try {
+            const perm = await handle.queryPermission({ mode: "readwrite" });
+            setDirPermission(perm);
+            if (perm === "granted") refreshFolderBackups(handle);
+          } catch { setDirPermission("prompt"); }
+        }
+      } catch (e) { console.error("Backup-Ordner laden fehlgeschlagen:", e); }
+    })();
+  }, [fsapiSupported]);
+
+  // Liste der Backup-Dateien direkt im gewählten Ordner — lässt Restore
+  // ohne eigenen Dateidialog auskommen, wenn ein Ordner konfiguriert ist.
+  const [folderBackups, setFolderBackups] = React.useState([]);
+  const [loadingFolderBackups, setLoadingFolderBackups] = React.useState(false);
+  const refreshFolderBackups = async (handle) => {
+    const h = handle || dirHandle;
+    if (!h) { setFolderBackups([]); return; }
+    setLoadingFolderBackups(true);
+    try {
+      const found = [];
+      for await (const [name, entry] of h.entries()) {
+        if (entry.kind !== "file") continue;
+        if (!/^flugbuch-backup-.*\.(json|json\.gz)$/i.test(name)) continue;
+        try {
+          const file = await entry.getFile();
+          found.push({ name, lastModified: file.lastModified, size: file.size, handle: entry });
+        } catch {}
+      }
+      found.sort((a, b) => b.lastModified - a.lastModified);
+      setFolderBackups(found);
+    } catch (e) {
+      console.error("Ordner-Inhalt lesen fehlgeschlagen:", e);
+      setFolderBackups([]);
+    } finally {
+      setLoadingFolderBackups(false);
+    }
+  };
+
+  const chooseDirectory = async () => {
+    if (!fsapiSupported) return;
+    try {
+      const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+      await window.fsapiHandle.set("backupDir", handle);
+      setDirHandle(handle);
+      setDirName(handle.name);
+      setDirPermission("granted");
+      setMsg({ type: "ok", text: `✓ Backup-Ordner „${handle.name}" festgelegt. Künftige Backups landen automatisch dort.` });
+      refreshFolderBackups(handle);
+    } catch (e) {
+      if (e && e.name === "AbortError") return; // Auswahl abgebrochen
+      setMsg({ type: "error", text: "Ordnerauswahl fehlgeschlagen: " + (e.message || String(e)) });
+    }
+  };
+
+  const clearDirectory = async () => {
+    await window.fsapiHandle.delete("backupDir");
+    setDirHandle(null);
+    setDirName(null);
+    setDirPermission("prompt");
+    setFolderBackups([]);
+  };
+
   const loadStats = React.useCallback(async () => {
     try {
       const all = await window.storage.list("");
@@ -35,6 +116,19 @@ function ServiceApp() {
 
   const exportBackup = async () => {
     setBusy(true); setMsg(null);
+    // Berechtigung für den gewählten Ordner ganz am Anfang anfragen (falls
+    // nötig) — noch bevor irgendein await die Nutzer-Geste dieses Klicks
+    // verbraucht, sonst würde requestPermission() vom Browser stillschweigend
+    // abgelehnt (dieselbe Ursache wie beim navigator.share()-Problem vorhin).
+    let writeHandle = null;
+    if (fsapiSupported && dirHandle) {
+      try {
+        let perm = await dirHandle.queryPermission({ mode: "readwrite" });
+        if (perm !== "granted") perm = await dirHandle.requestPermission({ mode: "readwrite" });
+        if (perm === "granted") { writeHandle = dirHandle; setDirPermission("granted"); }
+        else setDirPermission(perm);
+      } catch (e) { console.error("Berechtigung für Backup-Ordner fehlgeschlagen:", e); }
+    }
     try {
       // Wirklich JEDEN Schlüssel sichern — Flüge (flight:*), Material
       // (entry:*), Statistik-Filter (statistikFilters), eigene Felder
@@ -44,11 +138,17 @@ function ServiceApp() {
       // müsste.
       const all = await window.storage.list("");
       const keys = all?.keys || [];
+      // Parallel statt sequentiell auslesen: bei tausenden Schlüsseln
+      // (Flüge, Material, …) dauert ein Eintrag-für-Eintrag-Auslesen
+      // spürbar lange — genug, dass der Browser die kurzzeitige
+      // "Nutzer-Berechtigung" für navigator.share() (nur direkt nach dem
+      // Antippen des Buttons gültig) wieder verfällt, bevor share()
+      // überhaupt aufgerufen wird. Der native Teilen-Dialog erschien
+      // deshalb nie, die App fiel lautlos auf den einfachen Download
+      // zurück. Parallel dauert dasselbe nur einen Bruchteil der Zeit.
+      const results = await Promise.all(keys.map(k => window.storage.get(k).catch(() => null)));
       const entries = {};
-      for (const k of keys) {
-        const r = await window.storage.get(k);
-        if (r) entries[k] = r.value;
-      }
+      keys.forEach((k, i) => { if (results[i]) entries[k] = results[i].value; });
       const payload = { exportedAt: new Date().toISOString(), entries };
       const json = JSON.stringify(payload);
       const dateStamp = new Date().toISOString().slice(0, 10);
@@ -69,6 +169,27 @@ function ServiceApp() {
       const markBackedUp = async () => {
         try { await window.storage.set("settings:backupDirty", "0"); } catch {}
       };
+
+      // Bevorzugter Weg, falls ein Ordner festgelegt und die Berechtigung
+      // erteilt ist: komplett automatisch, ganz ohne jeden Dialog — die
+      // eigentliche Antwort auf "einmalig festlegen, danach nie wieder
+      // nachfragen".
+      if (writeHandle) {
+        try {
+          const fileHandle = await writeHandle.getFileHandle(filename, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          await markBackedUp();
+          setMsg({ type: "ok", text: `✓ Automatisch gespeichert in „${writeHandle.name}": ${filename} (${keys.length} Einträge, ${formatBytes(blob.size)}).` });
+          refreshFolderBackups(writeHandle);
+          setBusy(false);
+          return;
+        } catch (e) {
+          console.error("Direktes Schreiben in Backup-Ordner fehlgeschlagen, weiche auf Teilen/Download aus:", e);
+          // Kein return — fällt bewusst durch auf den bestehenden Weg unten.
+        }
+      }
 
       if (navigator.share && navigator.canShare) {
         try {
@@ -168,10 +289,66 @@ function ServiceApp() {
       </div>
 
       <div style={{ padding: "16px" }}>
+        {fsapiSupported && (
+          <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📁 Backup-Ordner (automatisch, dieser PC)</div>
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+              Einmalig festlegen (z.B. dein lokaler Synology-Drive-Sync-Ordner) — künftige Backups landen danach automatisch dort, ganz ohne Dialog. Gilt nur für diesen Browser auf diesem Gerät.
+            </div>
+            {dirName ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 auto", background: "rgba(74,222,128,0.1)", border: "1px solid rgba(74,222,128,0.25)", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#4ade80" }}>
+                  📂 {dirName}
+                  {dirPermission !== "granted" && <span style={{ color: "#fcd34d", marginLeft: 8 }}>(Berechtigung beim nächsten Backup erneut bestätigen)</span>}
+                </div>
+                <button onClick={chooseDirectory}
+                  style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, padding: "8px 12px", color: "rgba(232,244,253,0.8)", fontSize: 12, cursor: "pointer" }}>
+                  Ändern
+                </button>
+                <button onClick={clearDirectory}
+                  style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 8, padding: "8px 12px", color: "#f87171", fontSize: 12, cursor: "pointer" }}>
+                  Entfernen
+                </button>
+              </div>
+            ) : (
+              <button onClick={chooseDirectory}
+                style={{ background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 10, padding: "10px 16px", color: "#7dd3fc", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                📁 Ordner auswählen…
+              </button>
+            )}
+
+            {dirName && dirPermission === "granted" && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+                  Backups in diesem Ordner {loadingFolderBackups ? "(lade…)" : `(${folderBackups.length})`}
+                </div>
+                {folderBackups.length === 0 && !loadingFolderBackups && (
+                  <div style={{ fontSize: 12, color: "rgba(232,244,253,0.4)" }}>Noch keine Backup-Dateien hier gefunden.</div>
+                )}
+                {folderBackups.map(b => (
+                  <div key={b.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 10px", background: "rgba(255,255,255,0.03)", borderRadius: 8, marginBottom: 6 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12, color: "#e8f4fd", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name}</div>
+                      <div style={{ fontSize: 10, color: "rgba(232,244,253,0.4)" }}>{new Date(b.lastModified).toLocaleString("de-CH")} · {formatBytes(b.size)}</div>
+                    </div>
+                    <button onClick={async () => { const file = await b.handle.getFile(); importBackup(file); }} disabled={busy}
+                      style={{ flexShrink: 0, background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 8, padding: "6px 12px", color: "#7dd3fc", fontSize: 11, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+                      Wiederherstellen
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>☁️ Backup & Restore</div>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>☁️ Backup & Restore {dirName ? "(anderer Ort)" : ""}</div>
           <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 16, lineHeight: 1.5 }}>
-            Sichert alles auf einmal: Flugbuch, Statistik-Voreinstellungen und Material. Eine wiederhergestellte Sicherung ersetzt die aktuellen Daten in den jeweils gleichen Bereichen (bestehende Einträge mit derselben ID werden überschrieben, alles andere bleibt unangetastet).
+            {dirName
+              ? "Zum manuellen Wiederherstellen aus einer Datei außerhalb des oben gewählten Ordners, oder wenn dein Backup-Ordner gerade nicht verfügbar ist."
+              : "Sichert alles auf einmal: Flugbuch, Statistik-Voreinstellungen und Material. Eine wiederhergestellte Sicherung ersetzt die aktuellen Daten in den jeweils gleichen Bereichen (bestehende Einträge mit derselben ID werden überschrieben, alles andere bleibt unangetastet)."}
+            {!fsapiSupported && " Auf diesem Browser läuft „Backup sichern” über den Teilen-/Download-Dialog (die automatische Ordner-Option oben gibt es nur in Chrome/Edge am PC)."}
           </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button onClick={exportBackup} disabled={busy}
@@ -180,7 +357,7 @@ function ServiceApp() {
             </button>
             <button onClick={() => fileRef.current?.click()} disabled={busy}
               style={{ flex: "1 1 160px", background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 10, padding: "12px", color: "#7dd3fc", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
-              ⬆ Backup importieren
+              ⬆ Backup importieren (Datei wählen)
             </button>
             <input ref={fileRef} type="file" accept=".json,.gz,.json.gz" style={{ display: "none" }}
               onChange={e => { if (e.target.files[0]) importBackup(e.target.files[0]); e.target.value = ""; }} />
