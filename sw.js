@@ -27,6 +27,7 @@ const CORE_ASSETS = [
   "service.html",
   "service.jsx",
   "manifest.json",
+  "favicon.ico",
   "icons/icon-32.png",
   "icons/icon-48.png",
   "icons/icon-96.png",
