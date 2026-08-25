@@ -1758,130 +1758,18 @@ function createFlightFromPDF(nr, p) {
   };
 }
 
-// ── EXCEL-IMPORT (einmaliger Bestandsimport aus Flugbuch.xlsx, Reiter "Flüge") ──
-// Column layout of the "Flüge" sheet (row 1 = header), 0-indexed:
-// 0 Typ, 1 Datum, 2 Monat, 3 Jahr, 4 AnzahlTage, 5 Schirm, 6 Start, 7 Landung,
-// 8 Std, 9 Min, 10 hh:mm (= total minutes, despite the label), 11 Kurs,
-// 12 Bemerkung, 13 Vario+, 14 Vario-, 15 max Höhe, 16 Distanz, 17 Land, 18 Training.
-const EXCEL_FLUEGE_SHEET_NAME = "Flüge";
-
-function pad2(n) { return String(n).padStart(2, "0"); }
-
-// Reads the workbook (via the SheetJS "xlsx" global, loaded in flugbuch.html)
-// and returns raw rows from the "Flüge" sheet as arrays, header row excluded.
-// header:1 + raw:true gives us plain arrays instead of object-per-row, so
-// column position (not a possibly-renamed header label) drives the mapping —
-// matching how the rest of the app's importers already work.
-function parseExcelFluegeWorkbook(arrayBuffer) {
-  if (!window.XLSX) throw new Error("Excel-Bibliothek nicht geladen (XLSX)");
-  const wb = window.XLSX.read(arrayBuffer, { type: "array", cellDates: true });
-  const sheet = wb.Sheets[EXCEL_FLUEGE_SHEET_NAME];
-  if (!sheet) throw new Error(`Reiter "${EXCEL_FLUEGE_SHEET_NAME}" nicht gefunden`);
-  const rows = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
-  return rows.slice(1); // drop header row
-}
-
-// One raw "Flüge" row -> the app's internal flight shape. rowNumber is the
-// 1-based Excel row (header=1, first data row=2, ...), stored so re-running
-// the import against the same file is idempotent (see excelImportKey below).
-// Gleiche geprüfte Präfix-Liste wie auf der Schirme-Seite (schirme.jsx) —
-// dort noch einmal eigenständig definiert, da diese Datei unabhängig von
-// flugbuch.jsx geladen wird und keinen Code mit ihr teilt. Wird hier beim
-// Excel-Import verwendet, damit neu importierte Zeilen direkt bereinigt
-// ankommen, statt erst über die Schirme-Seite nachbereinigt werden zu
-// müssen.
-const KNOWN_GLIDER_PREFIXES = ["UP", "Supair", "Ozone", "Nova", "MacPara"];
-function splitGliderPrefix(raw) {
-  const name = (raw || "").trim();
-  for (const prefix of KNOWN_GLIDER_PREFIXES) {
-    const m = name.match(new RegExp(`^${prefix}\\s+(.+)$`, "i"));
-    if (m) return m[1].trim();
-  }
-  return name;
-}
-
 // Same storage key as the Schirme-Seite (schirme.jsx) — this file loads
 // independently and shares no code with it, so the key is duplicated here
 // deliberately.
 const SCHIRME_KEY = "schirme:list";
 // IGC-Logger schreiben den Schirm-Namen in HFGTY meist als "Hersteller
-// Modell…" ohne feste Konvention — anders als beim Excel-Bestandsimport
-// (splitGliderPrefix, feste Präfix-Liste) wird hier daher bewusst IMMER
-// das erste Wort als Hersteller abgetrennt, unabhängig davon, ob es in
-// KNOWN_GLIDER_PREFIXES steht.
+// Modell…" ohne feste Konvention, deshalb wird hier bewusst IMMER das
+// erste Wort als Hersteller abgetrennt.
 function splitFirstWordAsHersteller(raw) {
   const name = (raw || "").trim();
   const m = name.match(/^(\S+)\s+(.+)$/);
   if (!m) return { hersteller: "", cleaned: name };
   return { hersteller: m[1], cleaned: m[2].trim() };
-}
-function createFlightFromExcelRow(nr, row, rowNumber) {
-  const [typ, datum, monat, jahr, anzahlTage, schirm, start, landung,
-    std, min, hhmm, kurs, bemerkung, varioPlus, varioMinus, maxHoehe,
-    distanz, land, training] = row;
-
-  let dateStr = "", yr = "", mo = "";
-  if (datum instanceof Date && !isNaN(datum)) {
-    dateStr = `${pad2(datum.getDate())}.${pad2(datum.getMonth() + 1)}.${datum.getFullYear()}`;
-    yr = String(datum.getFullYear());
-    mo = pad2(datum.getMonth() + 1);
-  } else if (jahr) {
-    // Fallback if Datum wasn't a real date cell: use Jahr/Monat columns directly.
-    yr = String(jahr); mo = monat ? pad2(monat) : "";
-    dateStr = mo ? `01.${mo}.${yr}` : yr;
-  }
-
-  // "hh:mm" column actually holds total minutes (confirmed against the
-  // sheet's own data — e.g. Std=1,Min=30 pairs with hh:mm=90, not "1:30").
-  // Falls back to computing from Std/Min if that column is empty.
-  const totalMin = (typeof hhmm === "number" && hhmm > 0) ? hhmm
-    : ((Number(std) || 0) * 60 + (Number(min) || 0));
-  const durationSec = totalMin * 60;
-  const durationStr = totalMin ? `${Math.floor(totalMin / 60)}:${pad2(totalMin % 60)}` : "";
-
-  const maxAlt = Number(maxHoehe) || 0;
-  const totalDist = Number(distanz) || 0;
-
-  return {
-    id: `xls_${rowNumber}_${Date.now()}`,
-    name: nr, pdfOnly: true,
-    date: dateStr, rawDate: dateStr, year: yr, month: mo,
-    pilot: "", site: start || "", glider: splitGliderPrefix(schirm || ""),
-    startTime: "", endTime: "",
-    durationSec, durationStr,
-    maxAlt, minAlt: 0,
-    startAlt: 0, endAlt: 0,
-    totalDist,
-    thermalCount: 0, maxClimb: 0,
-    track: [], startPt: null, endPt: null,
-    comment: "", rating: 0,
-    notes: bemerkung || "",
-    customFields: {
-      landung: landung || "",
-      distKm: totalDist ? String(totalDist) : "",
-      hMax: maxAlt ? String(maxAlt) : "",
-      maxSteigen: varioPlus != null ? String(varioPlus) : "",
-      maxSinken: varioMinus != null ? String(varioMinus) : "",
-      // Excel's own "Typ" column (GS/SF/BP/Div) is taken as-is — typAuto:
-      // false stops the app's usual Passagier-based Solo/Biplace auto-
-      // derivation from later overwriting this imported value.
-      typ: typ || "",
-      typAuto: false,
-      // Excel's "Kurs" column holds trip/course names (e.g. "FWA Portugal",
-      // "Schulung") — maps onto the app's existing "Reise" field, which is
-      // what drives the Reise filter, grouping, and the yellow trip badge
-      // in the flight list, rather than a separate unused field.
-      reise: kurs || "",
-      land: land || "",
-      training: training || "",
-      anzahlTage: anzahlTage != null ? String(anzahlTage) : "",
-      // Marks this flight as originating from row `rowNumber` of the
-      // one-time Excel import — re-running the import with the same
-      // (possibly corrected) file skips rows already present instead of
-      // creating duplicates.
-      excelImportKey: `xls-${rowNumber}`,
-    },
-  };
 }
 
 // ── FILTER ENGINE ────────────────────────────────────────────────────────
@@ -4041,8 +3929,6 @@ function FlugbuchApp() {
   // selben Batch nicht versehentlich zwei separate Einträge anlegen.
   // Wird bei jedem frischen Import-Lauf neu geladen (siehe processIGCFiles).
   const schirmeListRef = useRef(null);
-  const [pdfDragOver, setPdfDragOver] = useState(false);
-  const [pdfResult, setPdfResult] = useState(null);
   const [pendingDups, setPendingDups] = useState([]);
   const [dupWarning, setDupWarning] = useState(null);
   // Queue of IGC files that matched no flight by filename, but matched
@@ -4181,11 +4067,6 @@ function FlugbuchApp() {
   const [rowImportText, setRowImportText] = useState("");
   const [rowImportError, setRowImportError] = useState("");
   const fileRef = useRef(null);
-  const pdfFileRef = useRef(null);
-  const excelFileRef = useRef(null);
-  const [excelDragOver, setExcelDragOver] = useState(false);
-  const [importingExcel, setImportingExcel] = useState(false);
-  const [excelResult, setExcelResult] = useState(null);
   // Backup-Hinweis-Flag: geschrieben (nicht mehr lokal angezeigt — der rote
   // Punkt lebt jetzt auf der Startseite, direkt auf der Service-Karte, und
   // wird dort zentral aus diesem einen Schlüssel für ALLE Seiten gelesen).
@@ -4300,268 +4181,6 @@ function FlugbuchApp() {
     setCustomFieldDefs(defs); setShowFieldEditor(false);
     try { await window.storage.set("customFieldDefs", JSON.stringify(defs)); } catch {}
   }, []);
-
-  const applyParsedData = useCallback(async (DATA) => {
-    const existingNames = new Set(flights.map(f=>f.name||""));
-    const newEntries = []; let updated = 0;
-    const updatedFlights = flights.map(f => {
-      const num = (f.name||"").match(/\d+/)?.[0];
-      const p = num ? DATA[num] : null;
-      if (!p) return f;
-      updated++;
-      const dm=(p.dur||"").match(/(\d+):(\d{2}):(\d{2})/);
-      let durationSec;
-      if (dm) durationSec = +dm[1]*3600 + +dm[2]*60 + +dm[3];
-      else {
-        const dm2=(p.dur||"").match(/(\d+):(\d{2})/);
-        const dm3=(p.dur||"").match(/(\d+)\s*h\s*(\d+)\s*m/i);
-        if (dm2) durationSec = +dm2[1]*3600 + +dm2[2]*60;
-        else if (dm3) durationSec = +dm3[1]*3600 + +dm3[2]*60;
-        else durationSec = f.durationSec;
-      }
-      return {
-        ...f,
-        pdfOnly: true,
-        site: p.st || f.site,
-        glider: p.ge || f.glider,
-        notes: p.be || f.notes,
-        startTime: f.startTime || p.sz || "",
-        endTime:   f.endTime   || p.lz || "",
-        durationStr: f.durationStr || p.dur || "",
-        durationSec: f.durationSec || durationSec,
-        maxAlt: f.maxAlt || +(p.hm||0),
-        totalDist: f.totalDist || parseFloat(p.dk||0)||0,
-        maxClimb: f.maxClimb || +(p.mst||0),
-        startAlt: f.startAlt || +(p.msa||0),
-        endAlt: f.endAlt || +(p.ml||0),
-        startPt: f.startPt || (p.sLat&&p.sLon ? {lat:+p.sLat,lon:+p.sLon,gpsAlt:+(p.msa||0)} : null),
-        endPt:   f.endPt   || (p.lLat&&p.lLon ? {lat:+p.lLat,lon:+p.lLon,gpsAlt:+(p.ml||0)}  : null),
-        customFields: {
-          ...(f.customFields||{}),
-          landung: p.la || f.customFields?.landung || "",
-          distKm: p.dk || "", kmh: p.kmh || "",
-          hDiff: p.hd || "", hMax: p.hm || "", hGew: p.hg || "",
-          maxSinken: p.ms || f.customFields?.maxSinken || "",
-          maxSteigen: p.mst || f.customFields?.maxSteigen || "",
-          typ: p.ty || f.customFields?.typ || "",
-          msa: p.msa||"", ml: p.ml||"", dk: p.dk||"",
-        }
-      };
-    });
-    for (const [nr, p] of Object.entries(DATA)) {
-      if (!existingNames.has(nr)) {
-        const entry = createFlightFromPDF(nr, p);
-        newEntries.push(entry);
-      }
-    }
-    const toSave = [...newEntries, ...updatedFlights.filter(f => {
-      const num = (f.name||"").match(/\d+/)?.[0];
-      return num && DATA[num];
-    })];
-    setImportProgress({done:0, total:toSave.length});
-    // Save all flights in parallel batches instead of one-at-a-time — with 1000+
-    // flights, sequential awaits made the import take long enough that leaving
-    // the page too early would lose whatever hadn't been written yet.
-    const BATCH = 50;
-    for (let i = 0; i < toSave.length; i += BATCH) {
-      const batch = toSave.slice(i, i + BATCH);
-      await Promise.all(batch.map(f => saveFlight(f)));
-      setImportProgress({done: Math.min(i + BATCH, toSave.length), total: toSave.length});
-    }
-    setImportProgress(null);
-    const allFlights = [...updatedFlights, ...newEntries]
-      .sort((a,b)=>(parseInt((b.name||"").match(/\d+/)?.[0]||"0",10))-(parseInt((a.name||"").match(/\d+/)?.[0]||"0",10)));
-    setFlights(allFlights);
-    if (selected) { const u=allFlights.find(f=>f.id===selected.id); if(u){setSelected(u);} }
-    setPdfResult({ matched: updated+newEntries.length, created: newEntries.length, total: Object.keys(DATA).length });
-  }, [flights, selected, saveFlight]);
-
-  // Was previously its own separate implementation (inline LV03 conversion,
-  // its own column-index mapping, etc.) that had quietly drifted from the
-  // Zellen (row-paste) import's parseSingleRow — e.g. the "sl" field read a
-  // different column in each. Both now go through the exact same per-row
-  // parser, so a CSV file and pasting the same rows by hand always produce
-  // identical results, and any future fix only has to happen once.
-  // Recognised header-name variants per field — matched case-insensitively
-  // after trimming, so a CSV exported from a different app/spreadsheet with
-  // its own column order and slightly different labels can still be read,
-  // rather than requiring the exact 53-column layout this app's own
-  // spreadsheet template uses.
-  const FIELD_ALIASES = {
-    nr: ["nr", "nr.", "nummer", "flug", "flug nr", "flugnummer", "#", "flight", "flight nr"],
-    datum: ["datum", "date"],
-    startzeit: ["startzeit", "start", "abflug", "start time", "zeit start", "starttime"],
-    startplatz: ["startplatz", "startort", "start ort", "ort start", "site", "launch", "takeoff"],
-    startlat: ["start lat", "startlat", "start latitude", "s-lat", "slat"],
-    startlon: ["start lon", "startlon", "start longitude", "s-lon", "slon"],
-    landezeit: ["landezeit", "landung zeit", "ankunft", "land time", "zeit landung", "landtime", "endtime", "end time"],
-    landeplatz: ["landeplatz", "landung", "landort", "land ort", "ort landung", "landing"],
-    landlat: ["land lat", "landlat", "l-lat", "llat"],
-    landlon: ["land lon", "landlon", "l-lon", "llon"],
-    dauer: ["dauer", "duration", "flugzeit", "flight time"],
-    distanz: ["distanz", "distance", "km", "strecke"],
-    kmh: ["km/h", "kmh", "geschwindigkeit", "speed", "ø speed", "avg speed"],
-    hdiff: ["h.diff", "hdiff", "höhendifferenz", "h diff", "altitude diff"],
-    maxsteigen: ["max.steigen", "maxsteigen", "steigen", "climb", "max climb"],
-    maxsinken: ["max.sinken", "maxsinken", "sinken", "sink", "max sink"],
-    hmax: ["h.max", "hmax", "max höhe", "maxhöhe", "höhe max", "max altitude", "max alt"],
-    hgew: ["h.gew", "hgew", "höhengewinn", "gewinn", "altitude gain"],
-    geraet: ["gerät", "geraet", "schirm", "glider", "wing"],
-    bemerkung: ["bemerkung", "notiz", "notizen", "comment", "comments", "remarks", "notes"],
-    typ: ["typ", "type", "schirmtyp", "kategorie", "category"],
-  };
-  // Given a header row's cells, returns { fieldKey: columnIndex } for every
-  // recognised column, or null if too few fields were recognised to be
-  // confident this is actually a header row (vs. a data row that happens
-  // to start with text).
-  const detectHeaderMapping = (headerCols) => {
-    const mapping = {};
-    headerCols.forEach((cell, idx) => {
-      const norm = String(cell||"").trim().toLowerCase();
-      if (!norm) return;
-      for (const [field, aliases] of Object.entries(FIELD_ALIASES)) {
-        if (mapping[field] !== undefined) continue; // first match wins
-        if (aliases.includes(norm)) { mapping[field] = idx; break; }
-      }
-    });
-    // Require at least a date and one location field to trust this as a
-    // real header — otherwise a data row with an unlucky text-only first
-    // cell could be misread as a header and silently drop a flight.
-    if (mapping.datum === undefined) return null;
-    if (mapping.startplatz === undefined && mapping.landeplatz === undefined) return null;
-    return mapping;
-  };
-  // Extracts one row's data using a previously detected header mapping,
-  // in the same { d, sz, lz, st, la, ... } shape parseSingleRow produces,
-  // so both feed into the exact same downstream flight-creation code.
-  const parseRowWithMapping = (cols, mapping) => {
-    const get = key => mapping[key] !== undefined ? (cols[mapping[key]]||"").trim() : "";
-    const s = coordsToWgs84(get("startlat"), get("startlon"));
-    const l = coordsToWgs84(get("landlat"), get("landlon"));
-    return {
-      d: get("datum"), sz: get("startzeit"), lz: get("landezeit"),
-      st: get("startplatz"), la: get("landeplatz"),
-      sLat: s.lat, sLon: s.lon, lLat: l.lat, lLon: l.lon,
-      dur: get("dauer"), dk: get("distanz"), kmh: get("kmh"), hd: get("hdiff"),
-      msa: get("maxsteigen"), ml: get("maxsinken"), hm: get("hmax"), hg: get("hgew"),
-      ge: get("geraet"), be: get("bemerkung"), ty: get("typ"),
-      _nr: get("nr"),
-    };
-  };
-
-  const parseCSV = (text) => {
-    const lines = text.split(/\r?\n/).filter(l => l.trim());
-    const results = {};
-    // Defensive cleanup for a cell that accidentally contains trailing
-    // coordinates along with the place name (e.g. "Fiesch, 46.234, 8.123") —
-    // kept from the old implementation since real-world pasted data has hit
-    // this before; parseSingleRow itself doesn't need this for its normal
-    // (clean) inputs, so it's applied only here as a light post-process.
-    const cleanLoc = s => { const m=String(s||"").match(/,\s*[-]?\d/); return m?s.slice(0,m.index).trim().replace(/,+$/,"").trim():String(s||"").trim(); };
-
-    // Try header-based mapping first, using whichever separator the first
-    // line actually uses (comma is the common case for a real CSV file).
-    let headerMapping = null, dataLines = lines, autoNr = 1;
-    if (lines.length > 1) {
-      const firstCols = splitCsvLine(lines[0]);
-      headerMapping = detectHeaderMapping(firstCols);
-      if (headerMapping) dataLines = lines.slice(1);
-    }
-
-    if (headerMapping) {
-      for (const line of dataLines) {
-        const cols = splitCsvLine(line).map(c => (c||"").trim().replace(/^"+|"+$/g, ""));
-        const p = parseRowWithMapping(cols, headerMapping);
-        if (!p.d) continue;
-        const nr = p._nr && /^\d+$/.test(p._nr) ? p._nr : String(autoNr);
-        autoNr = Math.max(autoNr, +nr + 1);
-        results[nr] = { ...p, st: cleanLoc(p.st), la: cleanLoc(p.la) };
-      }
-      if (Object.keys(results).length) return results;
-      // Fell through to no usable rows despite a detected header — try the
-      // fixed-position fallback below rather than returning nothing.
-    }
-
-    // Fixed-position fallback (this app's own 25-/53-column spreadsheet
-    // layout), used whenever no confident header mapping was found above.
-    for (const line of lines) {
-      let p;
-      try { p = parseSingleRow(line); } catch { continue; }
-      const nr = (p._nr||"").trim();
-      if (!nr || !/^\d+$/.test(nr)) continue;
-      if (!p.d) continue;
-      results[nr] = { ...p, st: cleanLoc(p.st), la: cleanLoc(p.la) };
-    }
-    return results;
-  };
-
-  const importPDFFile = useCallback(async (file) => {
-    if (!file) return;
-    setPdfDragOver(false);
-    if (file.name.toLowerCase().endsWith(".csv")) {
-      setPdfResult({ loading: true });
-      try {
-        const text = await file.text();
-        const parsed = parseCSV(text);
-        if (Object.keys(parsed).length===0) { setPdfResult({error:"Keine Flüge in CSV erkannt"}); return; }
-        await applyParsedData(parsed);
-      } catch(e) { setPdfResult({error:"CSV Fehler: "+e.message}); }
-    } else {
-      setPdfResult({error:"PDF-Import wird aktuell nicht unterstützt. Bitte CSV-Datei verwenden."});
-    }
-  }, [applyParsedData]);
-
-  // One-time bulk import from Flugbuch.xlsx, sheet "Flüge". Idempotent: rows
-  // already imported before (identified by customFields.excelImportKey) are
-  // skipped, so re-running against an updated/corrected file is safe and
-  // only adds what's new. Imported flights intentionally have no track —
-  // that's what makes them show up as candidates for the existing
-  // date-based IGC matching (processIGCFiles) afterwards.
-  const importExcelFile = useCallback(async (file) => {
-    setImportingExcel(true); setExcelResult(null);
-    try {
-      const buf = await file.arrayBuffer();
-      const rows = parseExcelFluegeWorkbook(buf);
-      const alreadyImported = new Set(
-        flights.map(f => f.customFields?.excelImportKey).filter(Boolean)
-      );
-      let maxNr = flights.reduce((m, f) => {
-        const n = /^\d+$/.test(f.name||"") ? parseInt(f.name, 10) : 0;
-        return n > m ? n : m;
-      }, 0);
-      const newFlights = [];
-      let skipped = 0;
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const rowNumber = i + 2; // +1 header row, +1 to make it 1-based
-        if (!row || row.every(c => c === null || c === "")) continue; // blank row
-        // Only the Datum cell (col B) reliably indicates a real flight row —
-        // trailing template rows in the sheet carry formula leftovers in
-        // Monat/Jahr/hh:mm (e.g. Jahr=1900, hh:mm=0) even though Datum is
-        // empty, so Datum alone is what's checked here.
-        if (!(row[1] instanceof Date) || isNaN(row[1])) continue;
-        const key = `xls-${rowNumber}`;
-        if (alreadyImported.has(key)) { skipped++; continue; }
-        maxNr += 1;
-        const nf = createFlightFromExcelRow(String(maxNr), row, rowNumber);
-        await saveFlight(nf);
-        newFlights.push(nf);
-      }
-      if (newFlights.length) {
-        setFlights(prev => {
-          const merged = [...newFlights, ...prev];
-          return merged.sort((a, b) =>
-            (parseInt((b.name || "").match(/\d+/)?.[0] || "0", 10)) -
-            (parseInt((a.name || "").match(/\d+/)?.[0] || "0", 10)));
-        });
-      }
-      setExcelResult({ created: newFlights.length, skipped, total: rows.length });
-    } catch (e) {
-      setExcelResult({ error: e.message || String(e) });
-    } finally {
-      setImportingExcel(false);
-    }
-  }, [flights, saveFlight]);
 
   const doImport = useCallback(async (igcFiles) => {
     if (!igcFiles.length) return;
@@ -4946,16 +4565,13 @@ function FlugbuchApp() {
   return (
     <div style={{maxWidth:isWide?1400:480,margin:"0 auto",minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"-apple-system,BlinkMacSystemFont,sans-serif"}}>
       <input ref={fileRef} type="file" accept=".igc" multiple style={{display:"none"}} onChange={e=>importIGCFiles(Array.from(e.target.files))} />
-      <input ref={pdfFileRef} type="file" accept=".pdf,.csv" style={{display:"none"}} onChange={e=>e.target.files[0]&&importPDFFile(e.target.files[0])} />
-      <input ref={excelFileRef} type="file" accept=".xlsx,.xls" style={{display:"none"}}
-        onChange={e=>{ if (e.target.files[0]) importExcelFile(e.target.files[0]); e.target.value=""; }} />
 
       {/* Header */}
       <div style={{position:"sticky",top:0,zIndex:10,background:"#040e20"}}>
       <div style={{background:"rgba(255,255,255,0.03)",borderBottom:"1px solid rgba(255,255,255,0.06)",padding:"calc(28px + env(safe-area-inset-top, 0px)) 16px 12px",display:"flex",alignItems:"center",justifyContent:"space-between",backdropFilter:"blur(10px)"}}>
         <button onClick={()=>{window.location.href="index.html";}} title="Zur Startseite"
-          style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,color:"rgba(232,244,253,0.8)",cursor:"pointer",flexShrink:0}}>
-          🏠
+          style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,color:"rgba(232,244,253,0.8)",cursor:"pointer",flexShrink:0,lineHeight:1}}>
+          ‹
         </button>
         <span style={{fontWeight:900,fontSize:18,letterSpacing:-0.5,flex:1,textAlign:"center",marginLeft:-8}}>
           ✈️ Flugbuch
@@ -5054,16 +4670,9 @@ function FlugbuchApp() {
         </div>
       )}
 
-      {/* Import menu: CSV/PDF, IGC, Excel */}
+      {/* Import menu: IGC */}
       {showImportMenu && (
         <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,padding:10,display:"flex",gap:8}}>
-          <div onDragOver={e=>{e.preventDefault();setPdfDragOver(true)}} onDragLeave={()=>setPdfDragOver(false)}
-            onDrop={e=>{e.preventDefault();e.dataTransfer.files[0]&&importPDFFile(e.dataTransfer.files[0]);}}
-            onClick={()=>pdfFileRef.current?.click()}
-            style={{flex:1,border:`2px dashed ${pdfDragOver?"#7dd3fc":"rgba(56,189,248,0.25)"}`,borderRadius:10,padding:"10px 8px",textAlign:"center",background:pdfDragOver?"rgba(56,189,248,0.08)":"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3}}>
-            <div style={{fontSize:15}}>📋</div>
-            <div style={{color:pdfDragOver?"#7dd3fc":"rgba(125,211,252,0.5)",fontSize:10}}>CSV</div>
-          </div>
           <div onDragOver={e=>{e.preventDefault();setDragOver(true)}} onDragLeave={()=>setDragOver(false)}
             onDrop={e=>{e.preventDefault();setDragOver(false);importIGCFiles(Array.from(e.dataTransfer.files));}}
             onClick={()=>{
@@ -5085,16 +4694,6 @@ function FlugbuchApp() {
             <div style={{fontSize:15}}>📂</div>
             <div style={{color:dragOver?"#fcd34d":"rgba(252,211,77,0.5)",fontSize:10}}>
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing ? "⏳ Importiere…" : igcDirScanning ? "⏳ Suche…" : "IGC"}
-            </div>
-          </div>
-          <div onDragOver={e=>{e.preventDefault();setExcelDragOver(true)}} onDragLeave={()=>setExcelDragOver(false)}
-            onDrop={e=>{e.preventDefault();setExcelDragOver(false);e.dataTransfer.files[0]&&importExcelFile(e.dataTransfer.files[0]);}}
-            onClick={()=>excelFileRef.current?.click()}
-            title="Einmaliger Bestandsimport aus Flugbuch.xlsx (Reiter 'Flüge'). Erneutes Importieren derselben Datei überspringt bereits importierte Zeilen automatisch."
-            style={{flex:1,border:`2px dashed ${excelDragOver?"#facc15":"rgba(250,204,21,0.25)"}`,borderRadius:10,padding:"10px 8px",textAlign:"center",background:excelDragOver?"rgba(250,204,21,0.08)":"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3}}>
-            <div style={{fontSize:15}}>📊</div>
-            <div style={{color:excelDragOver?"#facc15":"rgba(250,204,21,0.5)",fontSize:10}}>
-              {importingExcel?"⏳ Importiere…":"Excel"}
             </div>
           </div>
         </div>
@@ -5410,28 +5009,6 @@ function FlugbuchApp() {
             ✅ {(igcResult.created>0?igcResult.created+" neu  ":"")}{(igcResult.updated>0?igcResult.updated+" aktualisiert":"")}{(igcResult.deferred>0?"  "+igcResult.deferred+" zur Zuordnung":"")} ({igcResult.total} erkannt)
           </span>
           <button onClick={()=>setIgcResult(null)} style={{background:"none",border:"none",color:"rgba(74,222,128,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
-        </div>
-      )}
-
-      {/* PDF result toast */}
-      {pdfResult&&(
-        <div style={{margin:"10px 16px 0",background:pdfResult.error?"rgba(239,68,68,0.08)":"rgba(139,92,246,0.12)",border:`1px solid ${pdfResult.error?"rgba(239,68,68,0.3)":"rgba(139,92,246,0.25)"}`,borderRadius:12,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:13,color:pdfResult.error?"#f87171":"#c4b5fd"}}>
-            {pdfResult.loading ? "⏳ Wird geladen…" : pdfResult.error ? "❌ "+pdfResult.error :
-              "✅ "+( (pdfResult.created>0?pdfResult.created+" neu  ":"") + (pdfResult.matched-(pdfResult.created||0)>0?(pdfResult.matched-(pdfResult.created||0))+" aktualisiert":"") + " ("+pdfResult.total+" erkannt)" )}
-          </span>
-          {!pdfResult.loading&&<button onClick={()=>setPdfResult(null)} style={{background:"none",border:"none",color:"rgba(196,181,253,0.5)",cursor:"pointer",fontSize:16}}>✕</button>}
-        </div>
-      )}
-
-      {/* Excel-Bestandsimport result toast */}
-      {excelResult && (
-        <div style={{margin:"10px 16px 0",background:excelResult.error?"rgba(239,68,68,0.08)":"rgba(250,204,21,0.1)",border:`1px solid ${excelResult.error?"rgba(239,68,68,0.3)":"rgba(250,204,21,0.3)"}`,borderRadius:12,padding:"10px 14px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:13,color:excelResult.error?"#f87171":"#facc15"}}>
-            {excelResult.error ? "❌ "+excelResult.error :
-              "✅ "+excelResult.created+" neu importiert"+(excelResult.skipped>0?"  ·  "+excelResult.skipped+" bereits vorhanden (übersprungen)":"")+"  ("+excelResult.total+" Zeilen in der Datei)"}
-          </span>
-          <button onClick={()=>setExcelResult(null)} style={{background:"none",border:"none",color:"rgba(250,204,21,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
 
