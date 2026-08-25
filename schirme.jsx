@@ -15,6 +15,17 @@ const SCHIRME_KEY = "schirme:list";
 const KNOWN_PREFIXES = ["UP", "Supair", "Ozone", "Nova", "MacPara"];
 const TYP_OPTIONS = ["GS", "BP", "SF", "NS"];
 const TYP_LABELS = { GS: "GS (Gleitschirm)", BP: "BP (Biplace)", SF: "SF (Schulung)", NS: "NS (Notschirm)" };
+// Bekannte Falschschreibungen/Dubletten im Schirm-Feld — vom Nutzer
+// bestätigte Korrekturen (04.2026). Nur als Vorschlag: erscheint auf der
+// Seite nur, solange noch ein Schirm-Eintrag mit dem "von"-Namen existiert.
+const KNOWN_CORRECTIONS = [
+  { from: "Advance Sigma 12", to: "Sigma 12 DLS" },
+  { from: "Advance Sigma10", to: "Sigma 10" },
+  { from: "Advance Sigma11", to: "Sigma 11" },
+  { from: "Gr M", to: "Vision" },
+  { from: "PI23", to: "Pi 23" },
+  { from: "Pi23", to: "Pi 23" },
+];
 
 function splitHerstellerFromName(raw) {
   const name = (raw || "").trim();
@@ -85,6 +96,35 @@ function SchirmeApp() {
   // im Schirm-Feld, entfernt den Präfix aus dem Flug-Feld "Schirm" und legt
   // (bzw. aktualisiert) den passenden Schirme-Eintrag mit dem erkannten
   // Hersteller an. Manuell ausgelöst (kein automatischer Lauf beim Start).
+  // Benennt einen Schirm-Namen bei ALLEN betroffenen Flügen im Flugbuch um
+  // — verwendet sowohl beim manuellen Umbenennen im Editor als auch von der
+  // Schnellkorrektur-Liste unten. Gibt die Anzahl aktualisierter Flüge
+  // zurück.
+  const renameGliderEverywhere = async (oldName, newName) => {
+    const fl = flights || await loadAllFlights();
+    const affected = fl.filter(f => (f.glider || "").trim() === oldName);
+    if (!affected.length) return 0;
+    const updated = affected.map(f => ({ ...f, glider: newName }));
+    await Promise.all(updated.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
+    return updated.length;
+  };
+
+  const applyCorrection = async (from, to) => {
+    setBusy(true); setMsg(null);
+    try {
+      const count = await renameGliderEverywhere(from, to);
+      const next = schirme.map(s => s.name === from ? { ...s, name: to } : s);
+      await saveSchirme(next);
+      const updatedFl = await loadAllFlights();
+      setFlights(updatedFl);
+      setMsg({ type: "ok", text: `✓ „${from}" → „${to}": ${count} Flüge aktualisiert.` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler bei der Korrektur: " + (e.message || String(e)) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const runCleanup = async () => {
     setBusy(true); setMsg(null);
     try {
@@ -208,6 +248,26 @@ function SchirmeApp() {
         </div>
       )}
 
+      {(() => {
+        const existingNames = new Set(schirme.map(s => s.name));
+        const pending = KNOWN_CORRECTIONS.filter(c => existingNames.has(c.from));
+        if (!pending.length) return null;
+        return (
+          <div style={{ margin: "0 16px 14px", background: "rgba(125,211,252,0.06)", border: "1px solid rgba(125,211,252,0.2)", borderRadius: 12, padding: 14 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#7dd3fc", marginBottom: 10 }}>Vorgeschlagene Korrekturen</div>
+            {pending.map(c => (
+              <div key={c.from} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6 }}>
+                <span style={{ fontSize: 12, color: "rgba(232,244,253,0.8)" }}>„{c.from}" → „{c.to}"</span>
+                <button onClick={() => applyCorrection(c.from, c.to)} disabled={busy}
+                  style={{ flexShrink: 0, background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "5px 12px", color: "#4ade80", fontSize: 11, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+                  Übernehmen
+                </button>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
       <div style={{ padding: "0 16px" }}>
         {sortedSchirme.length === 0 && (
           <div style={{ padding: "30px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>
@@ -241,9 +301,16 @@ function SchirmeApp() {
           suggestTyp={suggestTyp}
           onCancel={() => setEditing(null)}
           onSave={async (data) => {
-            const next = schirme.map(s => s.id === data.id ? data : s);
+            const trimmedName = (data.name || "").trim();
+            const oldName = editing.name;
+            if (trimmedName && trimmedName !== oldName) {
+              await renameGliderEverywhere(oldName, trimmedName);
+            }
+            const next = schirme.map(s => s.id === data.id ? { ...data, name: trimmedName || s.name } : s);
             await saveSchirme(next);
             setEditing(null);
+            const updatedFl = await loadAllFlights();
+            setFlights(updatedFl);
           }}
           onDelete={async (id) => {
             const next = schirme.filter(s => s.id !== id);
@@ -269,8 +336,12 @@ function SchirmEditor({ entry, material, suggestTyp, onSave, onCancel, onDelete 
     <div onClick={onCancel} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200, padding: 20 }}>
       <div onClick={e => e.stopPropagation()}
         style={{ background: "#14253a", borderRadius: 16, padding: "20px 20px", maxWidth: 420, width: "100%", border: "1px solid rgba(255,255,255,0.1)", maxHeight: "85vh", overflowY: "auto" }}>
-        <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>{data.name}</div>
-        <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 16 }}>Name entspricht dem Schirm-Feld in den Flügen — hier nicht änderbar.</div>
+        <div style={{ marginBottom: 4 }}>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Name</div>
+          <input value={data.name || ""} onChange={e => set("name", e.target.value)}
+            style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 14, fontWeight: 700 }} />
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(250,204,21,0.7)", marginBottom: 16 }}>⚠️ Ändern des Namens benennt den Schirm auch bei allen betroffenen Flügen im Flugbuch um.</div>
 
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Hersteller</div>
