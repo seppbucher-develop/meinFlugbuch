@@ -3991,7 +3991,11 @@ function FlugbuchApp() {
   const scanIgcDirRecursive = async (dirHandle) => {
     const files = [];
     const walk = async (handle) => {
-      for await (const [name, entry] of handle.values()) {
+      // dirHandle.values() yields handles only (no name) — destructuring
+      // each one as [name, entry] then fails with "is not iterable",
+      // since a single handle isn't itself iterable. .entries() is the
+      // method that actually yields [name, handle] pairs.
+      for await (const [name, entry] of handle.entries()) {
         if (entry.kind === "directory") { await walk(entry); continue; }
         if (entry.kind === "file" && /\.igc$/i.test(name)) {
           try { files.push(await entry.getFile()); } catch (e) { console.error("IGC-Datei lesen fehlgeschlagen:", name, e); }
