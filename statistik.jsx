@@ -11,6 +11,12 @@ function formatMinutes(min) {
   return `${h}h ${String(rem).padStart(2, "0")}m`;
 }
 
+// Leerer Filtersatz — Grundlage für eine Statistik-Ansicht, für die noch
+// keine eigenen Filter gespeichert wurden.
+function emptyFilterSet() {
+  return { typ: [], reise: [], schirm: [], landeplatz: [], land: [], training: "alle" };
+}
+
 // Distinct, sortierte Werteliste für ein Filterfeld, quer über alle Flüge
 // (nicht nur die aktuell gefilterten — Slicer-Verhalten wie in Excel:
 // zeigt immer alle möglichen Werte, unabhängig von anderen aktiven
@@ -385,23 +391,8 @@ function StatistikApp() {
     })();
   }, []);
 
-  // Welche der drei Statistik-Ansichten (siehe VIEWS) gerade aktiv ist —
-  // eigene, kleine Persistierung (nicht Teil von statistikFilters/
-  // backupDirty), da es sich nur um Navigations-Zustand handelt, nicht um
-  // Nutzdaten.
+  // Welche der drei Statistik-Ansichten (siehe VIEWS) gerade aktiv ist.
   const [view, setView] = React.useState("uebersicht");
-  React.useEffect(() => {
-    (async () => {
-      try {
-        const r = await window.storage.get("statistikView");
-        if (r && r.value && VIEWS.some(v => v.id === r.value)) setView(r.value);
-      } catch (e) {}
-    })();
-  }, []);
-  const changeView = (id) => {
-    setView(id);
-    try { window.storage.set("statistikView", id); } catch (e) {}
-  };
 
   const [typF, setTypF] = React.useState(new Set());
   const [reiseF, setReiseF] = React.useState(new Set());
@@ -409,38 +400,100 @@ function StatistikApp() {
   const [landeplatzF, setLandeplatzF] = React.useState(new Set());
   const [landF, setLandF] = React.useState(new Set());
   const [trainingF, setTrainingF] = React.useState("alle");
-  // Restauriert die zuletzt verwendeten Filter beim Öffnen der Seite —
-  // statistik.html ist eine eigene Seite (volle Navigation, kein
-  // client-seitiges Routing), daher setzt React-State bei jedem Aufruf
-  // sonst wieder auf die Standardwerte zurück. settingsLoaded verhindert,
-  // dass der Persistierungs-Effekt unten die gerade erst geladenen
-  // Filter sofort wieder mit den (noch leeren) Default-Werten überschreibt.
+
+  // Jede der drei Ansichten hat ihre eigenen Filter (z.B. "Übersicht" nach
+  // Schirm gefiltert, "Reiseübersicht" ungefiltert) — filtersMapRef hält
+  // alle drei Filtersätze { uebersicht, monat, reise } im Speicher, die
+  // React-State-Variablen oben (typF, reiseF, …) spiegeln jeweils nur den
+  // Filtersatz der gerade aktiven Ansicht. Beim Wechsel der Ansicht wird der
+  // bisherige Stand hier gesichert und der Satz der Zielansicht geladen.
+  const filtersMapRef = React.useRef({ uebersicht: emptyFilterSet(), monat: emptyFilterSet(), reise: emptyFilterSet() });
+  const applyFilterSet = (f) => {
+    setTypF(new Set(f.typ || []));
+    setReiseF(new Set(f.reise || []));
+    setSchirmF(new Set(f.schirm || []));
+    setLandeplatzF(new Set(f.landeplatz || []));
+    setLandF(new Set(f.land || []));
+    setTrainingF(f.training || "alle");
+  };
+  const snapshotFilterState = () => ({
+    typ: [...typF], reise: [...reiseF], schirm: [...schirmF],
+    landeplatz: [...landeplatzF], land: [...landF], training: trainingF,
+  });
+
+  // Restauriert die zuletzt verwendete Ansicht + deren Filter beim Öffnen
+  // der Seite — statistik.html ist eine eigene Seite (volle Navigation,
+  // kein client-seitiges Routing), daher setzt React-State bei jedem
+  // Aufruf sonst wieder auf die Standardwerte zurück. settingsLoaded
+  // verhindert, dass der Persistierungs-Effekt unten die gerade erst
+  // geladenen Filter sofort wieder mit den (noch leeren) Default-Werten
+  // überschreibt.
   const [settingsLoaded, setSettingsLoaded] = React.useState(false);
   const filtersReadyRef = React.useRef(false);
   React.useEffect(() => {
     (async () => {
+      let loadedView = "uebersicht";
       try {
-        const r = await window.storage.get("statistikFilters");
-        if (r && r.value) {
-          const s = JSON.parse(r.value);
-          if (Array.isArray(s.typ)) setTypF(new Set(s.typ));
-          if (Array.isArray(s.reise)) setReiseF(new Set(s.reise));
-          if (Array.isArray(s.schirm)) setSchirmF(new Set(s.schirm));
-          if (Array.isArray(s.landeplatz)) setLandeplatzF(new Set(s.landeplatz));
-          if (Array.isArray(s.land)) setLandF(new Set(s.land));
-          if (s.training) setTrainingF(s.training);
+        const rv = await window.storage.get("statistikView");
+        if (rv && rv.value && VIEWS.some(v => v.id === rv.value)) loadedView = rv.value;
+      } catch (e) {}
+      try {
+        const rf = await window.storage.get("statistikFilters");
+        if (rf && rf.value) {
+          const parsed = JSON.parse(rf.value);
+          if (parsed && (Array.isArray(parsed.typ) || Array.isArray(parsed.schirm) || parsed.training)) {
+            // Altformat: ein einziger, von allen Ansichten geteilter
+            // Filtersatz (vor der Umstellung auf pro-Ansicht-Filter) — als
+            // Startwert für alle drei Ansichten übernehmen, statt ihn zu
+            // verwerfen.
+            const migrated = { ...emptyFilterSet(), ...parsed };
+            filtersMapRef.current = { uebersicht: migrated, monat: { ...migrated }, reise: { ...migrated } };
+          } else if (parsed && typeof parsed === "object") {
+            filtersMapRef.current = {
+              uebersicht: { ...emptyFilterSet(), ...(parsed.uebersicht || {}) },
+              monat: { ...emptyFilterSet(), ...(parsed.monat || {}) },
+              reise: { ...emptyFilterSet(), ...(parsed.reise || {}) },
+            };
+          }
         }
       } catch (e) { /* noch nichts gespeichert, oder Storage nicht verfügbar */ }
+      setView(loadedView);
+      applyFilterSet(filtersMapRef.current[loadedView]);
       setSettingsLoaded(true);
     })();
   }, []);
+
+  // Ein Ansichtswechsel tauscht die Filter-States auf die (potenziell ganz
+  // anderen) gespeicherten Werte der Zielansicht aus — das darf den
+  // Persistierungs-Effekt unten nicht als "Nutzer hat Filter geändert" mit
+  // backupDirty=1 quittieren, es ist reine Navigation. isSwitchingViewRef
+  // markiert genau diesen einen, durch changeView ausgelösten Render.
+  const isSwitchingViewRef = React.useRef(false);
+  const changeView = (id) => {
+    if (id === view) return;
+    // Filter der bisherigen Ansicht sichern, dann die der Zielansicht laden.
+    const nextMap = { ...filtersMapRef.current, [view]: snapshotFilterState() };
+    filtersMapRef.current = nextMap;
+    isSwitchingViewRef.current = true;
+    applyFilterSet(nextMap[id] || emptyFilterSet());
+    setView(id);
+    try {
+      window.storage.set("statistikView", id);
+      window.storage.set("statistikFilters", JSON.stringify(nextMap));
+    } catch (e) {}
+  };
+
   React.useEffect(() => {
     if (!settingsLoaded) return; // nicht speichern, bevor das Laden fertig ist
+    if (isSwitchingViewRef.current) {
+      // Nur der durch changeView ausgelöste Render — Speichern ist dort
+      // bereits passiert, hier nur das Flag zurücksetzen.
+      isSwitchingViewRef.current = false;
+      return;
+    }
     try {
-      window.storage.set("statistikFilters", JSON.stringify({
-        typ: [...typF], reise: [...reiseF], schirm: [...schirmF],
-        landeplatz: [...landeplatzF], land: [...landF], training: trainingF,
-      }));
+      filtersMapRef.current = { ...filtersMapRef.current, [view]: snapshotFilterState() };
+      window.storage.set("statistikFilters", JSON.stringify(filtersMapRef.current));
       // Nur bei echten, vom Nutzer ausgelösten Filteränderungen als
       // "ungesichert" markieren — nicht schon beim ersten Schreiben direkt
       // nach dem Laden der zuvor gespeicherten Werte (das wäre keine
@@ -451,7 +504,7 @@ function StatistikApp() {
         filtersReadyRef.current = true;
       }
     } catch (e) {}
-  }, [settingsLoaded, typF, reiseF, schirmF, landeplatzF, landF, trainingF]);
+  }, [settingsLoaded, view, typF, reiseF, schirmF, landeplatzF, landF, trainingF]);
 
   const all = flights || [];
 
