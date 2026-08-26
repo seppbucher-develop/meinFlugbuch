@@ -78,12 +78,11 @@ function TrainingFilter({ value, onChange }) {
 }
 
 // ── Statistik-Ansichten ──────────────────────────────────────────────────
-// Die Statistik-Seite ist in mehrere Auswertungen aufgeteilt, zwischen denen
-// über VIEWS/ViewSwitcher gewechselt wird. Aktuell ist nur "uebersicht"
-// (die bisherige Jahres-Pivot-Tabelle samt Maximalwerten) tatsächlich
-// implementiert — "monat" und "reise" sind bewusst als Platzhalter angelegt,
-// damit sie später ergänzt werden können, ohne die Navigation/Struktur der
-// Seite nochmal anfassen zu müssen.
+// Die Statistik-Seite ist in drei Auswertungen aufgeteilt, zwischen denen
+// über VIEWS/ViewSwitcher gewechselt wird — alle drei teilen sich dieselbe
+// FilterBar/gefilterte Flugliste (siehe StatistikApp), sind inhaltlich aber
+// eigenständige Pivot-Tabellen: Übersicht (Jahr), Monatsübersicht
+// (Jahr × Monat) und Reiseübersicht (Reise × Jahr).
 const VIEWS = [
   { id: "uebersicht", label: "Übersicht" },
   { id: "monat", label: "Monatsübersicht" },
@@ -104,8 +103,8 @@ function ViewSwitcher({ view, onChange }) {
 }
 
 // Filterleiste (Typ/Reise/Schirm/Landeplatz/Land/Training + Zurücksetzen) —
-// von Übersicht und Monatsübersicht gemeinsam genutzt, damit beide
-// Auswertungen dieselbe Flugliste eingrenzen.
+// von allen drei Auswertungen (Übersicht, Monats- und Reiseübersicht)
+// gemeinsam genutzt, damit sie dieselbe Flugliste eingrenzen.
 function FilterBar({
   typOptions, typF, setTypF, reiseOptions, reiseF, setReiseF,
   schirmOptions, schirmF, setSchirmF, landeplatzOptions, landeplatzF, setLandeplatzF,
@@ -200,15 +199,69 @@ function MonthPivotTable({ flights }) {
   );
 }
 
-// "Kommt noch"-Platzhalter für die noch nicht umgesetzte Reiseübersicht.
-function ComingSoonCard({ icon, title, desc }) {
+// Reise/Jahr-Pivot: Zeilen = Reise (customFields.reise), Spalten = Jahre
+// (dynamisch, wie in der Jahres-Übersicht) + Total, Zellwert = Flugdauer
+// (Summe durationSec) je Reise/Jahr-Kombination. Flüge ohne eingetragene
+// Reise landen — analog zum Umgang mit fehlendem Jahr in der Jahres-Pivot —
+// gesammelt in einer "—"-Zeile, statt stillschweigend zu verschwinden.
+function computeReisePivot(flights) {
+  const years = new Set();
+  const byReise = new Map(); // Reise -> Map(Jahr -> Minuten)
+  for (const f of flights) {
+    const reise = (f.customFields?.reise || "").trim() || "—";
+    const yr = (f.year || (f.date || "").split(".")[2] || "—").toString();
+    years.add(yr);
+    if (!byReise.has(reise)) byReise.set(reise, new Map());
+    const m = byReise.get(reise);
+    m.set(yr, (m.get(yr) || 0) + (f.durationSec || 0) / 60);
+  }
+  const yearList = [...years].sort((a, b) => a.localeCompare(b, "de", { numeric: true }));
+  const rows = [...byReise.entries()]
+    .map(([reise, m]) => {
+      const minutesByYear = yearList.map(y => m.get(y) || 0);
+      return { reise, minutesByYear, total: minutesByYear.reduce((a, b) => a + b, 0) };
+    })
+    .sort((a, b) => a.reise.localeCompare(b.reise, "de", { numeric: true }));
+  const yearTotals = yearList.map((_, i) => rows.reduce((acc, r) => acc + r.minutesByYear[i], 0));
+  const grandTotal = yearTotals.reduce((a, b) => a + b, 0);
+  return { yearList, rows, yearTotals, grandTotal };
+}
+
+function ReisePivotTable({ flights }) {
+  const pivot = React.useMemo(() => computeReisePivot(flights), [flights]);
+  const cols = `1.4fr repeat(${pivot.yearList.length}, 1fr) 1.1fr`;
+  const minWidth = 200 + pivot.yearList.length * 90 + 100;
   return (
-    <div style={{ margin: "8px 16px 0", border: "1px dashed rgba(255,255,255,0.15)", borderRadius: 12, padding: "28px 16px", textAlign: "center", color: "rgba(232,244,253,0.5)" }}>
-      <div style={{ fontSize: 32, marginBottom: 10 }}>{icon}</div>
-      <div style={{ fontSize: 15, fontWeight: 700, color: "rgba(232,244,253,0.85)", marginBottom: 6 }}>{title}</div>
-      <div style={{ fontSize: 12, lineHeight: 1.5 }}>{desc}</div>
-      <div style={{ display: "inline-block", marginTop: 12, fontSize: 10, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "#7dd3fc", background: "rgba(125,211,252,0.12)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 20, padding: "4px 12px" }}>
-        Demnächst verfügbar
+    <div style={{ padding: "0 16px" }}>
+      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
+        <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
+          <div style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Reise</div>
+          {pivot.yearList.map(y => (
+            <div key={y} style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{y}</div>
+          ))}
+          <div style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
+        </div>
+        {pivot.rows.length === 0 && (
+          <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)", minWidth }}>Keine Flüge für diese Filterauswahl.</div>
+        )}
+        {pivot.rows.map(r => (
+          <div key={r.reise} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth }}>
+            <div style={{ padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#7dd3fc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reise}</div>
+            {r.minutesByYear.map((min, i) => (
+              <div key={i} style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? formatMinutes(min) : "·"}</div>
+            ))}
+            <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{formatMinutes(r.total)}</div>
+          </div>
+        ))}
+        {pivot.rows.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)", minWidth }}>
+            <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+            {pivot.yearTotals.map((min, i) => (
+              <div key={i} style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? formatMinutes(min) : "·"}</div>
+            ))}
+            <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.grandTotal)}</div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -468,7 +521,7 @@ function StatistikApp() {
         <ViewSwitcher view={view} onChange={changeView} />
       </div>
 
-      {(view === "uebersicht" || view === "monat") && (
+      {(view === "uebersicht" || view === "monat" || view === "reise") && (
         <FilterBar
           typOptions={typOptions} typF={typF} setTypF={setTypF}
           reiseOptions={reiseOptions} reiseF={reiseF} setReiseF={setReiseF}
@@ -521,10 +574,7 @@ function StatistikApp() {
 
       {view === "monat" && <MonthPivotTable flights={filtered} />}
 
-      {view === "reise" && (
-        <ComingSoonCard icon="🧭" title="Reiseübersicht"
-          desc="Auswertung gruppiert nach Reise statt nach Jahr — folgt in einer der nächsten Versionen." />
-      )}
+      {view === "reise" && <ReisePivotTable flights={filtered} />}
     </div>
   );
 }
