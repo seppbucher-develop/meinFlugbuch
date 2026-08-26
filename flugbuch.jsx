@@ -192,6 +192,31 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
 }
 
 // ── FlightMap ──────────────────────────────────────────────────────────────
+// ── Export-Dateinamen ──────────────────────────────────────────────────────
+// Für IGC-/GPX-Export wird bevorzugt der ursprüngliche Dateiname des
+// importierten IGC-Files verwendet (customFields.igcFilename, bereits ohne
+// Endung — siehe importIGCFiles), damit ein Re-Export denselben Namen trägt
+// wie die Originaldatei vom Fluginstrument. Nur ohne bekannten Original-
+// namen (z.B. ein Flug ohne IGC-Import) greift für den GPX-Export ein
+// Fallback aus Flugdatum + Start-/Landeplatz.
+function sanitizeFilenamePart(s) {
+  return (s || "").trim().replace(/[\\/:*?"<>|]+/g, "").trim();
+}
+function isoDateFromFlightDate(dateStr) {
+  const parts = (dateStr || "").split(".");
+  if (parts.length !== 3) return "";
+  const [d, m, y] = parts;
+  return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+}
+// z.B. "2024-07-16_Niederhorn-Talstation" — Datum ist das Flugdatum, nicht
+// das Datum des Exports.
+function gpxFallbackName(flight) {
+  const iso = isoDateFromFlightDate(flight?.date) || "unbekannt-datum";
+  const start = sanitizeFilenamePart(flight?.site) || "unbekannt";
+  const landung = sanitizeFilenamePart(flight?.customFields?.landung) || "unbekannt";
+  return `${iso}_${start}-${landung}`;
+}
+
 // Builds a minimal valid GPX 1.1 track file from a flight's IGC track
 // points, so it can be opened in an external map viewer (gpx.studio) that
 // renders real map tiles reliably instead of our own hand-drawn canvas tiles.
@@ -3168,7 +3193,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                 const blob = new Blob([igc], { type: "text/plain" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
-                a.href = url; a.download=(fl.name||"flug")+".igc";
+                a.href = url; a.download=(fl.customFields?.igcFilename||fl.name||"flug")+".igc";
                 document.body.appendChild(a); a.click(); document.body.removeChild(a);
                 setTimeout(() => URL.revokeObjectURL(url), 1000);
               }}
@@ -3182,7 +3207,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement("a");
                     a.href = url;
-                    a.download = `${fl?.name || "flug"}.gpx`;
+                    a.download = `${fl?.customFields?.igcFilename || gpxFallbackName(fl)}.gpx`;
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
