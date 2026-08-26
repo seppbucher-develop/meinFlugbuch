@@ -173,31 +173,31 @@ function MonthPivotTable({ flights }) {
     <div style={{ padding: "0 16px" }}>
       <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
         <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
-          <div style={{ padding: "6px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Jahr</div>
+          <div style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Jahr</div>
           {MONATE.map(m => (
-            <div key={m} style={{ padding: "6px 3px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{m}</div>
+            <div key={m} style={{ padding: "3px 3px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{m}</div>
           ))}
-          <div style={{ padding: "6px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
+          <div style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
         </div>
         {pivot.rows.length === 0 && (
           <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)", minWidth }}>Keine Flüge für diese Filterauswahl.</div>
         )}
         {pivot.rows.map(r => (
           <div key={r.year} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth }}>
-            <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
             {r.months.map((c, i) => (
-              <div key={i} style={{ padding: "6px 3px", fontSize: 13, textAlign: "right", color: c ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{c || "·"}</div>
+              <div key={i} style={{ padding: "3px 3px", fontSize: 13, textAlign: "right", color: c ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{c || "·"}</div>
             ))}
-            <div style={{ padding: "6px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{r.total}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{r.total}</div>
           </div>
         ))}
         {pivot.rows.length > 0 && (
           <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)", minWidth }}>
-            <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
             {pivot.monthTotals.map((c, i) => (
-              <div key={i} style={{ padding: "6px 3px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{c || "·"}</div>
+              <div key={i} style={{ padding: "3px 3px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{c || "·"}</div>
             ))}
-            <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{pivot.grandTotal}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{pivot.grandTotal}</div>
           </div>
         )}
       </div>
@@ -241,31 +241,31 @@ function ReisePivotTable({ flights }) {
     <div style={{ padding: "0 16px" }}>
       <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
         <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
-          <div style={{ padding: "6px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Reise</div>
+          <div style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Reise</div>
           {pivot.yearList.map(y => (
-            <div key={y} style={{ padding: "6px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{y}</div>
+            <div key={y} style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{y}</div>
           ))}
-          <div style={{ padding: "6px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
+          <div style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
         </div>
         {pivot.rows.length === 0 && (
           <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)", minWidth }}>Keine Flüge für diese Filterauswahl.</div>
         )}
         {pivot.rows.map(r => (
           <div key={r.reise} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth }}>
-            <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reise}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reise}</div>
             {r.minutesByYear.map((min, i) => (
-              <div key={i} style={{ padding: "6px 6px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? formatMinutes(min) : "·"}</div>
+              <div key={i} style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? formatMinutes(min) : "·"}</div>
             ))}
-            <div style={{ padding: "6px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{formatMinutes(r.total)}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{formatMinutes(r.total)}</div>
           </div>
         ))}
         {pivot.rows.length > 0 && (
           <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)", minWidth }}>
-            <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
             {pivot.yearTotals.map((min, i) => (
-              <div key={i} style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? formatMinutes(min) : "·"}</div>
+              <div key={i} style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? formatMinutes(min) : "·"}</div>
             ))}
-            <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.grandTotal)}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.grandTotal)}</div>
           </div>
         )}
       </div>
@@ -329,7 +329,7 @@ function TopFlightsModal({ stat, ranked, onClose }) {
           // bewusst weggelassen — Datum + Startplatz identifizieren den Flug
           // aussagekräftiger.
           <a key={r.flight.id} href={`flugbuch.html?openFlightId=${encodeURIComponent(r.flight.id)}`}
-            style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 4px", borderBottom: i < ranked.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none", textDecoration: "none", color: "inherit" }}>
+            style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 4px", borderBottom: i < ranked.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none", textDecoration: "none", color: "inherit" }}>
             <div style={{ flexShrink: 0, width: 22, textAlign: "center", fontSize: 12, fontWeight: 800, color: i === 0 ? "#fcd34d" : "rgba(232,244,253,0.4)" }}>{i + 1}</div>
             <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.flight.date} · {r.flight.site || "—"}</div>
             <div style={{ flexShrink: 0, fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{stat.format(r.value)}</div>
@@ -594,7 +594,7 @@ function StatistikApp() {
             <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
               <div style={{ display: "grid", gridTemplateColumns: "0.8fr 0.8fr 0.8fr 0.9fr 1.1fr 0.9fr", background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth: 400 }}>
                 {["Jahr", "Flüge", "Tage", "Flüge/Tag", "Minuten", "Schnitt"].map((h, i) => (
-                  <div key={h} style={{ padding: "6px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
+                  <div key={h} style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
                 ))}
               </div>
               {pivot.rows.length === 0 && (
@@ -602,22 +602,22 @@ function StatistikApp() {
               )}
               {pivot.rows.map(r => (
                 <div key={r.year} style={{ display: "grid", gridTemplateColumns: "0.8fr 0.8fr 0.8fr 0.9fr 1.1fr 0.9fr", borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth: 400 }}>
-                  <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, textAlign: "right" }}>{r.flights}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, textAlign: "right" }}>{r.days}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{r.days ? (r.flights / r.days).toFixed(1) : "—"}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, textAlign: "right" }}>{formatMinutes(r.minutes)}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{formatMinutes(r.minutes / r.flights)}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right" }}>{r.flights}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right" }}>{r.days}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{r.days ? (r.flights / r.days).toFixed(1) : "—"}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right" }}>{formatMinutes(r.minutes)}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{formatMinutes(r.minutes / r.flights)}</div>
                 </div>
               ))}
               {pivot.rows.length > 0 && (
                 <div style={{ display: "grid", gridTemplateColumns: "0.8fr 0.8fr 0.8fr 0.9fr 1.1fr 0.9fr", background: "rgba(125,211,252,0.08)", minWidth: 400 }}>
-                  <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.flights}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days ? (pivot.total.flights / pivot.total.days).toFixed(1) : "—"}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{formatMinutes(pivot.total.minutes)}</div>
-                  <div style={{ padding: "6px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes / pivot.total.flights)}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.flights}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days ? (pivot.total.flights / pivot.total.days).toFixed(1) : "—"}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{formatMinutes(pivot.total.minutes)}</div>
+                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes / pivot.total.flights)}</div>
                 </div>
               )}
             </div>
