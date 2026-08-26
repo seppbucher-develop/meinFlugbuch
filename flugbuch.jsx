@@ -1771,14 +1771,30 @@ function createFlightFromPDF(nr, p) {
 // independently and shares no code with it, so the key is duplicated here
 // deliberately.
 const SCHIRME_KEY = "schirme:list";
-// IGC-Logger schreiben den Schirm-Namen in HFGTY meist als "Hersteller
-// Modell…" ohne feste Konvention, deshalb wird hier bewusst IMMER das
-// erste Wort als Hersteller abgetrennt.
+// IGC-Logger schreiben den Schirm-Namen in HFGTY ohne feste Konvention:
+// manche als "Hersteller Modell…" (z.B. "Ozone Enzo 3"), andere nur als
+// reines Modell ohne Hersteller (z.B. "Artik R 2" — ein Niviuk-Modell,
+// dessen Name "Niviuk" nirgends im Header steht). Blind IMMER das erste
+// Wort als Hersteller abzutrennen (frühere Version dieser Funktion) traf
+// im zweiten Fall daneben und schnitt fälschlich einen Teil des Modell-
+// namens ab ("Artik R 2" → Hersteller "Artik", Schirm nur "R 2"). Deshalb
+// wird das erste Wort nur abgetrennt, wenn es zu einem bekannten
+// Hersteller passt — sonst bleibt die komplette Bezeichnung als Schirm-
+// Name erhalten und der Hersteller bleibt leer (in der Schirme-Liste
+// jederzeit von Hand nachtragbar).
+const KNOWN_SCHIRM_HERSTELLER = [
+  "Advance", "Airdesign", "APCO", "BGD", "Dudek", "Flow", "Gin", "Gradient",
+  "Independence", "MacPara", "Niviuk", "Nova", "Ozone", "Paratech", "Skywalk",
+  "Sky", "Supair", "Swing", "Triple Seven", "UP", "U-Turn", "Windtech",
+];
 function splitFirstWordAsHersteller(raw) {
   const name = (raw || "").trim();
-  const m = name.match(/^(\S+)\s+(.+)$/);
-  if (!m) return { hersteller: "", cleaned: name };
-  return { hersteller: m[1], cleaned: m[2].trim() };
+  for (const hersteller of KNOWN_SCHIRM_HERSTELLER) {
+    const re = new RegExp(`^${hersteller}\\s+(.+)$`, "i");
+    const m = name.match(re);
+    if (m) return { hersteller, cleaned: m[1].trim() };
+  }
+  return { hersteller: "", cleaned: name };
 }
 
 // ── FILTER ENGINE ────────────────────────────────────────────────────────
@@ -4171,14 +4187,15 @@ function FlugbuchApp() {
   }, [igcDirHandle, flights, doImport]);
 
 
-  // Nimmt den rohen Schirm-Namen aus dem IGC-Header (HFGTY), trennt das
-  // erste Wort als Hersteller ab und sucht/erzeugt in der Schirme-Liste
+  // Nimmt den rohen Schirm-Namen aus dem IGC-Header (HFGTY), trennt einen
+  // bekannten Hersteller-Namen ab (siehe splitFirstWordAsHersteller/
+  // KNOWN_SCHIRM_HERSTELLER oben) und sucht/erzeugt in der Schirme-Liste
   // (schirme:list, dieselbe Liste wie auf der Schirme-Seite) den
   // zugehörigen Eintrag — siehe schirme.jsx (generateFromFlights/
   // matchesSchirm) für die analoge Logik dort. Gibt den bereinigten Namen
-  // (ohne Hersteller-Wort) und die schirmId zurück, die dann in
-  // customFields.schirmId abgelegt wird, damit die Schirme-Seite den Flug
-  // robust zuordnen kann.
+  // (ohne Hersteller-Wort, falls einer erkannt wurde) und die schirmId
+  // zurück, die dann in customFields.schirmId abgelegt wird, damit die
+  // Schirme-Seite den Flug robust zuordnen kann.
   const resolveSchirmForGlider = useCallback(async (rawGlider) => {
     const { hersteller, cleaned } = splitFirstWordAsHersteller(rawGlider);
     if (!cleaned) return { name: "", schirmId: null };
