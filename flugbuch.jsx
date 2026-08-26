@@ -192,30 +192,14 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
 }
 
 // ── FlightMap ──────────────────────────────────────────────────────────────
-// ── Export-Dateinamen ──────────────────────────────────────────────────────
-// Für IGC-/GPX-Export wird bevorzugt der ursprüngliche Dateiname des
-// importierten IGC-Files verwendet (customFields.igcFilename, bereits ohne
-// Endung — siehe importIGCFiles), damit ein Re-Export denselben Namen trägt
-// wie die Originaldatei vom Fluginstrument. Nur ohne bekannten Original-
-// namen (z.B. ein Flug ohne IGC-Import) greift für den GPX-Export ein
-// Fallback aus Flugdatum + Start-/Landeplatz.
-function sanitizeFilenamePart(s) {
-  return (s || "").trim().replace(/[\\/:*?"<>|]+/g, "").trim();
-}
-function isoDateFromFlightDate(dateStr) {
-  const parts = (dateStr || "").split(".");
-  if (parts.length !== 3) return "";
-  const [d, m, y] = parts;
-  return `${y}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
-}
-// z.B. "2024-07-16_Niederhorn-Talstation" — Datum ist das Flugdatum, nicht
-// das Datum des Exports.
-function gpxFallbackName(flight) {
-  const iso = isoDateFromFlightDate(flight?.date) || "unbekannt-datum";
-  const start = sanitizeFilenamePart(flight?.site) || "unbekannt";
-  const landung = sanitizeFilenamePart(flight?.customFields?.landung) || "unbekannt";
-  return `${iso}_${start}-${landung}`;
-}
+// IGC-/GPX-Export verwenden den ursprünglichen Dateinamen des importierten
+// IGC-Files (customFields.igcFilename, bereits ohne Endung — siehe
+// importIGCFiles), damit ein Re-Export denselben Namen trägt wie die
+// Originaldatei vom Fluginstrument. Ein eigener Fallback-Name für den
+// GPX-Export ist nicht nötig: der GPX-Export-Button erscheint ohnehin nur,
+// wenn ein Track vorhanden ist (fl.track?.length>1), und ein Track kommt
+// ausschliesslich aus einem IGC-Import — igcFilename ist in diesem Fall
+// also immer gesetzt.
 
 // Builds a minimal valid GPX 1.1 track file from a flight's IGC track
 // points, so it can be opened in an external map viewer (gpx.studio) that
@@ -3190,7 +3174,10 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                   const alt = Math.round(p.gpsAlt||0);
                   igc += "B"+ts+fmtLat(p.lat)+fmtLon(p.lon)+"A"+String(alt).padStart(5,"0")+String(alt).padStart(5,"0")+NL;
                 }
-                const blob = new Blob([igc], { type: "text/plain" });
+                // application/octet-stream statt text/plain — sonst hängen
+                // manche Browser beim Speichern eigenmächtig ".txt" an den
+                // (bereits korrekten) ".igc"-Dateinamen an.
+                const blob = new Blob([igc], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url; a.download=(fl.customFields?.igcFilename||fl.name||"flug")+".igc";
@@ -3207,7 +3194,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement("a");
                     a.href = url;
-                    a.download = `${fl?.customFields?.igcFilename || gpxFallbackName(fl)}.gpx`;
+                    a.download = `${fl?.customFields?.igcFilename || fl?.name || "flug"}.gpx`;
                     document.body.appendChild(a);
                     a.click();
                     document.body.removeChild(a);
