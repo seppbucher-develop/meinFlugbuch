@@ -77,6 +77,296 @@ function TrainingFilter({ value, onChange }) {
   );
 }
 
+// ── Statistik-Ansichten ──────────────────────────────────────────────────
+// Die Statistik-Seite ist in drei Auswertungen aufgeteilt, zwischen denen
+// über VIEWS/ViewSwitcher gewechselt wird — alle drei teilen sich dieselbe
+// FilterBar/gefilterte Flugliste (siehe StatistikApp), sind inhaltlich aber
+// eigenständige Pivot-Tabellen: Übersicht (Jahr), Monatsübersicht
+// (Jahr × Monat) und Reiseübersicht (Reise × Jahr).
+const VIEWS = [
+  { id: "uebersicht", label: "Übersicht" },
+  { id: "monat", label: "Monatsübersicht" },
+  { id: "reise", label: "Reiseübersicht" },
+];
+
+function ViewSwitcher({ view, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      {VIEWS.map(v => (
+        <button key={v.id} onClick={() => onChange(v.id)}
+          style={{ flex: 1, background: view === v.id ? "rgba(125,211,252,0.18)" : "rgba(255,255,255,0.05)", border: `1px solid ${view === v.id ? "rgba(125,211,252,0.4)" : "rgba(255,255,255,0.1)"}`, borderRadius: 10, padding: "10px 6px", color: view === v.id ? "#7dd3fc" : "rgba(232,244,253,0.6)", fontSize: 12, fontWeight: view === v.id ? 700 : 400, cursor: "pointer" }}>
+          {v.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Filterleiste (Typ/Reise/Schirm/Landeplatz/Land/Training + Zurücksetzen) —
+// von allen drei Auswertungen (Übersicht, Monats- und Reiseübersicht)
+// gemeinsam genutzt, damit sie dieselbe Flugliste eingrenzen.
+function FilterBar({
+  typOptions, typF, setTypF, reiseOptions, reiseF, setReiseF,
+  schirmOptions, schirmF, setSchirmF, landeplatzOptions, landeplatzF, setLandeplatzF,
+  landOptions, landF, setLandF, trainingF, setTrainingF, anyFilterActive, resetFilters,
+}) {
+  return (
+    <>
+      <div style={{ padding: "0 16px 10px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
+        <MultiSelectFilter label="Typ" options={typOptions} selected={typF} onChange={setTypF} />
+        <MultiSelectFilter label="Reise" options={reiseOptions} selected={reiseF} onChange={setReiseF} />
+        <MultiSelectFilter label="Schirm" options={schirmOptions} selected={schirmF} onChange={setSchirmF} />
+        <MultiSelectFilter label="Landeplatz" options={landeplatzOptions} selected={landeplatzF} onChange={setLandeplatzF} />
+        <MultiSelectFilter label="Land" options={landOptions} selected={landF} onChange={setLandF} />
+      </div>
+      <div style={{ padding: "0 16px 10px" }}>
+        <div style={{ fontSize: 10, color: "rgba(232,244,253,0.4)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>Training</div>
+        <TrainingFilter value={trainingF} onChange={setTrainingF} />
+      </div>
+      {anyFilterActive && (
+        <div style={{ padding: "0 16px 14px" }}>
+          <button onClick={resetFilters}
+            style={{ background: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.25)", borderRadius: 8, padding: "7px 12px", color: "#f87171", fontSize: 12, cursor: "pointer" }}>
+            ✕ Filter zurücksetzen
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+const MONATE = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+
+// Jahr/Monat-Pivot: Zeilen = Jahre, Spalten = Monate (Jan–Dez) + Total,
+// Zellwert = Anzahl Flüge in diesem Jahr/Monat. Analog zur Jahres-Pivot in
+// der Übersicht — nutzt dieselbe (bereits gefilterte) Flugliste.
+function computeMonthPivot(flights) {
+  const byYear = new Map(); // Jahr -> Array[12] mit Flugzahl je Monat
+  for (const f of flights) {
+    const parts = (f.date || "").split(".");
+    const yr = (f.year || parts[2] || "").toString();
+    const mo = parts.length === 3 ? parseInt(parts[1], 10) : NaN;
+    if (!yr || !mo || mo < 1 || mo > 12) continue;
+    if (!byYear.has(yr)) byYear.set(yr, Array(12).fill(0));
+    byYear.get(yr)[mo - 1]++;
+  }
+  const rows = [...byYear.entries()]
+    .map(([year, months]) => ({ year, months, total: months.reduce((a, b) => a + b, 0) }))
+    .sort((a, b) => a.year.localeCompare(b.year, "de", { numeric: true }));
+  const monthTotals = Array(12).fill(0);
+  rows.forEach(r => r.months.forEach((c, i) => { monthTotals[i] += c; }));
+  const grandTotal = monthTotals.reduce((a, b) => a + b, 0);
+  return { rows, monthTotals, grandTotal };
+}
+
+function MonthPivotTable({ flights }) {
+  const pivot = React.useMemo(() => computeMonthPivot(flights), [flights]);
+  const cols = `1fr repeat(12, 0.7fr) 0.8fr`;
+  const minWidth = 780;
+  return (
+    <div style={{ padding: "0 16px" }}>
+      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
+        <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
+          <div style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Jahr</div>
+          {MONATE.map(m => (
+            <div key={m} style={{ padding: "10px 4px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{m}</div>
+          ))}
+          <div style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
+        </div>
+        {pivot.rows.length === 0 && (
+          <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)", minWidth }}>Keine Flüge für diese Filterauswahl.</div>
+        )}
+        {pivot.rows.map(r => (
+          <div key={r.year} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth }}>
+            <div style={{ padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
+            {r.months.map((c, i) => (
+              <div key={i} style={{ padding: "9px 4px", fontSize: 13, textAlign: "right", color: c ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{c || "·"}</div>
+            ))}
+            <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{r.total}</div>
+          </div>
+        ))}
+        {pivot.rows.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)", minWidth }}>
+            <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+            {pivot.monthTotals.map((c, i) => (
+              <div key={i} style={{ padding: "10px 4px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{c || "·"}</div>
+            ))}
+            <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{pivot.grandTotal}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Reise/Jahr-Pivot: Zeilen = Reise (customFields.reise), Spalten = Jahre
+// (dynamisch, wie in der Jahres-Übersicht) + Total, Zellwert = Flugdauer
+// (Summe durationSec) je Reise/Jahr-Kombination. Flüge ohne eingetragene
+// Reise landen — analog zum Umgang mit fehlendem Jahr in der Jahres-Pivot —
+// gesammelt in einer "—"-Zeile, statt stillschweigend zu verschwinden.
+function computeReisePivot(flights) {
+  const years = new Set();
+  const byReise = new Map(); // Reise -> Map(Jahr -> Minuten)
+  for (const f of flights) {
+    const reise = (f.customFields?.reise || "").trim() || "—";
+    const yr = (f.year || (f.date || "").split(".")[2] || "—").toString();
+    years.add(yr);
+    if (!byReise.has(reise)) byReise.set(reise, new Map());
+    const m = byReise.get(reise);
+    m.set(yr, (m.get(yr) || 0) + (f.durationSec || 0) / 60);
+  }
+  const yearList = [...years].sort((a, b) => a.localeCompare(b, "de", { numeric: true }));
+  const rows = [...byReise.entries()]
+    .map(([reise, m]) => {
+      const minutesByYear = yearList.map(y => m.get(y) || 0);
+      return { reise, minutesByYear, total: minutesByYear.reduce((a, b) => a + b, 0) };
+    })
+    .sort((a, b) => a.reise.localeCompare(b.reise, "de", { numeric: true }));
+  const yearTotals = yearList.map((_, i) => rows.reduce((acc, r) => acc + r.minutesByYear[i], 0));
+  const grandTotal = yearTotals.reduce((a, b) => a + b, 0);
+  return { yearList, rows, yearTotals, grandTotal };
+}
+
+function ReisePivotTable({ flights }) {
+  const pivot = React.useMemo(() => computeReisePivot(flights), [flights]);
+  const cols = `1.4fr repeat(${pivot.yearList.length}, 1fr) 1.1fr`;
+  const minWidth = 200 + pivot.yearList.length * 90 + 100;
+  return (
+    <div style={{ padding: "0 16px" }}>
+      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
+        <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
+          <div style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Reise</div>
+          {pivot.yearList.map(y => (
+            <div key={y} style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{y}</div>
+          ))}
+          <div style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
+        </div>
+        {pivot.rows.length === 0 && (
+          <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)", minWidth }}>Keine Flüge für diese Filterauswahl.</div>
+        )}
+        {pivot.rows.map(r => (
+          <div key={r.reise} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth }}>
+            <div style={{ padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#7dd3fc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reise}</div>
+            {r.minutesByYear.map((min, i) => (
+              <div key={i} style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? formatMinutes(min) : "·"}</div>
+            ))}
+            <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{formatMinutes(r.total)}</div>
+          </div>
+        ))}
+        {pivot.rows.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)", minWidth }}>
+            <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+            {pivot.yearTotals.map((min, i) => (
+              <div key={i} style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? formatMinutes(min) : "·"}</div>
+            ))}
+            <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.grandTotal)}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Maximalwerte ─────────────────────────────────────────────────────────
+// Persönliche Rekorde über die (gefilterte) Flugliste. getValue liest sowohl
+// aus IGC-Flügen (f.maxAlt, f.totalDist, …) als auch aus manuell erfassten
+// Flügen (customFields-Fallbacks) — dieselben Fallback-Ketten wie an den
+// entsprechenden Stellen in flugbuch.jsx.
+const MAX_STATS = [
+  {
+    id: "dauer", label: "Längster Flug", icon: "⏱",
+    getValue: f => f.durationSec || 0,
+    format: v => formatMinutes(v / 60),
+  },
+  {
+    id: "distanz", label: "Weitester Flug", icon: "📏",
+    getValue: f => f.totalDist || parseFloat(f.customFields?.distKm || f.customFields?.dk || 0) || 0,
+    format: v => v.toFixed(1).replace(".", ",") + " km",
+  },
+  {
+    id: "hoehe", label: "Höchster Flug", icon: "⛰",
+    getValue: f => f.maxAlt || +(f.customFields?.hMax || f.customFields?.hm || 0) || 0,
+    format: v => Math.round(v) + " m",
+  },
+  {
+    id: "hgew", label: "Größter Höhengewinn", icon: "🚀",
+    getValue: f => +(f.customFields?.hGew || 0) || 0,
+    format: v => Math.round(v) + " m",
+  },
+];
+
+// Top 10 (absteigend) für eine Maximalwert-Kategorie — Flüge ohne diesen
+// Wert (z.B. hGew bei manuell erfassten Flügen ohne IGC-Track) werden nicht
+// mitgezählt, statt fälschlich als "0 m" mitzulaufen.
+function rankFlights(flights, stat) {
+  return flights
+    .map(f => ({ flight: f, value: stat.getValue(f) }))
+    .filter(r => r.value > 0)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 10);
+}
+
+function TopFlightsModal({ stat, ranked, onClose }) {
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 480, maxHeight: "80vh", overflowY: "auto", background: "#0f1f33", borderTop: "1px solid rgba(255,255,255,0.12)", borderRadius: "16px 16px 0 0", padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>{stat.icon} Top 10 — {stat.label}</div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
+        </div>
+        {ranked.length === 0 && (
+          <div style={{ padding: "20px 4px", fontSize: 13, color: "rgba(232,244,253,0.4)", textAlign: "center" }}>Keine Flüge mit diesem Wert vorhanden.</div>
+        )}
+        {ranked.map((r, i) => (
+          <a key={r.flight.id} href={`flugbuch.html?openFlightId=${encodeURIComponent(r.flight.id)}`}
+            style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 4px", borderBottom: i < ranked.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none", textDecoration: "none", color: "inherit" }}>
+            <div style={{ flexShrink: 0, width: 24, textAlign: "center", fontSize: 12, fontWeight: 800, color: i === 0 ? "#fcd34d" : "rgba(232,244,253,0.4)" }}>{i + 1}</div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.flight.name || r.flight.site || "—"}</div>
+              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.flight.date} · {r.flight.site || "—"}</div>
+            </div>
+            <div style={{ flexShrink: 0, fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{stat.format(r.value)}</div>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MaxStatsSection({ flights }) {
+  const [openStatId, setOpenStatId] = React.useState(null);
+  const ranked = React.useMemo(() => {
+    const m = {};
+    MAX_STATS.forEach(s => { m[s.id] = rankFlights(flights, s); });
+    return m;
+  }, [flights]);
+  const openStat = MAX_STATS.find(s => s.id === openStatId) || null;
+
+  return (
+    <div style={{ padding: "4px 16px 14px" }}>
+      <div style={{ fontSize: 10, color: "rgba(232,244,253,0.4)", marginBottom: 6, textTransform: "uppercase", letterSpacing: 1 }}>Maximalwerte</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        {MAX_STATS.map(s => {
+          const best = ranked[s.id][0];
+          return (
+            <button key={s.id} onClick={() => best && setOpenStatId(s.id)}
+              disabled={!best}
+              style={{ textAlign: "left", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, padding: "10px 12px", cursor: best ? "pointer" : "default", opacity: best ? 1 : 0.5 }}>
+              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)", marginBottom: 4 }}>{s.icon} {s.label}</div>
+              <div style={{ fontSize: 18, fontWeight: 800, color: "#7dd3fc" }}>{best ? s.format(best.value) : "—"}</div>
+              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {best ? `${best.flight.date} · ${best.flight.site || "—"}` : "Keine Daten"}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+      {openStat && <TopFlightsModal stat={openStat} ranked={ranked[openStat.id]} onClose={() => setOpenStatId(null)} />}
+    </div>
+  );
+}
+
 function StatistikApp() {
   const [flights, setFlights] = React.useState(null); // null = noch am Laden
 
@@ -94,6 +384,24 @@ function StatistikApp() {
       }
     })();
   }, []);
+
+  // Welche der drei Statistik-Ansichten (siehe VIEWS) gerade aktiv ist —
+  // eigene, kleine Persistierung (nicht Teil von statistikFilters/
+  // backupDirty), da es sich nur um Navigations-Zustand handelt, nicht um
+  // Nutzdaten.
+  const [view, setView] = React.useState("uebersicht");
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("statistikView");
+        if (r && r.value && VIEWS.some(v => v.id === r.value)) setView(r.value);
+      } catch (e) {}
+    })();
+  }, []);
+  const changeView = (id) => {
+    setView(id);
+    try { window.storage.set("statistikView", id); } catch (e) {}
+  };
 
   const [typF, setTypF] = React.useState(new Set());
   const [reiseF, setReiseF] = React.useState(new Set());
@@ -204,63 +512,69 @@ function StatistikApp() {
         <a href="index.html" style={{ color: "#7dd3fc", fontSize: 24, textDecoration: "none", flexShrink: 0, lineHeight: 1 }}>‹</a>
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", color: "rgba(232,244,253,0.4)", marginBottom: 2 }}>Flugbuch</div>
-          <h1 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 4px" }}>Übersicht</h1>
+          <h1 style={{ fontSize: 22, fontWeight: 800, margin: "0 0 4px" }}>Statistik</h1>
           <div style={{ fontSize: 12, color: "rgba(232,244,253,0.45)" }}>{all.length} Flüge insgesamt · {filtered.length} nach Filter</div>
         </div>
       </div>
 
-      <div style={{ padding: "10px 16px", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))", gap: 8 }}>
-        <MultiSelectFilter label="Typ" options={typOptions} selected={typF} onChange={setTypF} />
-        <MultiSelectFilter label="Reise" options={reiseOptions} selected={reiseF} onChange={setReiseF} />
-        <MultiSelectFilter label="Schirm" options={schirmOptions} selected={schirmF} onChange={setSchirmF} />
-        <MultiSelectFilter label="Landeplatz" options={landeplatzOptions} selected={landeplatzF} onChange={setLandeplatzF} />
-        <MultiSelectFilter label="Land" options={landOptions} selected={landF} onChange={setLandF} />
+      <div style={{ padding: "4px 16px 14px" }}>
+        <ViewSwitcher view={view} onChange={changeView} />
       </div>
-      <div style={{ padding: "0 16px 10px" }}>
-        <div style={{ fontSize: 10, color: "rgba(232,244,253,0.4)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>Training</div>
-        <TrainingFilter value={trainingF} onChange={setTrainingF} />
-      </div>
-      {anyFilterActive && (
-        <div style={{ padding: "0 16px 14px" }}>
-          <button onClick={resetFilters}
-            style={{ background: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.25)", borderRadius: 8, padding: "7px 12px", color: "#f87171", fontSize: 12, cursor: "pointer" }}>
-            ✕ Filter zurücksetzen
-          </button>
-        </div>
+
+      {(view === "uebersicht" || view === "monat" || view === "reise") && (
+        <FilterBar
+          typOptions={typOptions} typF={typF} setTypF={setTypF}
+          reiseOptions={reiseOptions} reiseF={reiseF} setReiseF={setReiseF}
+          schirmOptions={schirmOptions} schirmF={schirmF} setSchirmF={setSchirmF}
+          landeplatzOptions={landeplatzOptions} landeplatzF={landeplatzF} setLandeplatzF={setLandeplatzF}
+          landOptions={landOptions} landF={landF} setLandF={setLandF}
+          trainingF={trainingF} setTrainingF={setTrainingF}
+          anyFilterActive={anyFilterActive} resetFilters={resetFilters}
+        />
       )}
 
-      <div style={{ padding: "0 16px" }}>
-        <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth: 480 }}>
-            {["Jahr", "Flüge", "Tage", "Flüge/Tag", "Minuten", "Schnitt"].map((h, i) => (
-              <div key={h} style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
-            ))}
+      {view === "uebersicht" && (
+        <>
+          <MaxStatsSection flights={filtered} />
+
+          <div style={{ padding: "0 16px" }}>
+            <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth: 480 }}>
+                {["Jahr", "Flüge", "Tage", "Flüge/Tag", "Minuten", "Schnitt"].map((h, i) => (
+                  <div key={h} style={{ padding: "10px 8px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
+                ))}
+              </div>
+              {pivot.rows.length === 0 && (
+                <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>Keine Flüge für diese Filterauswahl.</div>
+              )}
+              {pivot.rows.map(r => (
+                <div key={r.year} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth: 480 }}>
+                  <div style={{ padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
+                  <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{r.flights}</div>
+                  <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{r.days}</div>
+                  <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{r.days ? (r.flights / r.days).toFixed(1) : "—"}</div>
+                  <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{formatMinutes(r.minutes)}</div>
+                  <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{formatMinutes(r.minutes / r.flights)}</div>
+                </div>
+              ))}
+              {pivot.rows.length > 0 && (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", background: "rgba(125,211,252,0.08)", minWidth: 480 }}>
+                  <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+                  <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.flights}</div>
+                  <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
+                  <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days ? (pivot.total.flights / pivot.total.days).toFixed(1) : "—"}</div>
+                  <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{formatMinutes(pivot.total.minutes)}</div>
+                  <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes / pivot.total.flights)}</div>
+                </div>
+              )}
+            </div>
           </div>
-          {pivot.rows.length === 0 && (
-            <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>Keine Flüge für diese Filterauswahl.</div>
-          )}
-          {pivot.rows.map(r => (
-            <div key={r.year} style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth: 480 }}>
-              <div style={{ padding: "9px 8px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
-              <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{r.flights}</div>
-              <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{r.days}</div>
-              <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{r.days ? (r.flights / r.days).toFixed(1) : "—"}</div>
-              <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right" }}>{formatMinutes(r.minutes)}</div>
-              <div style={{ padding: "9px 8px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{formatMinutes(r.minutes / r.flights)}</div>
-            </div>
-          ))}
-          {pivot.rows.length > 0 && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1.4fr 1fr", background: "rgba(125,211,252,0.08)", minWidth: 480 }}>
-              <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
-              <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.flights}</div>
-              <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
-              <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days ? (pivot.total.flights / pivot.total.days).toFixed(1) : "—"}</div>
-              <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{formatMinutes(pivot.total.minutes)}</div>
-              <div style={{ padding: "10px 8px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes / pivot.total.flights)}</div>
-            </div>
-          )}
-        </div>
-      </div>
+        </>
+      )}
+
+      {view === "monat" && <MonthPivotTable flights={filtered} />}
+
+      {view === "reise" && <ReisePivotTable flights={filtered} />}
     </div>
   );
 }
