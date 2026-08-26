@@ -2186,127 +2186,33 @@ function sortFlights(flights, sortId, dir) {
   return dir === "desc" ? sorted.reverse() : sorted;
 }
 
-function formatSortValue(f, sortId) {
-  const cf = f.customFields || {};
-  switch (sortId) {
-    case "year":     return f.year ? String(f.year) : "—";
-    case "date":     return f.date || f.rawDate || "—";
-    case "name":     return f.name || "—";
-    case "startTime": return f.startTime || "—";
-    case "endTime":  return f.endTime || "—";
-    case "duration": return f.durationStr || "—";
-    case "dist":     return (f.totalDist || cf.distKm || cf.dk) ? (f.totalDist || cf.distKm || cf.dk) + " km" : "—";
-    case "alt":      return (f.maxAlt || cf.hMax || cf.hm) ? (f.maxAlt || cf.hMax || cf.hm) + " m" : "—";
-    case "startAlt": return (f.startAlt || cf.msa) ? (f.startAlt || cf.msa) + " m" : "—";
-    case "endAlt":   return (f.endAlt || cf.ml) ? (f.endAlt || cf.ml) + " m" : "—";
-    case "hDiff":    return cf.hDiff ? cf.hDiff + " m" : "—";
-    case "maxSteigen": return cf.maxSteigen ? cf.maxSteigen + " m/s" : "—";
-    case "maxSteigen20": return cf.maxSteigen20 ? cf.maxSteigen20 + " m/s" : "—";
-    case "maxSinken": return cf.maxSinken ? cf.maxSinken + " m/s" : "—";
-    case "hGew":     return cf.hGew ? cf.hGew + " m" : "—";
-    case "entfernungSL": return f.entfernungSL!=null ? f.entfernungSL + " km" : "—";
-    case "site":     return f.site || "—";
-    case "landung":  return cf.landung || "—";
-    case "glider":   return f.glider || "—";
-    case "typ":      return cf.typ || "—";
-    case "pilot":    return f.pilot || "—";
-    case "reise":    return cf.reise || "—";
-    case "speed":    return cf.kmh ? cf.kmh + " km/h" : "—";
-    case "rating":   return f.rating ? "★".repeat(f.rating) : "—";
-    case "jahr":     return f.year ? String(f.year) : "—";
-    default:         return f.durationStr || "—";
-  }
-}
-
-// For each sort option, which value shows as the secondary (grey, under
-// the primary blue value) in the flight list — see Leer_3.csv. Falls back
-// to "duration" for anything not explicitly listed.
-const SECONDARY_VALUE_FOR_SORT = {
-  number: "dist", date: "dist",
-  startTime: "duration", endTime: "duration",
-  site: "startTime", landung: "endTime",
-  glider: "duration", reise: "duration",
-  duration: "dist", dist: "duration",
-  alt: "duration",
-  startAlt: "startTime", endAlt: "endTime",
-  hDiff: "duration", speed: "duration",
-  maxSteigen: "duration", maxSteigen20: "duration", maxSinken: "duration", hGew: "duration",
-  entfernungSL: "duration",
-  rating: "duration",
-};
-
-function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onToggleSelect, isWide }) {
-  const showSortValue = sortId && sortId !== "date" && sortId !== "number";
-  const secondaryId = SECONDARY_VALUE_FOR_SORT[sortId] || "duration";
-  const secondaryText = formatSortValue(f, secondaryId);
-
-  // Wide (iPad/desktop): compact single line — Nr, Datum, Start, Schirm,
-  // gap, IGC-badge, then far right Distanz/Dauer. iPhone below is
-  // untouched from the original 2-line design.
-  if (isWide) {
-    return (
-      <div onClick={selectMode ? ()=>onToggleSelect(f.id) : onClick}
-        style={{padding:"4px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",alignItems:"center",gap:8,background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s",whiteSpace:"nowrap",overflow:"hidden"}}
-        onMouseEnter={e=>{ if(!isSelected) e.currentTarget.style.background="rgba(255,255,255,0.03)"; }}
-        onMouseLeave={e=>{ if(!isSelected) e.currentTarget.style.background="transparent"; }}>
-        {selectMode && (
-          <div style={{flexShrink:0,width:20,height:20,borderRadius:6,border:`2px solid ${isSelected?"#7dd3fc":"rgba(232,244,253,0.3)"}`,background:isSelected?"#7dd3fc":"transparent",display:"flex",alignItems:"center",justifyContent:"center"}}>
-            {isSelected && <span style={{color:"#0a1628",fontSize:13,fontWeight:900}}>✓</span>}
-          </div>
-        )}
-        {isLongest&&<span style={{fontSize:10,flexShrink:0}}>🏆</span>}
-        <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",flexShrink:0}}>{f.date}</span>
-        <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{f.site||"—"}</span>
-        {f.customFields?.landung && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
-        {f.customFields?.reise && <span style={{fontSize:11,fontWeight:700,color:"#fcd34d",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.customFields.reise}</span>}
-        {f.glider && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
-        <span style={{flexShrink:0,marginLeft:6,display:"flex",alignItems:"center",gap:4}}>
-          {f.pdfOnly&&<span style={{background:"rgba(139,92,246,0.18)",color:"#c4b5fd",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700}}>CSV</span>}
-          {f.track?.length>1&&<span style={{background:"rgba(34,197,94,0.22)",color:"#4ade80",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(74,222,128,0.5)"}}>IGC</span>}
-        </span>
-        <span style={{flex:1}} />
-        <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
-          {!showSortValue && f.totalDist ? <span style={{fontSize:11,color:"rgba(232,244,253,0.3)"}}>{f.totalDist} km</span> : null}
-          {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
-          <span style={{fontSize:13,fontWeight:600,color:"#7dd3fc"}}>{showSortValue ? formatSortValue(f, sortId) : (f.durationStr||"—")}</span>
-        </div>
-      </div>
-    );
-  }
-
-  // iPhone (original, unchanged 2-line design)
+// Einzeilige Flugzeile — ein Design für schmale und breite Ansicht
+// (früher: eigene Wide-/iPhone-Varianten). IGC-/CSV-Quellenbadges bewusst
+// weggelassen (nicht relevant für die Übersicht), rechts immer Distanz und
+// Dauer, unabhängig von der aktuellen Sortierung.
+function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSelect }) {
+  const distText = f.totalDist ? `${f.totalDist} km` : null;
   return (
     <div onClick={selectMode ? ()=>onToggleSelect(f.id) : onClick}
-      style={{padding:"5px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s"}}
+      style={{padding:"5px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",alignItems:"center",gap:8,background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s",whiteSpace:"nowrap",overflow:"hidden"}}
       onMouseEnter={e=>{ if(!isSelected) e.currentTarget.style.background="rgba(255,255,255,0.03)"; }}
       onMouseLeave={e=>{ if(!isSelected) e.currentTarget.style.background="transparent"; }}>
       {selectMode && (
-        <div style={{marginRight:10,flexShrink:0,width:20,height:20,borderRadius:6,border:`2px solid ${isSelected?"#7dd3fc":"rgba(232,244,253,0.3)"}`,background:isSelected?"#7dd3fc":"transparent",display:"flex",alignItems:"center",justifyContent:"center"}}>
+        <div style={{flexShrink:0,width:20,height:20,borderRadius:6,border:`2px solid ${isSelected?"#7dd3fc":"rgba(232,244,253,0.3)"}`,background:isSelected?"#7dd3fc":"transparent",display:"flex",alignItems:"center",justifyContent:"center"}}>
           {isSelected && <span style={{color:"#0a1628",fontSize:13,fontWeight:900}}>✓</span>}
         </div>
       )}
-      <div style={{flex:1,minWidth:0}}>
-        <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:2}}>
-          {isLongest&&<span style={{fontSize:10}}>🏆</span>}
-          <span style={{display:"flex",alignItems:"center",gap:6,flexShrink:0}}>
-            {f.pdfOnly&&<span style={{background:"rgba(139,92,246,0.18)",color:"#c4b5fd",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700}}>CSV</span>}
-            {f.track?.length>1&&<span style={{background:"rgba(34,197,94,0.22)",color:"#4ade80",borderRadius:20,padding:"1px 7px",fontSize:9,fontWeight:700,boxShadow:"0 0 6px rgba(74,222,128,0.5)"}}>IGC</span>}
-          </span>
-        </div>
-        <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",alignItems:"baseline",whiteSpace:"nowrap",overflow:"hidden"}}>
-          <span style={{flexShrink:0}}>{f.date} · {f.site||"—"}{f.customFields?.landung?` → ${f.customFields.landung}`:""}</span>
-          {f.customFields?.reise && <span style={{fontWeight:700,color:"#fcd34d",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>&nbsp;· {f.customFields.reise}</span>}
-          {f.glider && <span style={{overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>&nbsp;· {f.glider}</span>}
-        </div>
-      </div>
-      <div style={{textAlign:"right",flexShrink:0,marginLeft:8}}>
-        <div style={{fontSize:13,fontWeight:600,color:"#7dd3fc",display:"flex",alignItems:"center",justifyContent:"flex-end",gap:4}}>
-          {f.rating>0 && <span><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
-          <span>{showSortValue ? formatSortValue(f, sortId) : (f.durationStr||"—")}</span>
-        </div>
-        {secondaryText !== "—" && (
-          <div style={{fontSize:11,color:"rgba(232,244,253,0.3)"}}>{secondaryText}</div>
-        )}
+      {isLongest&&<span style={{fontSize:10,flexShrink:0}}>🏆</span>}
+      <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",flexShrink:0}}>{f.date}</span>
+      <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{f.site||"—"}</span>
+      {f.customFields?.landung && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
+      {f.customFields?.reise && <span style={{fontSize:11,fontWeight:700,color:"#fcd34d",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.customFields.reise}</span>}
+      {f.glider && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
+      <span style={{flex:1}} />
+      <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
+        {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
+        {distText && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)"}}>{distText}</span>}
+        <span style={{fontSize:13,fontWeight:600,color:"#7dd3fc"}}>{f.durationStr||"—"}</span>
       </div>
     </div>
   );
@@ -3723,6 +3629,23 @@ function useIsWide() {
   return isWide;
 }
 
+// Erkennt ein Handy in Queransicht (breiter als hoch, aber unterhalb der
+// useIsWide-Schwelle von 1024px) — separat von useIsWide, weil das
+// zweispaltige Tablet/Desktop-Layout auf einem quer gehaltenen Handy trotz
+// ausreichender Breite an der geringen Höhe scheitern würde. Wird nur
+// genutzt, um die sonst auf 480px begrenzte Listenansicht dort die volle
+// Displaybreite nutzen zu lassen.
+function useIsLandscapePhone() {
+  const check = () => typeof window !== "undefined" && window.innerWidth > window.innerHeight && window.innerWidth < 1024;
+  const [isLandscapePhone, setIsLandscapePhone] = useState(check);
+  useEffect(() => {
+    const onResize = () => setIsLandscapePhone(check());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return isLandscapePhone;
+}
+
 // Lets the person choose exactly which of the 25 possible columns get
 // included when copying flights to the clipboard, and in what order —
 // so the copied table's columns can be made to match whatever external
@@ -3811,6 +3734,7 @@ function DateAmbiguousResolver({ item, onAssign, onCreateNew, onClose, descripti
 
 function FlugbuchApp() {
   const isWide = useIsWide();
+  const isLandscapePhone = useIsLandscapePhone();
   const [flights, setFlights] = useState([]);
   // MapTiler-Schlüssel, ausschliesslich unter Service → API-Zugangsdaten
   // hinterlegt (kein eingebauter Schlüssel mehr im Code) — ohne Eintrag
@@ -4563,7 +4487,7 @@ function FlugbuchApp() {
 
   // ── LIST VIEW ─────────────────────────────────────────────────────────────
   return (
-    <div style={{maxWidth:isWide?1400:480,margin:"0 auto",minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"system-ui,sans-serif"}}>
+    <div style={{maxWidth:isWide?1400:(isLandscapePhone?"100%":480),margin:"0 auto",minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"system-ui,sans-serif"}}>
       <input ref={fileRef} type="file" accept=".igc" multiple style={{display:"none"}} onChange={e=>importIGCFiles(Array.from(e.target.files))} />
 
       {/* Header */}
@@ -5159,7 +5083,7 @@ function FlugbuchApp() {
           </div>
         )}
         {sortFlights(filteredFlights, sortId, sortDir).map(f => (
-          <FlightRow key={f.id} f={f} isLongest={f.id===longestId} sortId={sortId} isWide={isWide}
+          <FlightRow key={f.id} f={f} isLongest={f.id===longestId}
             selectMode={selectMode} isSelected={selectedIds.has(f.id)}
             onToggleSelect={id=>setSelectedIds(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;})}
             onClick={()=>{setSelected(f);setView("detail");}} />
