@@ -4486,22 +4486,58 @@ function FlugbuchApp() {
   }
 
   // ── LIST VIEW ─────────────────────────────────────────────────────────────
+  // Import/Auswahl/Weltkarte/Darstellungen/Suchen — 5 Icon-Buttons,
+  // einheitliches Design: grauer Rand standardmässig, die jeweils aktive
+  // Kachel (offenes Panel) mit rotem Rand und flächig leicht rot
+  // eingefärbtem Hintergrund. Reihenfolge (Sortierrichtung) und die feste
+  // Jahres-Gruppierung sind hierher ins Suchen/Sortieren-Panel gewandert,
+  // seit Jahr nur noch ein wählbares Gruppieren-Feld unter mehreren ist
+  // statt eines fest verdrahteten Extra-Buttons.
+  // In Hochformat stehen sie in einer eigenen Zeile unter dem Titel; in
+  // Handy-Queransicht (wenig Höhe, aber genug Breite) rutschen sie
+  // stattdessen mit in die Titelzeile zwischen "Flugbuch" und "+Flug",
+  // damit diese Zeile keinen zusätzlichen vertikalen Platz braucht —
+  // "+Flug" bekommt dafür dort dasselbe schlichte Kachel-Aussehen wie die
+  // 5 anderen Buttons statt der grünen Pille.
+  const headerIconButtons = [
+    { key:"import", title:"Import", active:showImportMenu, onClick:()=>{ setShowImportMenu(m=>!m); }, icon:"📥" },
+    { key:"select", title:"Auswahl", active:selectMode, onClick:()=>{ setSelectMode(m=>!m); setSelectedIds(new Set()); setCopyMsg(""); }, icon: selectMode?"✕":"☑" },
+    { key:"map", title:"Weltkarte", active:false, onClick:()=>setView("worldmap"), icon:"🗺️" },
+    { key:"views", title:"Gespeicherte Darstellungen", active:showViewsMenu, onClick:()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }, icon:"💡" },
+    { key:"search", title:"Suchen/Sortieren", active:searchRowOpen, onClick:()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }, icon:"🔍" },
+  ];
+  const headerTileStyle = (active, compact) => compact
+    ? {width:34,height:34,flexShrink:0,boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:active?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${active?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:9,color:"#fff",fontSize:16,cursor:"pointer"}
+    : {flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:active?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${active?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:26,cursor:"pointer"};
+  const addFlugBtnStyle = isLandscapePhone
+    ? {height:34,boxSizing:"border-box",background:"rgba(255,255,255,0.05)",color:"#e8f4fd",border:"1px solid rgba(255,255,255,0.1)",borderRadius:9,padding:"0 10px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap",flexShrink:0}
+    : {background:"rgba(34,197,94,0.15)",color:"#4ade80",border:"1px solid rgba(34,197,94,0.25)",borderRadius:20,padding:"7px 10px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"};
+
   return (
     <div style={{maxWidth:isWide?1400:(isLandscapePhone?"100%":480),margin:"0 auto",minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"system-ui,sans-serif"}}>
       <input ref={fileRef} type="file" accept=".igc" multiple style={{display:"none"}} onChange={e=>importIGCFiles(Array.from(e.target.files))} />
 
       {/* Header */}
       <div style={{position:"sticky",top:0,zIndex:10,background:"#040e20"}}>
-      <div style={{background:"rgba(255,255,255,0.03)",borderBottom:"1px solid rgba(255,255,255,0.06)",padding:"calc(28px + env(safe-area-inset-top, 0px)) 16px 12px",display:"flex",alignItems:"center",justifyContent:"space-between",backdropFilter:"blur(10px)"}}>
+      <div style={{background:"rgba(255,255,255,0.03)",borderBottom:"1px solid rgba(255,255,255,0.06)",padding:`calc(${isLandscapePhone?14:28}px + env(safe-area-inset-top, 0px)) 16px 12px`,display:"flex",alignItems:"center",gap:8,backdropFilter:"blur(10px)"}}>
         <button onClick={()=>{window.location.href="index.html";}} title="Zur Startseite"
           style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,width:32,height:32,display:"flex",alignItems:"center",justifyContent:"center",fontSize:20,color:"rgba(232,244,253,0.8)",cursor:"pointer",flexShrink:0,lineHeight:1}}>
           ‹
         </button>
-        <span style={{fontWeight:900,fontSize:18,letterSpacing:-0.5,flex:1,textAlign:"center",marginLeft:-8}}>
+        <span style={isLandscapePhone
+          ? {fontWeight:900,fontSize:16,letterSpacing:-0.5,flexShrink:0,whiteSpace:"nowrap"}
+          : {fontWeight:900,fontSize:18,letterSpacing:-0.5,flex:1,textAlign:"center",marginLeft:-8}}>
           ✈️ Flugbuch
         </span>
+        {isLandscapePhone && (
+          <div style={{display:"flex",gap:6,alignItems:"center",flex:1,justifyContent:"center",overflow:"hidden"}}>
+            {headerIconButtons.map(b => (
+              <button key={b.key} onClick={b.onClick} title={b.title} style={headerTileStyle(b.active, true)}>{b.icon}</button>
+            ))}
+          </div>
+        )}
         <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
-          <button onClick={addNewFlight} style={{background:"rgba(34,197,94,0.15)",color:"#4ade80",border:"1px solid rgba(34,197,94,0.25)",borderRadius:20,padding:"7px 10px",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>+ Flug</button>
+          <button onClick={addNewFlight} style={addFlugBtnStyle}>+ Flug</button>
           <button onClick={()=>window.location.href="hilfe.html"} title="Hilfe"
             style={{width:32,height:32,borderRadius:"50%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",color:"#ef4444",fontSize:15,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
             ?
@@ -4509,35 +4545,13 @@ function FlugbuchApp() {
         </div>
       </div>
 
-      {/* Row 2: Import / Backup / Auswahl / Weltkarte / Suchen — 5 quadratische
-          Icon-Buttons, einheitliches Design: grauer Rand standardmässig, die
-          jeweils aktive Kachel (offenes Panel) mit rotem Rand und flächig
-          leicht rot eingefärbtem Hintergrund. Reihenfolge (Sortierrichtung)
-          und die feste Jahres-Gruppierung sind hierher ins Suchen/Sortieren-
-          Panel gewandert, seit Jahr nur noch ein wählbares Gruppieren-Feld
-          unter mehreren ist statt eines fest verdrahteten Extra-Buttons. */}
-      <div style={{padding:"10px 16px 0",display:"flex",gap:8}}>
-        <button onClick={()=>{ setShowImportMenu(m=>!m); }} title="Import"
-          style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:showImportMenu?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${showImportMenu?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:30,cursor:"pointer"}}>
-          📥
-        </button>
-        <button onClick={()=>{ setSelectMode(m=>!m); setSelectedIds(new Set()); setCopyMsg(""); }} title="Auswahl"
-          style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:selectMode?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${selectMode?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:34,cursor:"pointer"}}>
-          {selectMode?"✕":"☑"}
-        </button>
-        <button onClick={()=>setView("worldmap")} title="Weltkarte"
-          style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(255,255,255,0.05)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,color:"#fff",fontSize:30,cursor:"pointer"}}>
-          🗺️
-        </button>
-        <button onClick={()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }} title="Gespeicherte Darstellungen"
-          style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:showViewsMenu?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${showViewsMenu?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:26,cursor:"pointer"}}>
-          💡
-        </button>
-        <button onClick={()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }} title="Suchen/Sortieren"
-          style={{flex:"1 1 0",minWidth:0,aspectRatio:"2/1",boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:searchRowOpen?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${searchRowOpen?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:10,color:"#fff",fontSize:26,cursor:"pointer"}}>
-          🔍
-        </button>
-      </div>
+      {!isLandscapePhone && (
+        <div style={{padding:"10px 16px 0",display:"flex",gap:8}}>
+          {headerIconButtons.map(b => (
+            <button key={b.key} onClick={b.onClick} title={b.title} style={headerTileStyle(b.active, false)}>{b.icon}</button>
+          ))}
+        </div>
+      )}
 
       {showViewsMenu && (
         <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.08)",borderRadius:10,padding:10,maxHeight:340,overflowY:"auto"}}>
