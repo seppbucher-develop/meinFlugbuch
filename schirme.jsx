@@ -12,35 +12,8 @@ function formatFlightHours(sec) {
   const h = Math.floor(m / 60), rem = m % 60;
   return `${h}h ${String(rem).padStart(2, "0")}m`;
 }
-// Aus den tatsächlichen Schirm-Werten der Excel-Daten verifizierte
-// Hersteller-Präfixe — bewusst eine kleine, geprüfte Liste statt eines
-// allgemeinen Herstellerverzeichnisses, um keine falschen Treffer zu
-// riskieren (z.B. ein Modellname, der zufällig mit einem Wort beginnt,
-// das auch ein Herstellername sein könnte).
-const KNOWN_PREFIXES = ["UP", "Supair", "Ozone", "Nova", "MacPara"];
 const TYP_OPTIONS = ["GS", "BP", "SF", "NS", "Div"];
 const TYP_LABELS = { GS: "GS (Gleitschirm)", BP: "BP (Biplace)", SF: "SF (Speedflyer)", NS: "NS (Notschirm)", Div: "Div (Diverses)" };
-// Bekannte Falschschreibungen/Dubletten im Schirm-Feld — vom Nutzer
-// bestätigte Korrekturen (04.2026). Nur als Vorschlag: erscheint auf der
-// Seite nur, solange noch ein Schirm-Eintrag mit dem "von"-Namen existiert.
-const KNOWN_CORRECTIONS = [
-  { from: "Advance Sigma 12", to: "Sigma 12 DLS" },
-  { from: "Advance Sigma10", to: "Sigma 10" },
-  { from: "Advance Sigma11", to: "Sigma 11" },
-  { from: "Gr M", to: "Vision" },
-  { from: "PI23", to: "Pi 23" },
-  { from: "Pi23", to: "Pi 23" },
-];
-
-function splitHerstellerFromName(raw) {
-  const name = (raw || "").trim();
-  for (const prefix of KNOWN_PREFIXES) {
-    const re = new RegExp(`^${prefix}\\s+(.+)$`, "i");
-    const m = name.match(re);
-    if (m) return { hersteller: prefix, cleaned: m[1].trim() };
-  }
-  return { hersteller: "", cleaned: name };
-}
 
 async function loadAllFlights() {
   const keys = await window.storage.list("flight:");
@@ -139,9 +112,9 @@ function SchirmeApp() {
   };
 
   // Benennt einen Schirm-Namen bei ALLEN betroffenen Flügen im Flugbuch um
-  // — verwendet sowohl beim manuellen Umbenennen im Editor als auch von der
-  // Schnellkorrektur-Liste unten. Aktualisiert bewusst weiterhin den
-  // Flug-Text (glider), da flugbuch.jsx selbst nur diesen Text kennt und
+  // — verwendet beim manuellen Umbenennen im Editor sowie beim Zuordnen
+  // eines verwaisten Namens (reassignOrphan). Aktualisiert bewusst weiterhin
+  // den Flug-Text (glider), da flugbuch.jsx selbst nur diesen Text kennt und
   // anzeigt/durchsucht — die schirmId ist eine zusätzliche, für flugbuch.jsx
   // unsichtbare Absicherung nur für diese Seite hier. Gibt die Anzahl
   // aktualisierter Flüge zurück.
@@ -158,153 +131,6 @@ function SchirmeApp() {
     const updated = affected.map(f => ({ ...f, glider: cleanedNewName }));
     await Promise.all(updated.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
     return updated.length;
-  };
-
-  // Führt Schirme mit gleichem (getrimmtem) Namen zusammen — jetzt anhand
-  // der schirmId, nicht mehr per Text: robust auch dann, wenn beide
-  // Einträge zwischenzeitlich exakt denselben Namen tragen (z.B. weil
-  // einer davon einmal geöffnet und ungewollt getrimmt gespeichert wurde).
-  // Alle Flüge, die per schirmId ODER (als Rückfallebene) per Namens-Text
-  // auf den "anderen" Eintrag verweisen, werden auf den kanonischen
-  // Eintrag umgehängt — Text UND schirmId werden beide aktualisiert.
-  const normalizeName = (n) => (n || "").trim().replace(/\s+/g, " ");
-  const mergeDuplicates = async () => {
-    setBusy(true); setMsg(null);
-    try {
-      let fl = flights || await loadAllFlights();
-      const countFor = (s) => fl.filter(f =>
-        f.customFields?.schirmId === s.id || (f.glider || "").trim() === (s.name || "").trim()
-      ).length;
-      const groups = {};
-      schirme.forEach(s => {
-        const key = normalizeName(s.name).toLowerCase();
-        (groups[key] = groups[key] || []).push(s);
-      });
-      const dupGroups = Object.values(groups).filter(g => g.length > 1);
-      if (!dupGroups.length) {
-        setMsg({ type: "ok", text: "Keine doppelten Schirm-Namen gefunden." });
-        setBusy(false);
-        return;
-      }
-      let mergedGroups = 0, updatedFlightsTotal = 0;
-      let nextSchirme = [...schirme];
-      for (const group of dupGroups) {
-        const withCounts = group.map(s => ({ s, count: countFor(s) }));
-        withCounts.sort((a, b) => b.count - a.count);
-        const canonical = withCounts[0].s;
-        const others = withCounts.slice(1).map(x => x.s);
-        for (const other of others) {
-          // Jeder Flug, der per ID ODER per Text auf "other" verweist, wird
-          // vollständig auf "canonical" umgehängt (Text UND schirmId).
-          const affected = fl.filter(f =>
-            f.customFields?.schirmId === other.id || (f.glider || "").trim() === (other.name || "").trim()
-          );
-          if (affected.length) {
-            const updated = affected.map(f => ({
-              ...f, glider: canonical.name,
-              customFields: { ...(f.customFields || {}), schirmId: canonical.id },
-            }));
-            await Promise.all(updated.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
-            const byId = new Map(updated.map(f => [f.id, f]));
-            fl = fl.map(f => byId.get(f.id) || f);
-            updatedFlightsTotal += updated.length;
-          }
-        }
-        // Fehlende Angaben (Hersteller/Typ/letzterCheck/Material-Link) aus
-        // den Dubletten übernehmen, falls beim Ziel-Eintrag noch leer.
-        const merged = { ...canonical };
-        for (const other of others) {
-          if (!merged.hersteller && other.hersteller) merged.hersteller = other.hersteller;
-          if (!merged.typ && other.typ) merged.typ = other.typ;
-          if (!merged.letzterCheck && other.letzterCheck) merged.letzterCheck = other.letzterCheck;
-          if (!merged.materialEntryId && other.materialEntryId) merged.materialEntryId = other.materialEntryId;
-        }
-        nextSchirme = nextSchirme.map(s => s.id === canonical.id ? merged : s);
-        mergedGroups++;
-      }
-      await saveSchirme(nextSchirme);
-      setFlights(fl);
-      setMsg({ type: "ok", text: `✓ ${mergedGroups} Dublette(n) zusammengeführt, ${updatedFlightsTotal} Flüge umgehängt (Text + interne Referenz). Die übrig gebliebenen Einträge mit 0 Flügen kannst du jetzt löschen.` });
-    } catch (e) {
-      setMsg({ type: "error", text: "Fehler beim Zusammenführen: " + (e.message || String(e)) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const applyCorrection = async (from, to) => {
-    setBusy(true); setMsg(null);
-    try {
-      const count = await renameGliderEverywhere(from, to);
-      const next = schirme.map(s => s.name === from ? { ...s, name: to } : s);
-      await saveSchirme(next);
-      let updatedFl = await loadAllFlights();
-      // Nach der Textumbenennung sofort auch die schirmId nachziehen, damit
-      // die Zählung ab jetzt wieder robust über die ID läuft.
-      const targetEntry = next.find(s => s.name === to);
-      if (targetEntry) {
-        const { flights: relinked } = await relinkAll(updatedFl, [targetEntry]);
-        updatedFl = relinked;
-      }
-      setFlights(updatedFl);
-      setMsg({ type: "ok", text: `✓ „${from}" → „${to}": ${count} Flüge aktualisiert.` });
-    } catch (e) {
-      setMsg({ type: "error", text: "Fehler bei der Korrektur: " + (e.message || String(e)) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const runCleanup = async () => {
-    setBusy(true); setMsg(null);
-    try {
-      const fl = flights || await loadAllFlights();
-      const renameMap = {}; // alterName -> {cleaned, hersteller}
-      fl.forEach(f => {
-        const orig = (f.glider || "").trim();
-        if (!orig || renameMap[orig]) return;
-        const { hersteller, cleaned } = splitHerstellerFromName(orig);
-        if (hersteller) renameMap[orig] = { cleaned, hersteller };
-      });
-      const affectedNames = Object.keys(renameMap);
-      if (!affectedNames.length) {
-        setMsg({ type: "ok", text: "Keine bekannten Hersteller-Präfixe im Schirm-Feld gefunden — nichts zu bereinigen." });
-        setBusy(false);
-        return;
-      }
-      let updatedFlights = 0;
-      const flightUpdates = fl
-        .filter(f => renameMap[(f.glider || "").trim()])
-        .map(f => ({
-          ...f, glider: renameMap[(f.glider || "").trim()].cleaned,
-          // Text ändert sich hier — eine evtl. vorhandene schirmId würde
-          // sonst auf den falschen (alten) Eintrag zeigen. Zurückgesetzt,
-          // "Schirme aus Flugbuch erzeugen" verknüpft danach sauber neu.
-          customFields: { ...(f.customFields || {}), schirmId: undefined },
-        }));
-      await Promise.all(flightUpdates.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
-      updatedFlights = flightUpdates.length;
-
-      // Schirme-Liste entsprechend anlegen/aktualisieren.
-      const next = [...schirme];
-      for (const [origName, { cleaned, hersteller }] of Object.entries(renameMap)) {
-        const existing = next.find(s => s.name === cleaned || s.name === origName);
-        if (existing) {
-          existing.name = cleaned;
-          if (!existing.hersteller) existing.hersteller = hersteller;
-        } else {
-          next.push({ id: `schirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`, name: cleaned, hersteller, typ: "", letzterCheck: "", materialEntryId: null });
-        }
-      }
-      await saveSchirme(next);
-      const updatedFl = await loadAllFlights();
-      setFlights(updatedFl);
-      setMsg({ type: "ok", text: `✓ ${affectedNames.length} Schirm-Bezeichnung(en) bereinigt, ${updatedFlights} Flüge aktualisiert.` });
-    } catch (e) {
-      setMsg({ type: "error", text: "Fehler bei der Bereinigung: " + (e.message || String(e)) });
-    } finally {
-      setBusy(false);
-    }
   };
 
   // Erzeugt (einmalig, per Klick) für jeden in den Flügen verwendeten
@@ -374,7 +200,7 @@ function SchirmeApp() {
   // passen (weder per Text noch per schirmId) — typischerweise, weil der
   // zugehörige Schirme-Eintrag früher direkt gelöscht statt umbenannt
   // wurde (Löschen hängt die betroffenen Flüge nicht um, im Gegensatz zum
-  // Umbenennen/den Korrektur-Werkzeugen oben). Macht sichtbar, woher ein
+  // Umbenennen). Macht sichtbar, woher ein
   // scheinbar "gelöschter" Schirm-Name in Statistik-Filtern noch stammt.
   const orphanGliders = React.useMemo(() => {
     if (!flights) return [];
@@ -457,16 +283,6 @@ function SchirmeApp() {
           style={{ background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "9px 14px", color: "#4ade80", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
           {busy ? "⏳ …" : "🔄 Schirme aus Flugbuch erzeugen"}
         </button>
-        <button onClick={runCleanup} disabled={busy}
-          title="Sucht bekannte Hersteller-Präfixe (UP, Supair, Ozone, Nova, MacPara) im Schirm-Feld der Flüge, entfernt sie dort und trägt sie hier als Hersteller ein."
-          style={{ background: "rgba(250,204,21,0.12)", border: "1px solid rgba(250,204,21,0.3)", borderRadius: 8, padding: "9px 14px", color: "#facc15", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
-          {busy ? "⏳ …" : "🧹 Hersteller aus Schirm-Namen bereinigen"}
-        </button>
-        <button onClick={mergeDuplicates} disabled={busy}
-          title="Führt Schirme mit optisch gleichem, aber intern leicht unterschiedlichem Namen zusammen (z.B. durch ein Leerzeichen). Ein Eintrag bekommt danach alle Flüge, der/die anderen 0."
-          style={{ background: "rgba(167,139,250,0.12)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 8, padding: "9px 14px", color: "#a78bfa", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
-          {busy ? "⏳ …" : "🔗 Doppelte Schirme zusammenführen"}
-        </button>
       </div>
 
       {msg && (
@@ -508,26 +324,6 @@ function SchirmeApp() {
           ))}
         </div>
       )}
-
-      {(() => {
-        const existingNames = new Set(schirme.map(s => s.name));
-        const pending = KNOWN_CORRECTIONS.filter(c => existingNames.has(c.from));
-        if (!pending.length) return null;
-        return (
-          <div style={{ margin: "0 16px 14px", background: "rgba(125,211,252,0.06)", border: "1px solid rgba(125,211,252,0.2)", borderRadius: 12, padding: 14 }}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#7dd3fc", marginBottom: 10 }}>Vorgeschlagene Korrekturen</div>
-            {pending.map(c => (
-              <div key={c.from} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 6 }}>
-                <span style={{ fontSize: 12, color: "rgba(232,244,253,0.8)" }}>„{c.from}" → „{c.to}"</span>
-                <button onClick={() => applyCorrection(c.from, c.to)} disabled={busy}
-                  style={{ flexShrink: 0, background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "5px 12px", color: "#4ade80", fontSize: 11, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
-                  Übernehmen
-                </button>
-              </div>
-            ))}
-          </div>
-        );
-      })()}
 
       <div style={{ padding: "0 16px" }}>
         {sortedSchirme.length === 0 && (
