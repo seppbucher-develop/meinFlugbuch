@@ -2246,7 +2246,7 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
   if (isWide) {
     return (
       <div onClick={selectMode ? ()=>onToggleSelect(f.id) : onClick}
-        style={{padding:"9px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",alignItems:"center",gap:8,background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s",whiteSpace:"nowrap",overflow:"hidden"}}
+        style={{padding:"4px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",alignItems:"center",gap:8,background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s",whiteSpace:"nowrap",overflow:"hidden"}}
         onMouseEnter={e=>{ if(!isSelected) e.currentTarget.style.background="rgba(255,255,255,0.03)"; }}
         onMouseLeave={e=>{ if(!isSelected) e.currentTarget.style.background="transparent"; }}>
         {selectMode && (
@@ -2277,7 +2277,7 @@ function FlightRow({ f, isLongest, onClick, sortId, selectMode, isSelected, onTo
   // iPhone (original, unchanged 2-line design)
   return (
     <div onClick={selectMode ? ()=>onToggleSelect(f.id) : onClick}
-      style={{padding:"11px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s"}}
+      style={{padding:"5px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",justifyContent:"space-between",alignItems:"center",background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s"}}
       onMouseEnter={e=>{ if(!isSelected) e.currentTarget.style.background="rgba(255,255,255,0.03)"; }}
       onMouseLeave={e=>{ if(!isSelected) e.currentTarget.style.background="transparent"; }}>
       {selectMode && (
@@ -3694,7 +3694,7 @@ function SidebarList({ flights, selectedId, onSelect, longestId }) {
 function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef }) {
   return (
     <div ref={registerRef} onClick={()=>onSelect(f)}
-      style={{padding:"10px 14px",cursor:"pointer",borderBottom:"1px solid rgba(255,255,255,0.04)",background:f.id===selectedId?"rgba(14,165,233,0.12)":"transparent",borderLeft:f.id===selectedId?"3px solid #7dd3fc":"3px solid transparent"}}>
+      style={{padding:"5px 14px",cursor:"pointer",borderBottom:"1px solid rgba(255,255,255,0.04)",background:f.id===selectedId?"rgba(14,165,233,0.12)":"transparent",borderLeft:f.id===selectedId?"3px solid #7dd3fc":"3px solid transparent"}}>
       <div style={{display:"flex",alignItems:"center",gap:6}}>
         {f.id===longestId && <span style={{fontSize:11}}>🏆</span>}
         <span style={{fontSize:11,color:"rgba(232,244,253,0.4)"}}>{f.date}</span>
