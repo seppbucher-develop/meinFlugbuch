@@ -2239,15 +2239,15 @@ function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSele
         </div>
       )}
       {isLongest&&<span style={{fontSize:10,flexShrink:0}}>🏆</span>}
-      <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",flexShrink:0}}>{f.date}</span>
-      <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{f.site||"—"}</span>
-      {f.customFields?.landung && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
+      <span style={{fontSize:11,color:"#a8d8f5",flexShrink:0}}>{f.date}</span>
+      <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{f.site||"—"}</span>
+      {f.customFields?.landung && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
       {f.customFields?.reise && <span style={{fontSize:11,fontWeight:700,color:"#fcd34d",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.customFields.reise}</span>}
-      {f.glider && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
+      {f.glider && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
       <span style={{flex:1}} />
       <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
         {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
-        {distText && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)"}}>{distText}</span>}
+        {distText && <span style={{fontSize:11,color:"#a8d8f5"}}>{distText}</span>}
         <span style={{fontSize:13,fontWeight:600,color:"#7dd3fc"}}>{f.durationStr||"—"}</span>
       </div>
     </div>
@@ -3642,10 +3642,10 @@ function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef }) {
       style={{padding:"5px 14px",cursor:"pointer",borderBottom:"1px solid rgba(255,255,255,0.04)",background:f.id===selectedId?"rgba(14,165,233,0.12)":"transparent",borderLeft:f.id===selectedId?"3px solid #7dd3fc":"3px solid transparent"}}>
       <div style={{display:"flex",alignItems:"center",gap:6}}>
         {f.id===longestId && <span style={{fontSize:11}}>🏆</span>}
-        <span style={{fontSize:11,color:"rgba(232,244,253,0.4)"}}>{f.date}</span>
+        <span style={{fontSize:11,color:"#a8d8f5"}}>{f.date}</span>
         {f.rating>0 && <span style={{fontSize:11}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
       </div>
-      <div style={{fontSize:11,color:"rgba(232,244,253,0.5)",marginTop:2}}>{f.site}</div>
+      <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{f.site}</div>
     </div>
   );
 }
@@ -3822,6 +3822,42 @@ function NewSchirmDialog({ items, onConfirm, onCancel }) {
   );
 }
 
+// Warnt vor dem eigentlichen Import, wenn eine Datei Datum+Startzeit exakt
+// mit einem bereits vorhandenen, schon getrackten Flug teilt, aber unter
+// einem anderen Dateinamen kommt (siehe pendingDateDups) — vermutlich
+// dieselbe Aufzeichnung, nochmal exportiert. "Überspringen" ist die
+// empfohlene, default-hervorgehobene Aktion.
+function DateDupWarningDialog({ items, onImportAnyway, onSkip }) {
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:"#0a1628",borderRadius:16,padding:"18px 16px",maxWidth:420,width:"100%",maxHeight:"85vh",overflowY:"auto",border:"1px solid rgba(255,255,255,0.1)"}}>
+        <div style={{fontSize:15,fontWeight:800,marginBottom:6}}>
+          {items.length===1 ? "Flug vermutlich schon vorhanden" : `${items.length} Flüge vermutlich schon vorhanden`}
+        </div>
+        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:14}}>
+          Gleiches Datum und dieselbe Startzeit wie ein bereits vorhandener Flug mit GPS-Track, aber unter einem anderen Dateinamen — vermutlich dieselbe Aufzeichnung, nochmal exportiert.
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:16}}>
+          {items.map(({item, existing}) => (
+            <div key={item.baseName} style={{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,padding:"10px 12px",fontSize:12}}>
+              <div style={{fontWeight:700,marginBottom:2}}>{item.file.name}</div>
+              <div style={{color:"rgba(232,244,253,0.5)"}}>{item.date} · {item.igcData.startTime} — passt zu Flug „{existing.name}"{existing.site?` (${existing.site})`:""}</div>
+            </div>
+          ))}
+        </div>
+        <button onClick={onSkip}
+          style={{width:"100%",background:"rgba(34,197,94,0.15)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:10,padding:"11px",color:"#4ade80",fontSize:14,fontWeight:700,cursor:"pointer",marginBottom:8}}>
+          Überspringen (empfohlen)
+        </button>
+        <button onClick={onImportAnyway}
+          style={{width:"100%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"9px",color:"rgba(232,244,253,0.6)",fontSize:13,cursor:"pointer"}}>
+          Trotzdem als neue Flüge importieren
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function FlugbuchApp() {
   const isWide = useIsWide();
   const isLandscapePhone = useIsLandscapePhone();
@@ -3956,6 +3992,14 @@ function FlugbuchApp() {
   // damit der Import nach der Bestätigung fortgesetzt werden kann, ohne
   // alle Dateien erneut einzulesen.
   const [pendingNewSchirme, setPendingNewSchirme] = useState(null); // null | [{key, raw, name, hersteller}]
+  // Dateien im aktuellen Batch, deren Datum+Startzeit exakt zu einem
+  // bereits vorhandenen, schon getrackten Flug passen, aber unter einem
+  // ANDEREN Dateinamen ankommen (sonst wäre es ein regulärer Re-Import/
+  // Update über igcFilename, siehe attachIgcToFlight) — typischerweise
+  // dieselbe Aufzeichnung, nochmal aus dem Vario exportiert. Wird vor der
+  // Schirm-Erkennung geprüft (siehe processIGCFiles), damit für übersprungene
+  // Dateien gar nicht erst nach einem neuen Schirm gefragt wird.
+  const [pendingDateDups, setPendingDateDups] = useState(null); // null | [{item, existing}]
   const pendingImportRef = useRef(null);
   const [editData, setEditData] = useState({});
   const [customFieldDefs, setCustomFieldDefs] = useState([]);
@@ -4484,6 +4528,48 @@ function FlugbuchApp() {
     setImporting(false); setImportProgress(null);
   }, [flights, saveFlight, attachIgcToFlight, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
 
+  // Dritter (letzter) Erkennungsschritt vor dem eigentlichen Anlegen von
+  // Flügen/Schirmen — separat, damit er sowohl direkt nach dem Parsen als
+  // auch nach einer Datums-Dubletten-Entscheidung (überspringen/trotzdem
+  // importieren) aufgerufen werden kann, ohne Code zu duplizieren.
+  const detectAndHandleNewSchirme = useCallback(async (parsedList) => {
+    const schirmeList = schirmeListRef.current || [];
+    const norm = s => (s || "").trim().toLowerCase();
+    const unknown = new Map(); // norm(cleaned) -> {key, raw, name, hersteller}
+    for (const p of parsedList) {
+      const { hersteller, cleaned } = splitFirstWordAsHersteller(p.glider);
+      if (!cleaned) continue;
+      const key = norm(cleaned);
+      if (schirmeList.some(s => norm(s.name) === key)) continue; // schon vorhanden
+      if (unknown.has(key)) continue; // im selben Batch schon erfasst
+      unknown.set(key, { key, raw: p.glider, name: cleaned, hersteller });
+    }
+    if (unknown.size) {
+      // Import pausiert hier — noch nichts gespeichert. Wird erst nach
+      // Bestätigung (oder Abbruch) im NewSchirmDialog fortgesetzt.
+      pendingImportRef.current = { parsedList };
+      setPendingNewSchirme([...unknown.values()]);
+      setImporting(false); setImportProgress(null);
+      return;
+    }
+    await runImportLoop(parsedList, null);
+  }, [runImportLoop]);
+
+  // Eine Datei zählt als "vermutlich schon vorhanden", wenn Datum+Startzeit
+  // exakt zu einem bereits gespeicherten, schon getrackten Flug passen —
+  // aber NICHT, wenn der Dateiname übereinstimmt (das ist ein regulärer
+  // Re-Import/Update über igcFilename, siehe attachIgcToFlight) und auch
+  // nicht, wenn der passende Flug noch KEINEN Track hat (dafür sorgt
+  // bereits die bestehende Datums-Zuordnung — dateCandidates — in
+  // runImportLoop). Ziel: dieselbe Aufzeichnung, unter einem anderen
+  // Dateinamen erneut exportiert, legt nicht versehentlich einen zweiten,
+  // komplett separaten Flug an.
+  const findDateTimeDuplicate = (p) => {
+    if (!p.igcData.startTime) return null;
+    if (flights.some(f => f.customFields?.igcFilename === p.baseName)) return null;
+    return flights.find(f => f.track && f.track.length > 1 && f.date === p.date && f.startTime === p.igcData.startTime) || null;
+  };
+
   const processIGCFiles = useCallback(async (igcFiles) => {
     setImporting(true); setImportProgress({done:0,total:igcFiles.length});
     // Frischer Batch → Schirme-Liste neu laden, statt eine evtl. veraltete
@@ -4497,8 +4583,8 @@ function FlugbuchApp() {
 
     // Alle Dateien vorab einlesen/parsen (statt im Import-Loop selbst),
     // damit sich unten — VOR dem eigentlichen Anlegen von Flügen/Schirmen —
-    // schon erkennen lässt, welche Schirm-Namen im Batch neu sind und noch
-    // keinen Treffer in der Schirme-Liste haben.
+    // schon erkennen lässt, welche Dateien vermutlich Dubletten sind und
+    // welche Schirm-Namen im Batch neu sind.
     const parsedList = [];
     for (const file of igcFiles) {
       const text = await file.text();
@@ -4508,27 +4594,32 @@ function FlugbuchApp() {
       parsedList.push({ file, track, date, pilot, glider, igcData, baseName });
     }
 
-    const norm = s => (s || "").trim().toLowerCase();
-    const unknown = new Map(); // norm(cleaned) -> {key, raw, name, hersteller}
+    const dateDups = [];
+    const nonDupList = [];
     for (const p of parsedList) {
-      const { hersteller, cleaned } = splitFirstWordAsHersteller(p.glider);
-      if (!cleaned) continue;
-      const key = norm(cleaned);
-      if (schirmeList.some(s => norm(s.name) === key)) continue; // schon vorhanden
-      if (unknown.has(key)) continue; // im selben Batch schon erfasst
-      unknown.set(key, { key, raw: p.glider, name: cleaned, hersteller });
+      const existing = findDateTimeDuplicate(p);
+      if (existing) dateDups.push({ item: p, existing });
+      else nonDupList.push(p);
     }
-
-    if (unknown.size) {
+    if (dateDups.length) {
       // Import pausiert hier — noch nichts gespeichert. Wird erst nach
-      // Bestätigung (oder Abbruch) im NewSchirmDialog fortgesetzt.
-      pendingImportRef.current = { parsedList };
-      setPendingNewSchirme([...unknown.values()]);
+      // Überspringen/Trotzdem-importieren im DateDupWarningDialog fortgesetzt.
+      pendingImportRef.current = { nonDupList, dateDups };
+      setPendingDateDups(dateDups);
       setImporting(false); setImportProgress(null);
       return;
     }
-    await runImportLoop(parsedList, null);
-  }, [runImportLoop]);
+    await detectAndHandleNewSchirme(parsedList);
+  }, [flights, detectAndHandleNewSchirme]);
+
+  const resolveDateDups = useCallback(async (importAnyway) => {
+    const { nonDupList, dateDups } = pendingImportRef.current || { nonDupList: [], dateDups: [] };
+    const parsedList = importAnyway ? [...nonDupList, ...dateDups.map(d => d.item)] : nonDupList;
+    pendingImportRef.current = null;
+    setPendingDateDups(null);
+    setImporting(true); setImportProgress({done:0,total:parsedList.length});
+    await detectAndHandleNewSchirme(parsedList);
+  }, [detectAndHandleNewSchirme]);
 
   // Nutzer hat den NewSchirmDialog bestätigt (ggf. mit korrigiertem
   // Schirm-Namen/Hersteller) — legt die Einträge an (oder verknüpft mit
@@ -4854,6 +4945,12 @@ function FlugbuchApp() {
 
       {showCsvColumnConfig && (
         <CsvColumnConfigModal columns={csvColumns} onSave={saveCsvColumns} onClose={()=>setShowCsvColumnConfig(false)} />
+      )}
+
+      {pendingDateDups && (
+        <DateDupWarningDialog items={pendingDateDups}
+          onImportAnyway={()=>resolveDateDups(true)}
+          onSkip={()=>resolveDateDups(false)} />
       )}
 
       {pendingNewSchirme && (
