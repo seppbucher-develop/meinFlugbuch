@@ -227,76 +227,73 @@ function angleDiffDeg(a, b) {
   return d > 180 ? 360 - d : d;
 }
 
-// Für einen Trackpunkt i: Geschwindigkeit über ein Zeitfenster von
-// mindestens minWindowSec in JEDE Richtung (nicht nur einen einzelnen
-// Nachbarpunkt) — Basis für den Bestätigungs-Check in
+// Für einen Trackpunkt i: das Zeitfenster [lo,hi], das mindestens
+// minWindowSec in JEDE Richtung um ihn herum abdeckt (nicht nur einen
+// einzelnen Nachbarpunkt) — Basis für die "Geradeausflug"-Erkennung in
 // computeMaxStraightSpeedKmh unten. Zeitbasiert statt punktbasiert, damit
 // das Fenster unabhängig von der Aufzeichnungsrate des jeweiligen Loggers
 // (1s, 4s, …) eine vergleichbare Zeitspanne abdeckt.
-function windowSpeedKmh(track, i, minWindowSec) {
+function timeWindowBounds(track, i, minWindowSec) {
   let lo = i;
   while (lo > 0 && (track[i].timeSec - track[lo-1].timeSec) < minWindowSec) lo--;
   let hi = i;
   while (hi < track.length-1 && (track[hi+1].timeSec - track[i].timeSec) < minWindowSec) hi++;
-  const dt = track[hi].timeSec - track[lo].timeSec;
-  if (dt <= 0) return 0;
-  return (haversineDistKm(track[lo], track[hi]) || 0) / (dt / 3600);
+  return { lo, hi };
 }
 
-// Höchste GPS-Geschwindigkeit im (mehr oder weniger) Geradeausflug. Ein
-// Trackpunkt gilt als "in einer Kurve", wenn die Kursänderungsrate um ihn
-// herum über einem Schwellwert liegt — so werden Spiralen und Wingover
-// zuverlässig ausgeklammert, ohne einen festen Zeitraum/Ort vorab zu kennen
-// (die Kursänderungsrate in einer Spirale/einem Wingover liegt typischerweise
-// deutlich über 15°/s, ein normaler Geradeausflug bzw. sanfte Kurskorrekturen
-// deutlich darunter).
-//
-// Das allein reichte nicht: ein einzelner schlechter GPS-Fix (z.B. kurz vor/
-// nach der Landung, wenn das Gerät kaum noch Sat-Empfang hat) kann für EINEN
-// Punkt einen völlig überzogenen Sprung liefern, dessen Kurs zufällig kaum
-// vom vorherigen abweicht — an einem echten Fall (Landung, Höhe über
-// mehrere Sekunden praktisch konstant, Nachbarpunkte alle 15-30 km/h) lag
-// die Kursänderung bei nur 2-3°/s, die Ein-Sekunden-"Geschwindigkeit" aber
-// bei fast 150 km/h. Deshalb zusätzlich ein Bestätigungs-Check: die
-// Spitzengeschwindigkeit über die einzelne Sekunde muss durch die
-// Geschwindigkeit über ein grösseres Zeitfenster um denselben Punkt
-// (windowSpeedKmh, mind. 3s in jede Richtung) einigermassen gedeckt sein —
-// ein isolierter Einzelpunkt-Ausreisser fällt darin sofort auf sein
-// tatsächliches (deutlich niedrigeres) Tempo zurück, eine echte schnelle
-// Passage bleibt auch über mehrere Sekunden hinweg schnell.
-//
-// Auch das reichte nicht ganz: bei einem zweiten realen Fall lag der
-// Ausreisser (ebenfalls ~150 km/h) inmitten einer echten Spirale/eines
-// schnellen Abstiegs (Höhe fiel dort insgesamt deutlich, Nachbarpunkte alle
-// stark schwankende Kursänderungen) — an genau diesem einen Punkt war die
-// Kursänderung zufällig trotzdem gering, und die 3s-Fenstergeschwindigkeit
-// bestätigte den Ausreisser sogar (Fenster lag selbst noch bei ~100 km/h,
-// da auch die Nachbarpunkte durch denselben Effekt überhöht waren). Ein
-// Gleitschirm erreicht auch im Vollgas-Spiralsturz keine derart hohen
-// GPS-Bodengeschwindigkeiten — deshalb zusätzlich ein deutlich tieferer
-// Plausibilitäts-Deckel als zuvor (150 km/h erwies sich in der Praxis als
-// zu hoch, um diese Art Ausreisser zuverlässig zu erkennen).
-const TURN_RATE_THRESHOLD_DEG_PER_SEC = 15;
-const SPEED_CONFIRM_WINDOW_SEC = 3;
-const SPEED_CONFIRM_MIN_RATIO = 0.6;
+// Ein Fenster [lo,hi] gilt als "Geradeausflug", wenn JEDE einzelne
+// Kurssegment-Richtung darin innerhalb von corridorDeg der Gesamt-Peilung
+// track[lo]->track[hi] bleibt. Das ist die eigentliche Spiralen-/Wingover-/
+// Thermikkreis-Erkennung: eine echte Kurve, Spirale, ein Wingover oder ein
+// schneller Thermikkreis kann diesen Test nie erfüllen, weil die
+// Kursrichtung darin laufend um mehr als corridorDeg abweicht — auch wenn
+// ein einzelner Punkt darin rein zufällig eine kurzzeitig unauffällige
+// Punkt-zu-Punkt-Kursänderung zeigt. Genau das war die Schwäche einer
+// früheren, rein punktbasierten Version dieses Algorithmus: an zwei realen
+// Flügen erzeugte je ein einzelner schlechter GPS-Fix eine völlig
+// überzogene Ein-Sekunden-"Geschwindigkeit" (~150 km/h) mit einer zufällig
+// geringen Kursänderung an genau diesem einen Punkt — einmal kurz vor der
+// Landung (Höhe praktisch konstant), einmal mitten in einer echten Spirale
+// (an genau diesem Punkt zufällig kaum Kursänderung, obwohl die
+// unmittelbaren Nachbarn stark schwankende Kursänderungen von 15-150°/s
+// zeigten). Die fensterweite Prüfung über mindestens SPEED_WINDOW_SEC
+// Sekunden erkennt beide Fälle zuverlässig: eine Spirale (mindestens ein
+// bis zwei volle, oft mehrere Kreise) hält niemals über SPEED_WINDOW_SEC
+// Sekunden hinweg eine Kursrichtung innerhalb von ±SPEED_CORRIDOR_DEG.
+function isWindowStraight(track, lo, hi, corridorDeg) {
+  if (hi - lo < 2) return true; // zu kurz, um sinnvoll zu beurteilen
+  const overallHeading = bearingDeg(track[lo], track[hi]);
+  for (let k = lo; k < hi; k++) {
+    if (angleDiffDeg(bearingDeg(track[k], track[k+1]), overallHeading) > corridorDeg) return false;
+  }
+  return true;
+}
+
+// Höchste GPS-Geschwindigkeit im (mehr oder weniger) Geradeausflug — siehe
+// isWindowStraight oben für die Herleitung der beiden Konstanten. Die
+// "Messdistanz" für die Geschwindigkeit ist bewusst nicht der einzelne
+// 1-Sekunden-Schritt, sondern das ganze bestätigt gerade Fenster
+// (track[lo] bis track[hi]): das mittelt einzelne GPS-Positionsfehler
+// automatisch heraus, statt ihnen wie ein Ein-Punkt-Vergleich schutzlos
+// ausgesetzt zu sein.
+const SPEED_WINDOW_SEC = 4;
+const SPEED_CORRIDOR_DEG = 15;
+// Reine Sicherheitsmarge für den unwahrscheinlichen Fall, dass trotz allem
+// noch ein Ausreisser durchrutscht — ein Gleitschirm erreicht auch im
+// Vollgas-Speedbar-Geradeausflug mit starkem Rückenwind keine höheren
+// GPS-Bodengeschwindigkeiten.
 const PLAUSIBLE_MAX_SPEED_KMH = 120;
 function computeMaxStraightSpeedKmh(track) {
   if (!track || track.length < 3) return 0;
   let maxSpeed = 0;
   for (let i = 1; i < track.length - 1; i++) {
-    const dtBefore = track[i].timeSec - track[i-1].timeSec;
-    const dtAfter = track[i+1].timeSec - track[i].timeSec;
-    if (dtBefore <= 0 || dtAfter <= 0) continue;
-    const headingBefore = bearingDeg(track[i-1], track[i]);
-    const headingAfter = bearingDeg(track[i], track[i+1]);
-    const turnRate = angleDiffDeg(headingBefore, headingAfter) / ((dtBefore + dtAfter) / 2);
-    if (turnRate > TURN_RATE_THRESHOLD_DEG_PER_SEC) continue; // Kurve/Spirale/Wingover — ausklammern
-    const speedKmh = (haversineDistKm(track[i-1], track[i]) || 0) / (dtBefore / 3600);
+    const { lo, hi } = timeWindowBounds(track, i, SPEED_WINDOW_SEC);
+    if (hi === lo) continue;
+    if (!isWindowStraight(track, lo, hi, SPEED_CORRIDOR_DEG)) continue; // Kurve/Spirale/Wingover/Thermikkreis — ausklammern
+    const dt = track[hi].timeSec - track[lo].timeSec;
+    const speedKmh = (haversineDistKm(track[lo], track[hi]) || 0) / (dt / 3600);
     if (speedKmh > PLAUSIBLE_MAX_SPEED_KMH) continue;
-    if (speedKmh <= maxSpeed) continue;
-    const confirmedSpeed = windowSpeedKmh(track, i, SPEED_CONFIRM_WINDOW_SEC);
-    if (confirmedSpeed < speedKmh * SPEED_CONFIRM_MIN_RATIO) continue; // einzelner GPS-Ausreisser — ausklammern
-    maxSpeed = speedKmh;
+    if (speedKmh > maxSpeed) maxSpeed = speedKmh;
   }
   return +maxSpeed.toFixed(1);
 }
