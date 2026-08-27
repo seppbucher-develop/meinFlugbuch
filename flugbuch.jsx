@@ -4320,22 +4320,19 @@ function FlugbuchApp() {
     try { await window.storage.set(`flight:${f.id}`, JSON.stringify(f)); } catch {}
   }, []);
 
-  // Einmalige Nachrechnen-Funktion für bereits importierte Flüge: Max Speed
-  // gibt es erst seit diesem Update, und Max.Steigen/Max.Sinken/Max.Steigen
-  // 20s können bei einzelnen Flügen aus der Zeit vor deren Einführung
-  // ebenfalls noch fehlen. Läuft über alle Flüge mit echtem GPS-Track und
-  // berechnet aus genau diesem Track (kein erneuter IGC-Import nötig) nach.
-  //
-  // Max Speed wird dabei IMMER neu berechnet und ein bereits vorhandener
-  // Wert bei Bedarf überschrieben — anders als bei den übrigen Feldern hier,
-  // weil die erste Version des Algorithmus einzelne schlechte GPS-Fixes
-  // (typischerweise kurz vor/nach der Landung) fälschlich als Rekord-
-  // geschwindigkeit übernehmen konnte; ein erneuter Lauf mit dem
-  // korrigierten Algorithmus muss solche bereits gespeicherten Fehlwerte
-  // korrigieren können, nicht nur leere Felder auffüllen. Max.Steigen/
-  // Max.Sinken/Max.Steigen 20s existieren dagegen schon länger und können
-  // manuell korrigiert worden sein — dort bleibt die alte "nur auffüllen,
-  // nie überschreiben"-Regel wie beim normalen Import.
+  // Einmalige Nachrechnen-Funktion für bereits importierte Flüge: läuft über
+  // alle Flüge mit echtem GPS-Track und berechnet Max Speed, Max.Steigen,
+  // Max.Steigen 20s und Max.Sinken direkt aus genau diesem Track neu (kein
+  // erneuter IGC-Import nötig) — alle vier Felder werden dabei IMMER neu
+  // berechnet und ein bereits vorhandener Wert bei Bedarf überschrieben,
+  // nicht nur leere Felder aufgefüllt. Das ist bewusst so gewählt (statt der
+  // "nur auffüllen"-Regel des normalen Imports): eine manuelle Korrektur
+  // ausgerechnet dieser vier Track-Werte ist unwahrscheinlich, während ein
+  // erneuter Lauf hier gezielt auch bereits gespeicherte Fehlwerte aus einer
+  // älteren, ungenaueren Version des jeweiligen Algorithmus korrigieren
+  // können muss (siehe Max Speed: ein einzelner schlechter GPS-Fix, z.B.
+  // kurz vor der Landung, konnte in der ersten Version fälschlich als
+  // Rekordgeschwindigkeit übernommen werden).
   const recomputeTrackStats = useCallback(async () => {
     setRecomputeResult({ running: true });
     const trackedFlights = flights.filter(f => f.track && f.track.length > 1);
@@ -4344,15 +4341,14 @@ function FlugbuchApp() {
     for (const f of trackedFlights) {
       const cf = { ...(f.customFields||{}) };
       const patch = {};
+      let cfChanged = false;
       const v = computeMaxStraightSpeedKmh(f.track);
       if (v && v !== f.maxSpeedKmh) { patch.maxSpeedKmh = v; speedCount++; }
-      if (!(cf.maxSteigen||"").trim() || !(cf.maxSteigen20||"").trim() || !(cf.maxSinken||"").trim()) {
-        const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
-        if (!(cf.maxSteigen||"").trim() && maxClimb) { cf.maxSteigen = String(maxClimb); steigenCount++; }
-        if (!(cf.maxSteigen20||"").trim() && maxClimb20) { cf.maxSteigen20 = String(maxClimb20); steigen20Count++; }
-        if (!(cf.maxSinken||"").trim() && maxSinkRate) { cf.maxSinken = String(maxSinkRate); sinkenCount++; }
-        patch.customFields = cf;
-      }
+      const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
+      if (parseFloat(cf.maxSteigen) !== maxClimb) { cf.maxSteigen = String(maxClimb); steigenCount++; cfChanged = true; }
+      if (parseFloat(cf.maxSteigen20) !== maxClimb20) { cf.maxSteigen20 = String(maxClimb20); steigen20Count++; cfChanged = true; }
+      if (parseFloat(cf.maxSinken) !== maxSinkRate) { cf.maxSinken = String(maxSinkRate); sinkenCount++; cfChanged = true; }
+      if (cfChanged) patch.customFields = cf;
       if (Object.keys(patch).length) {
         const upd = { ...f, ...patch };
         await saveFlight(upd);
@@ -5095,15 +5091,14 @@ function FlugbuchApp() {
       )}
 
       {/* Einmalige Nachrechnen-Funktion für bereits importierte Flüge (siehe
-          recomputeTrackStats) — Max Speed wird IMMER neu berechnet (auch zur
-          Korrektur bereits gespeicherter Fehlwerte aus der ersten Version des
-          Algorithmus), Max.Steigen/Max.Sinken/Max.Steigen 20s werden nur bei
-          älteren Flügen ergänzt, bei denen sie noch fehlen. Kein erneuter
-          IGC-Import nötig, rechnet direkt aus dem bereits gespeicherten Track. */}
+          recomputeTrackStats) — Max Speed, Max.Steigen, Max.Steigen 20s und
+          Max.Sinken werden IMMER neu aus dem bereits gespeicherten Track
+          berechnet (auch zur Korrektur bereits gespeicherter Fehlwerte),
+          kein erneuter IGC-Import nötig. */}
       {showImportMenu && (
         <div style={{margin:"6px 16px 0"}}>
           <button onClick={recomputeTrackStats} disabled={recomputeResult?.running}
-            title="Für alle Flüge mit GPS-Track: Max Speed direkt aus dem gespeicherten Track neu berechnen (korrigiert auch bereits gespeicherte Fehlwerte), fehlende Werte bei Max.Steigen, Max.Steigen 20s und Max.Sinken ergänzen. Dort bereits vorhandene (auch manuell korrigierte) Werte bleiben unverändert."
+            title="Für alle Flüge mit GPS-Track: Max Speed, Max.Steigen, Max.Steigen 20s und Max.Sinken direkt aus dem gespeicherten Track neu berechnen — korrigiert auch bereits gespeicherte Werte (z.B. aus einer älteren, ungenaueren Version des Algorithmus)."
             style={{width:"100%",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.2)",borderRadius:8,padding:"7px 10px",color:"#7dd3fc",fontSize:11,fontWeight:600,cursor:recomputeResult?.running?"default":"pointer"}}>
             {recomputeResult?.running ? "⏳ Berechne…" : "🔁 Max Speed/Steigen/Sinken für bestehende Flüge nachrechnen"}
           </button>
@@ -5114,7 +5109,7 @@ function FlugbuchApp() {
         <div style={{margin:"8px 16px 0",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
           <span style={{fontSize:12,color:"#7dd3fc"}}>
             {recomputeResult.speed || recomputeResult.steigen || recomputeResult.steigen20 || recomputeResult.sinken
-              ? `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — ${recomputeResult.speed}× Max Speed neu berechnet, ergänzt: ${recomputeResult.steigen}× Max.Steigen, ${recomputeResult.steigen20}× Max.Steigen 20s, ${recomputeResult.sinken}× Max.Sinken.`
+              ? `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — neu berechnet: ${recomputeResult.speed}× Max Speed, ${recomputeResult.steigen}× Max.Steigen, ${recomputeResult.steigen20}× Max.Steigen 20s, ${recomputeResult.sinken}× Max.Sinken.`
               : `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — überall bereits aktuell, nichts zu ändern.`}
           </span>
           <button onClick={()=>setRecomputeResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
