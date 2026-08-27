@@ -3771,6 +3771,57 @@ function DateAmbiguousResolver({ item, onAssign, onCreateNew, onClose, descripti
   );
 }
 
+// Zeigt, bevor ein IGC-Import Flüge/Schirme tatsächlich anlegt, für jeden
+// im Batch neu auftauchenden (noch nicht in der Schirme-Liste vorhandenen)
+// Schirm-Namen eine Bestätigung mit editierbaren Feldern Schirm/Hersteller
+// — vorausgefüllt mit dem Vorschlag aus splitFirstWordAsHersteller. Verhindert
+// stilles Fehlanlegen (siehe Bug: "Artik R 2" wurde bisher ungefragt in
+// Hersteller "Artik"/Schirm "R 2" zerlegt), ohne die automatische Erkennung
+// für tatsächlich bekannte Hersteller abzuschaffen.
+function NewSchirmDialog({ items, onConfirm, onCancel }) {
+  const [edited, setEdited] = useState(() => items.map(it => ({ name: it.name, hersteller: it.hersteller })));
+  const setField = (i, field, value) => setEdited(prev => prev.map((e, idx) => idx === i ? { ...e, [field]: value } : e));
+  return (
+    <div onClick={onCancel} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div onClick={e=>e.stopPropagation()}
+        style={{background:"#0a1628",borderRadius:16,padding:"18px 16px",maxWidth:420,width:"100%",maxHeight:"85vh",overflowY:"auto",border:"1px solid rgba(255,255,255,0.1)"}}>
+        <div style={{fontSize:15,fontWeight:800,marginBottom:6}}>
+          {items.length===1 ? "Neuer Schirm gefunden" : `${items.length} neue Schirme gefunden`}
+        </div>
+        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:14}}>
+          Aus der IGC-Datei erkannt, aber noch nicht in deiner Schirme-Liste. Bitte prüfen/ergänzen — Hersteller lässt sich aus der Datei nicht immer sicher bestimmen.
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:16}}>
+          {items.map((it, i) => (
+            <div key={it.key} style={{background:"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,padding:"10px 12px"}}>
+              <div style={{fontSize:10,color:"rgba(232,244,253,0.4)",marginBottom:8,fontFamily:"monospace"}}>Original: „{it.raw}"</div>
+              <div style={{marginBottom:8}}>
+                <div style={{fontSize:10,color:"rgba(232,244,253,0.4)",marginBottom:3}}>Schirm</div>
+                <input value={edited[i].name} onChange={e=>setField(i,"name",e.target.value)}
+                  style={{width:"100%",boxSizing:"border-box",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:8,padding:"8px 10px",color:"#e8f4fd",fontSize:13,fontWeight:700}} />
+              </div>
+              <div>
+                <div style={{fontSize:10,color:"rgba(232,244,253,0.4)",marginBottom:3}}>Hersteller</div>
+                <input value={edited[i].hersteller} onChange={e=>setField(i,"hersteller",e.target.value)}
+                  placeholder="z.B. Niviuk"
+                  style={{width:"100%",boxSizing:"border-box",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.15)",borderRadius:8,padding:"8px 10px",color:"#e8f4fd",fontSize:13}} />
+              </div>
+            </div>
+          ))}
+        </div>
+        <button onClick={()=>onConfirm(edited)}
+          style={{width:"100%",background:"rgba(34,197,94,0.15)",border:"1px solid rgba(34,197,94,0.3)",borderRadius:10,padding:"11px",color:"#4ade80",fontSize:14,fontWeight:700,cursor:"pointer",marginBottom:8}}>
+          ✓ Übernehmen & Import fortsetzen
+        </button>
+        <button onClick={onCancel}
+          style={{width:"100%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"9px",color:"rgba(232,244,253,0.6)",fontSize:13,cursor:"pointer"}}>
+          Import abbrechen
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function FlugbuchApp() {
   const isWide = useIsWide();
   const isLandscapePhone = useIsLandscapePhone();
@@ -3898,6 +3949,14 @@ function FlugbuchApp() {
   // MULTIPLE existing (track-less) flights by date — resolved one at a
   // time via a picker rather than guessing which flight each belongs to.
   const [pendingDateAmbiguous, setPendingDateAmbiguous] = useState([]); // [{file, date, candidates}]
+  // Schirme, die im aktuellen IGC-Batch neu auftauchen (noch kein
+  // Namens-Treffer in der Schirme-Liste) — vor dem eigentlichen Anlegen der
+  // Flüge/Schirme per NewSchirmDialog bestätigt/korrigiert (siehe
+  // processIGCFiles). pendingImportRef hält die bereits geparsten Dateien,
+  // damit der Import nach der Bestätigung fortgesetzt werden kann, ohne
+  // alle Dateien erneut einzulesen.
+  const [pendingNewSchirme, setPendingNewSchirme] = useState(null); // null | [{key, raw, name, hersteller}]
+  const pendingImportRef = useRef(null);
   const [editData, setEditData] = useState({});
   const [customFieldDefs, setCustomFieldDefs] = useState([]);
   const [showFieldEditor, setShowFieldEditor] = useState(false);
@@ -4207,9 +4266,20 @@ function FlugbuchApp() {
   // (ohne Hersteller-Wort, falls einer erkannt wurde) und die schirmId
   // zurück, die dann in customFields.schirmId abgelegt wird, damit die
   // Schirme-Seite den Flug robust zuordnen kann.
-  const resolveSchirmForGlider = useCallback(async (rawGlider) => {
+  // overrideMap (optional): Map<normalisierter Schirm-Vorschlag, {id,name}>
+  // aus einem gerade eben per NewSchirmDialog bestätigten Batch — greift
+  // VOR der Namens-Suche, damit ein im Dialog umbenannter Schirm (der
+  // Vorschlag "cleaned" stimmt dann nicht mehr mit dem Eintragsnamen
+  // überein) trotzdem gefunden wird statt ein zweites Mal angelegt zu
+  // werden.
+  const resolveSchirmForGlider = useCallback(async (rawGlider, overrideMap) => {
     const { hersteller, cleaned } = splitFirstWordAsHersteller(rawGlider);
     if (!cleaned) return { name: "", schirmId: null };
+    const norm = s => (s || "").trim().toLowerCase();
+    if (overrideMap && overrideMap.has(norm(cleaned))) {
+      const ov = overrideMap.get(norm(cleaned));
+      return { name: ov.name, schirmId: ov.id };
+    }
     let list = schirmeListRef.current;
     if (!list) {
       try {
@@ -4218,7 +4288,6 @@ function FlugbuchApp() {
       } catch (e) { console.error("Schirme-Liste laden fehlgeschlagen:", e); list = []; }
       schirmeListRef.current = list;
     }
-    const norm = s => (s || "").trim().toLowerCase();
     let entry = list.find(s => norm(s.name) === norm(cleaned));
     let changed = false;
     if (entry) {
@@ -4246,7 +4315,7 @@ function FlugbuchApp() {
 
   // Applies parsed IGC data onto an existing flight (shared by both the
   // filename-match and the date-match paths, so they stay in sync).
-  const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, igcData, igcFilename) => {
+  const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, igcData, igcFilename, overrideMap) => {
     const cf = { ...(existing.customFields||{}) };
     // Gleiche Regel wie der Typ-Auto-Effekt in FlightDetail: nur setzen,
     // wenn noch kein Typ vorhanden ist und der Flug nicht explizit vom
@@ -4272,7 +4341,7 @@ function FlugbuchApp() {
     // Schirme-Seite korrigiert) wird hier nie überschrieben.
     let cleanedGlider = "";
     if (!cf.schirmId) {
-      const resolved = await resolveSchirmForGlider(glider);
+      const resolved = await resolveSchirmForGlider(glider, overrideMap);
       cleanedGlider = resolved.name;
       if (resolved.schirmId) cf.schirmId = resolved.schirmId;
     }
@@ -4320,11 +4389,12 @@ function FlugbuchApp() {
     if (selected?.id===updated.id) setSelected(updated);
   }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
 
-  const processIGCFiles = useCallback(async (igcFiles) => {
-    setImporting(true); setImportProgress({done:0,total:igcFiles.length});
-    // Frischer Batch → Schirme-Liste neu laden, statt eine evtl. veraltete
-    // Kopie von einem vorherigen Import weiterzuverwenden.
-    schirmeListRef.current = null;
+  // Zweiter Teil des Imports (nach einer evtl. NewSchirmDialog-Bestätigung)
+  // — arbeitet auf bereits geparsten Dateien, damit ein pausierter Import
+  // nach der Bestätigung nicht alle Dateien erneut einlesen/parsen muss.
+  // overrideMap: siehe resolveSchirmForGlider — nur gesetzt, wenn gerade
+  // eben neue Schirme im Dialog bestätigt wurden.
+  const runImportLoop = useCallback(async (parsedList, overrideMap) => {
     const newFlights = [];
     let updatedCount = 0;
     const dateAmbiguous = [];
@@ -4335,12 +4405,8 @@ function FlugbuchApp() {
       const n = /^\d+$/.test(f.name||"") ? parseInt(f.name, 10) : 0;
       return n > m ? n : m;
     }, 0);
-    for (let i=0; i<igcFiles.length; i++) {
-      const file = igcFiles[i];
-      const text = await file.text();
-      const { track, date, pilot, glider, tzOffsetHours } = parseIGC(text);
-      const igcData = analyzeIGC(track, tzOffsetHours, date);
-      const baseName = file.name.replace(/\.igc$/i,"");
+    for (let i=0; i<parsedList.length; i++) {
+      const { file, track, date, pilot, glider, igcData, baseName } = parsedList[i];
       // Matched via the stored igcFilename (Detail-only field), not the
       // flight's Nummer — "Nummer" is always a plain sequential number
       // now, never the raw filename, so re-importing a corrected file
@@ -4356,7 +4422,7 @@ function FlugbuchApp() {
         // cleared) never got a chance to be recalculated. Now it fills in
         // anything currently blank, without touching values that are
         // already set (manually or from a previous import).
-        await attachIgcToFlight(existing, track, date, pilot, glider, igcData, baseName);
+        await attachIgcToFlight(existing, track, date, pilot, glider, igcData, baseName, overrideMap);
         updatedCount++;
       } else {
         // No filename match — try matching by date instead, but only
@@ -4365,7 +4431,7 @@ function FlugbuchApp() {
         // silently overwritten just because the date happens to match).
         const dateCandidates = flights.filter(f => f.date===dateStr && (!f.track || f.track.length<=1));
         if (dateCandidates.length === 1) {
-          await attachIgcToFlight(dateCandidates[0], track, date, pilot, glider, igcData, baseName);
+          await attachIgcToFlight(dateCandidates[0], track, date, pilot, glider, igcData, baseName, overrideMap);
           updatedCount++;
         } else if (dateCandidates.length > 1) {
           // Ambiguous — don't guess. Resolved via a picker after this loop.
@@ -4385,7 +4451,7 @@ function FlugbuchApp() {
           const inferred = await inferPlaceAndCountry(igcData.startPt, igcData.endPt, flights, placeMatchRadiusKm, mapTilerKey);
           // Hersteller-Wort abtrennen und den Rest in der Schirme-Liste
           // finden/anlegen — siehe resolveSchirmForGlider oben.
-          const { name: cleanedGlider, schirmId } = await resolveSchirmForGlider(glider);
+          const { name: cleanedGlider, schirmId } = await resolveSchirmForGlider(glider, overrideMap);
           const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr), pdfOnly:false,
             date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:inferred.site||"",glider:cleanedGlider||"",
             startTime:"", endTime:"", comment:"", rating:0, notes:"", track,
@@ -4409,14 +4475,108 @@ function FlugbuchApp() {
           newFlights.push(newF);
         }
       }
-      setImportProgress({done:i+1,total:igcFiles.length});
+      setImportProgress({done:i+1,total:parsedList.length});
     }
     if (newFlights.length) setFlights(prev=>[...newFlights,...prev].sort((a,b)=>(parseInt((b.name||"").match(/\d+/)?.[0]||"0",10))-(parseInt((a.name||"").match(/\d+/)?.[0]||"0",10))));
     if (dateAmbiguous.length) setPendingDateAmbiguous(dateAmbiguous);
-    setIgcResult({ created: newFlights.length, updated: updatedCount, total: igcFiles.length, deferred: dateAmbiguous.length });
+    setIgcResult({ created: newFlights.length, updated: updatedCount, total: parsedList.length, deferred: dateAmbiguous.length });
     setTimeout(() => setIgcResult(null), 6000);
     setImporting(false); setImportProgress(null);
-  }, [flights, selected, saveFlight, attachIgcToFlight, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
+  }, [flights, saveFlight, attachIgcToFlight, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
+
+  const processIGCFiles = useCallback(async (igcFiles) => {
+    setImporting(true); setImportProgress({done:0,total:igcFiles.length});
+    // Frischer Batch → Schirme-Liste neu laden, statt eine evtl. veraltete
+    // Kopie von einem vorherigen Import weiterzuverwenden.
+    let schirmeList;
+    try {
+      const r = await window.storage.get(SCHIRME_KEY);
+      schirmeList = r ? JSON.parse(r.value) : [];
+    } catch (e) { console.error("Schirme-Liste laden fehlgeschlagen:", e); schirmeList = []; }
+    schirmeListRef.current = schirmeList;
+
+    // Alle Dateien vorab einlesen/parsen (statt im Import-Loop selbst),
+    // damit sich unten — VOR dem eigentlichen Anlegen von Flügen/Schirmen —
+    // schon erkennen lässt, welche Schirm-Namen im Batch neu sind und noch
+    // keinen Treffer in der Schirme-Liste haben.
+    const parsedList = [];
+    for (const file of igcFiles) {
+      const text = await file.text();
+      const { track, date, pilot, glider, tzOffsetHours } = parseIGC(text);
+      const igcData = analyzeIGC(track, tzOffsetHours, date);
+      const baseName = file.name.replace(/\.igc$/i,"");
+      parsedList.push({ file, track, date, pilot, glider, igcData, baseName });
+    }
+
+    const norm = s => (s || "").trim().toLowerCase();
+    const unknown = new Map(); // norm(cleaned) -> {key, raw, name, hersteller}
+    for (const p of parsedList) {
+      const { hersteller, cleaned } = splitFirstWordAsHersteller(p.glider);
+      if (!cleaned) continue;
+      const key = norm(cleaned);
+      if (schirmeList.some(s => norm(s.name) === key)) continue; // schon vorhanden
+      if (unknown.has(key)) continue; // im selben Batch schon erfasst
+      unknown.set(key, { key, raw: p.glider, name: cleaned, hersteller });
+    }
+
+    if (unknown.size) {
+      // Import pausiert hier — noch nichts gespeichert. Wird erst nach
+      // Bestätigung (oder Abbruch) im NewSchirmDialog fortgesetzt.
+      pendingImportRef.current = { parsedList };
+      setPendingNewSchirme([...unknown.values()]);
+      setImporting(false); setImportProgress(null);
+      return;
+    }
+    await runImportLoop(parsedList, null);
+  }, [runImportLoop]);
+
+  // Nutzer hat den NewSchirmDialog bestätigt (ggf. mit korrigiertem
+  // Schirm-Namen/Hersteller) — legt die Einträge an (oder verknüpft mit
+  // einem inzwischen gleichnamigen bestehenden Eintrag, falls der Nutzer
+  // auf einen schon existierenden Namen umbenannt hat) und setzt den
+  // pausierten Import fort.
+  const confirmNewSchirme = useCallback(async (edited) => {
+    const pending = pendingNewSchirme || [];
+    const norm = s => (s || "").trim().toLowerCase();
+    let list = schirmeListRef.current || [];
+    const overrideMap = new Map();
+    let changed = false;
+    pending.forEach((item, i) => {
+      const finalName = (edited[i]?.name || "").trim() || item.name;
+      const finalHersteller = (edited[i]?.hersteller || "").trim();
+      let entry = list.find(s => norm(s.name) === norm(finalName));
+      if (!entry) {
+        entry = { id: `schirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${i}`,
+          name: finalName, hersteller: finalHersteller, typ: "", letzterCheck: "", materialEntryId: null };
+        list = [...list, entry];
+        changed = true;
+      } else if (!entry.hersteller && finalHersteller) {
+        entry = { ...entry, hersteller: finalHersteller };
+        list = list.map(s => s.id === entry.id ? entry : s);
+        changed = true;
+      }
+      overrideMap.set(item.key, { id: entry.id, name: entry.name });
+    });
+    schirmeListRef.current = list;
+    if (changed) {
+      try {
+        await window.storage.set(SCHIRME_KEY, JSON.stringify(list));
+        await window.storage.set("settings:backupDirty", "1");
+      } catch (e) { console.error("Schirme-Liste speichern fehlgeschlagen:", e); }
+    }
+    setPendingNewSchirme(null);
+    const { parsedList } = pendingImportRef.current || { parsedList: [] };
+    pendingImportRef.current = null;
+    setImporting(true); setImportProgress({done:0,total:parsedList.length});
+    await runImportLoop(parsedList, overrideMap);
+  }, [pendingNewSchirme, runImportLoop]);
+
+  const cancelNewSchirme = useCallback(() => {
+    // Vor dieser Bestätigung wurde noch nichts gespeichert — einfach
+    // verwerfen, der ganze Batch wird nicht importiert.
+    pendingImportRef.current = null;
+    setPendingNewSchirme(null);
+  }, []);
 
   const importIGCFiles = useCallback(async (files) => {
     const igc = files.filter(f=>f.name.toLowerCase().endsWith(".igc"));
@@ -4694,6 +4854,10 @@ function FlugbuchApp() {
 
       {showCsvColumnConfig && (
         <CsvColumnConfigModal columns={csvColumns} onSave={saveCsvColumns} onClose={()=>setShowCsvColumnConfig(false)} />
+      )}
+
+      {pendingNewSchirme && (
+        <NewSchirmDialog items={pendingNewSchirme} onConfirm={confirmNewSchirme} onCancel={cancelNewSchirme} />
       )}
 
       {pendingDateAmbiguous.length > 0 && (
