@@ -142,6 +142,18 @@ function computeClimbSinkStats(track) {
   return { maxClimb, maxClimb20, maxSinkRate };
 }
 
+// Steig-/Sinkwerte immer mit genau einer Nachkommastelle anzeigen (z.B.
+// "3.0" statt "3"). Die berechneten Rohwerte sind zwar schon auf eine
+// Nachkommastelle gerundet (toFixed(1) in computeClimbSinkStats), aber
+// sobald das Ergebnis als Zahl weiterverarbeitet (parseFloat, +wert) oder
+// über String(...) wieder in customFields abgelegt wird, geht eine
+// überflüssige Null wieder verloren ("3.0" -> 3 -> "3"). Diese Funktion
+// wird deshalb erst an jeder Anzeigestelle angewendet, nicht beim Speichern.
+function fmt1(v) {
+  const n = parseFloat(v);
+  return isNaN(n) ? "" : n.toFixed(1);
+}
+
 function analyzeIGC(track, tzOffsetHours, dateStr) {
   const tz = tzOffsetHours != null ? tzOffsetHours : estimateTzOffset(track[0], dateStr);
   if (!track.length) return {};
@@ -215,16 +227,46 @@ function angleDiffDeg(a, b) {
   return d > 180 ? 360 - d : d;
 }
 
+// Für einen Trackpunkt i: Geschwindigkeit über ein Zeitfenster von
+// mindestens minWindowSec in JEDE Richtung (nicht nur einen einzelnen
+// Nachbarpunkt) — Basis für den Bestätigungs-Check in
+// computeMaxStraightSpeedKmh unten. Zeitbasiert statt punktbasiert, damit
+// das Fenster unabhängig von der Aufzeichnungsrate des jeweiligen Loggers
+// (1s, 4s, …) eine vergleichbare Zeitspanne abdeckt.
+function windowSpeedKmh(track, i, minWindowSec) {
+  let lo = i;
+  while (lo > 0 && (track[i].timeSec - track[lo-1].timeSec) < minWindowSec) lo--;
+  let hi = i;
+  while (hi < track.length-1 && (track[hi+1].timeSec - track[i].timeSec) < minWindowSec) hi++;
+  const dt = track[hi].timeSec - track[lo].timeSec;
+  if (dt <= 0) return 0;
+  return (haversineDistKm(track[lo], track[hi]) || 0) / (dt / 3600);
+}
+
 // Höchste GPS-Geschwindigkeit im (mehr oder weniger) Geradeausflug. Ein
 // Trackpunkt gilt als "in einer Kurve", wenn die Kursänderungsrate um ihn
 // herum über einem Schwellwert liegt — so werden Spiralen und Wingover
 // zuverlässig ausgeklammert, ohne einen festen Zeitraum/Ort vorab zu kennen
 // (die Kursänderungsrate in einer Spirale/einem Wingover liegt typischerweise
 // deutlich über 15°/s, ein normaler Geradeausflug bzw. sanfte Kurskorrekturen
-// deutlich darunter). Ein Plausibilitäts-Deckel filtert zusätzlich einzelne
-// GPS-Ausreisser (kurzer Empfangsfehler) heraus, die sonst fälschlich als
-// Rekordgeschwindigkeit übernommen würden.
+// deutlich darunter).
+//
+// Das allein reichte nicht: ein einzelner schlechter GPS-Fix (z.B. kurz vor/
+// nach der Landung, wenn das Gerät kaum noch Sat-Empfang hat) kann für EINEN
+// Punkt einen völlig überzogenen Sprung liefern, dessen Kurs zufällig kaum
+// vom vorherigen abweicht — an einem echten Fall (Landung, Höhe über
+// mehrere Sekunden praktisch konstant, Nachbarpunkte alle 15-30 km/h) lag
+// die Kursänderung bei nur 2-3°/s, die Ein-Sekunden-"Geschwindigkeit" aber
+// bei fast 150 km/h. Deshalb zusätzlich ein Bestätigungs-Check: die
+// Spitzengeschwindigkeit über die einzelne Sekunde muss durch die
+// Geschwindigkeit über ein grösseres Zeitfenster um denselben Punkt
+// (windowSpeedKmh, mind. 3s in jede Richtung) einigermassen gedeckt sein —
+// ein isolierter Einzelpunkt-Ausreisser fällt darin sofort auf sein
+// tatsächliches (deutlich niedrigeres) Tempo zurück, eine echte schnelle
+// Passage bleibt auch über mehrere Sekunden hinweg schnell.
 const TURN_RATE_THRESHOLD_DEG_PER_SEC = 15;
+const SPEED_CONFIRM_WINDOW_SEC = 3;
+const SPEED_CONFIRM_MIN_RATIO = 0.6;
 const PLAUSIBLE_MAX_SPEED_KMH = 150;
 function computeMaxStraightSpeedKmh(track) {
   if (!track || track.length < 3) return 0;
@@ -238,7 +280,11 @@ function computeMaxStraightSpeedKmh(track) {
     const turnRate = angleDiffDeg(headingBefore, headingAfter) / ((dtBefore + dtAfter) / 2);
     if (turnRate > TURN_RATE_THRESHOLD_DEG_PER_SEC) continue; // Kurve/Spirale/Wingover — ausklammern
     const speedKmh = (haversineDistKm(track[i-1], track[i]) || 0) / (dtBefore / 3600);
-    if (speedKmh > maxSpeed && speedKmh <= PLAUSIBLE_MAX_SPEED_KMH) maxSpeed = speedKmh;
+    if (speedKmh > PLAUSIBLE_MAX_SPEED_KMH) continue;
+    if (speedKmh <= maxSpeed) continue;
+    const confirmedSpeed = windowSpeedKmh(track, i, SPEED_CONFIRM_WINDOW_SEC);
+    if (confirmedSpeed < speedKmh * SPEED_CONFIRM_MIN_RATIO) continue; // einzelner GPS-Ausreisser — ausklammern
+    maxSpeed = speedKmh;
   }
   return +maxSpeed.toFixed(1);
 }
@@ -2393,9 +2439,9 @@ const TILE_FIELD_OPTIONS = [
   { key: "startAlt",  label: "Start müM",     icon: "↑",  get: fl => fl.startAlt>0 ? fl.startAlt+" m" : (fl.customFields?.msa ? fl.customFields.msa+" m" : "—") },
   { key: "endAlt",    label: "Land. müM",     icon: "↓",  get: fl => fl.endAlt>0 ? fl.endAlt+" m" : (fl.customFields?.ml ? fl.customFields.ml+" m" : "—") },
   { key: "hDiff",     label: "H.Diff.",       icon: "↕",  get: fl => fl.customFields?.hDiff ? fl.customFields.hDiff+" m" : "—" },
-  { key: "maxSinken", label: "Max.Sinken",    icon: "⬇",  get: fl => fl.customFields?.maxSinken ? fl.customFields.maxSinken+" m/s" : "—" },
-  { key: "maxSteigen", label: "Max.Steigen",  icon: "⬆",  get: fl => (fl.customFields?.maxSteigen||fl.maxClimb) ? (fl.customFields?.maxSteigen||fl.maxClimb)+" m/s" : "—" },
-  { key: "maxSteigen20", label: "Max.Steigen 20s", icon: "⬆", get: fl => (fl.customFields?.maxSteigen20||fl.maxClimb20) ? (fl.customFields?.maxSteigen20||fl.maxClimb20)+" m/s" : "—" },
+  { key: "maxSinken", label: "Max.Sinken",    icon: "⬇",  get: fl => fl.customFields?.maxSinken ? fmt1(fl.customFields.maxSinken)+" m/s" : "—" },
+  { key: "maxSteigen", label: "Max.Steigen",  icon: "⬆",  get: fl => (fl.customFields?.maxSteigen||fl.maxClimb) ? fmt1(fl.customFields?.maxSteigen||fl.maxClimb)+" m/s" : "—" },
+  { key: "maxSteigen20", label: "Max.Steigen 20s", icon: "⬆", get: fl => (fl.customFields?.maxSteigen20||fl.maxClimb20) ? fmt1(fl.customFields?.maxSteigen20||fl.maxClimb20)+" m/s" : "—" },
   { key: "speed",     label: "Ø Speed",       icon: "💨", get: fl => fl.customFields?.kmh ? fl.customFields.kmh+" km/h" : "—" },
   { key: "hGew",      label: "Höhengewinn",   icon: "📈", get: fl => fl.customFields?.hGew ? fl.customFields.hGew+" m" : "—" },
   { key: "entfernungSL", label: "Entf. S-L",  icon: "📐", get: fl => fl.entfernungSL!=null ? fl.entfernungSL+" km" : "—" },
@@ -3495,9 +3541,9 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
             <StaticField label="Dauer"       value={fl.durationStr} />
             <StaticField label="H.Diff."     value={fl.customFields?.hDiff} unit="m" />
             <InlineField label="Ø Speed"     value={fl.customFields?.kmh}           onSave={v=>saveField({customFields:{kmh:v}})} unit="km/h" />
-            <InlineField label="Max.Steigen" value={fl.customFields?.maxSteigen}    onSave={v=>saveField({customFields:{maxSteigen:v}})} unit="m/s" />
-            <InlineField label="Max.Steigen 20s" value={fl.customFields?.maxSteigen20} onSave={v=>saveField({customFields:{maxSteigen20:v}})} unit="m/s" />
-            <InlineField label="Max.Sinken"  value={fl.customFields?.maxSinken}     onSave={v=>saveField({customFields:{maxSinken:v}})} unit="m/s" />
+            <InlineField label="Max.Steigen" value={fmt1(fl.customFields?.maxSteigen)}    onSave={v=>saveField({customFields:{maxSteigen:v}})} unit="m/s" />
+            <InlineField label="Max.Steigen 20s" value={fmt1(fl.customFields?.maxSteigen20)} onSave={v=>saveField({customFields:{maxSteigen20:v}})} unit="m/s" />
+            <InlineField label="Max.Sinken"  value={fmt1(fl.customFields?.maxSinken)}     onSave={v=>saveField({customFields:{maxSinken:v}})} unit="m/s" />
             <InlineField label="H.Gew."      value={fl.customFields?.hGew}          onSave={v=>saveField({customFields:{hGew:v}})} unit="m" />
             <StaticField label="Entf. S-L"   value={fl.entfernungSL!=null?String(fl.entfernungSL):""} unit="km" />
           </div>
@@ -4278,10 +4324,18 @@ function FlugbuchApp() {
   // gibt es erst seit diesem Update, und Max.Steigen/Max.Sinken/Max.Steigen
   // 20s können bei einzelnen Flügen aus der Zeit vor deren Einführung
   // ebenfalls noch fehlen. Läuft über alle Flüge mit echtem GPS-Track und
-  // berechnet aus genau diesem Track (kein erneuter IGC-Import nötig)
-  // nach — dieselbe "nur auffüllen, nie überschreiben"-Regel wie beim
-  // normalen Import: ein bereits vorhandener (auch manuell korrigierter)
-  // Wert bleibt unangetastet.
+  // berechnet aus genau diesem Track (kein erneuter IGC-Import nötig) nach.
+  //
+  // Max Speed wird dabei IMMER neu berechnet und ein bereits vorhandener
+  // Wert bei Bedarf überschrieben — anders als bei den übrigen Feldern hier,
+  // weil die erste Version des Algorithmus einzelne schlechte GPS-Fixes
+  // (typischerweise kurz vor/nach der Landung) fälschlich als Rekord-
+  // geschwindigkeit übernehmen konnte; ein erneuter Lauf mit dem
+  // korrigierten Algorithmus muss solche bereits gespeicherten Fehlwerte
+  // korrigieren können, nicht nur leere Felder auffüllen. Max.Steigen/
+  // Max.Sinken/Max.Steigen 20s existieren dagegen schon länger und können
+  // manuell korrigiert worden sein — dort bleibt die alte "nur auffüllen,
+  // nie überschreiben"-Regel wie beim normalen Import.
   const recomputeTrackStats = useCallback(async () => {
     setRecomputeResult({ running: true });
     const trackedFlights = flights.filter(f => f.track && f.track.length > 1);
@@ -4290,10 +4344,8 @@ function FlugbuchApp() {
     for (const f of trackedFlights) {
       const cf = { ...(f.customFields||{}) };
       const patch = {};
-      if (!f.maxSpeedKmh) {
-        const v = computeMaxStraightSpeedKmh(f.track);
-        if (v) { patch.maxSpeedKmh = v; speedCount++; }
-      }
+      const v = computeMaxStraightSpeedKmh(f.track);
+      if (v && v !== f.maxSpeedKmh) { patch.maxSpeedKmh = v; speedCount++; }
       if (!(cf.maxSteigen||"").trim() || !(cf.maxSteigen20||"").trim() || !(cf.maxSinken||"").trim()) {
         const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
         if (!(cf.maxSteigen||"").trim() && maxClimb) { cf.maxSteigen = String(maxClimb); steigenCount++; }
@@ -5043,14 +5095,15 @@ function FlugbuchApp() {
       )}
 
       {/* Einmalige Nachrechnen-Funktion für bereits importierte Flüge (siehe
-          recomputeTrackStats) — Max Speed gibt es erst seit diesem Update,
-          Max.Steigen/Max.Sinken können bei einzelnen älteren Flügen ebenfalls
-          noch fehlen. Kein erneuter IGC-Import nötig, rechnet direkt aus dem
-          bereits gespeicherten Track. */}
+          recomputeTrackStats) — Max Speed wird IMMER neu berechnet (auch zur
+          Korrektur bereits gespeicherter Fehlwerte aus der ersten Version des
+          Algorithmus), Max.Steigen/Max.Sinken/Max.Steigen 20s werden nur bei
+          älteren Flügen ergänzt, bei denen sie noch fehlen. Kein erneuter
+          IGC-Import nötig, rechnet direkt aus dem bereits gespeicherten Track. */}
       {showImportMenu && (
         <div style={{margin:"6px 16px 0"}}>
           <button onClick={recomputeTrackStats} disabled={recomputeResult?.running}
-            title="Für alle Flüge mit GPS-Track: fehlende Werte bei Max Speed, Max.Steigen, Max.Steigen 20s und Max.Sinken direkt aus dem gespeicherten Track nachrechnen. Bereits vorhandene (auch manuell korrigierte) Werte bleiben unverändert."
+            title="Für alle Flüge mit GPS-Track: Max Speed direkt aus dem gespeicherten Track neu berechnen (korrigiert auch bereits gespeicherte Fehlwerte), fehlende Werte bei Max.Steigen, Max.Steigen 20s und Max.Sinken ergänzen. Dort bereits vorhandene (auch manuell korrigierte) Werte bleiben unverändert."
             style={{width:"100%",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.2)",borderRadius:8,padding:"7px 10px",color:"#7dd3fc",fontSize:11,fontWeight:600,cursor:recomputeResult?.running?"default":"pointer"}}>
             {recomputeResult?.running ? "⏳ Berechne…" : "🔁 Max Speed/Steigen/Sinken für bestehende Flüge nachrechnen"}
           </button>
@@ -5061,8 +5114,8 @@ function FlugbuchApp() {
         <div style={{margin:"8px 16px 0",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
           <span style={{fontSize:12,color:"#7dd3fc"}}>
             {recomputeResult.speed || recomputeResult.steigen || recomputeResult.steigen20 || recomputeResult.sinken
-              ? `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — ergänzt: ${recomputeResult.speed}× Max Speed, ${recomputeResult.steigen}× Max.Steigen, ${recomputeResult.steigen20}× Max.Steigen 20s, ${recomputeResult.sinken}× Max.Sinken.`
-              : `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — überall bereits vorhanden, nichts zu ergänzen.`}
+              ? `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — ${recomputeResult.speed}× Max Speed neu berechnet, ergänzt: ${recomputeResult.steigen}× Max.Steigen, ${recomputeResult.steigen20}× Max.Steigen 20s, ${recomputeResult.sinken}× Max.Sinken.`
+              : `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — überall bereits aktuell, nichts zu ändern.`}
           </span>
           <button onClick={()=>setRecomputeResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
         </div>
