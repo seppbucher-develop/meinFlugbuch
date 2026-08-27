@@ -4532,9 +4532,18 @@ function FlugbuchApp() {
     if (!(cf.typ||"").trim() && cf.typAuto !== false) { cf.typ = "GS"; cf.typAuto = true; }
     if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) cf.hGew = String(igcData.totalGain);
     if (igcData.hDiff) cf.hDiff = String(igcData.hDiff);
-    if (!(cf.maxSteigen||"").trim() && igcData.maxClimb) cf.maxSteigen = String(igcData.maxClimb);
-    if (!(cf.maxSteigen20||"").trim() && igcData.maxClimb20) cf.maxSteigen20 = String(igcData.maxClimb20);
-    if (!(cf.maxSinken||"").trim() && igcData.maxSinkRate) cf.maxSinken = String(igcData.maxSinkRate);
+    // Max.Steigen/Max.Steigen 20s/Max.Sinken werden bei einem (Re-)Import
+    // IMMER aus dem gerade eingelesenen Track neu gesetzt, nicht nur wenn
+    // sie noch leer sind — anders als z.B. Landeplatz/Distanz oben/unten,
+    // die oft aus einer externen Quelle (XContest, Notizen) stammen und nie
+    // überschrieben werden dürfen. Eine manuelle Korrektur ausgerechnet
+    // dieser drei rein Track-berechneten Werte ist unwahrscheinlich, und ein
+    // erneuter Import desselben oder eines korrigierten Files soll auch
+    // hier veraltete/fehlerhafte gespeicherte Werte korrigieren können
+    // (analog zur Nachrechnen-Funktion, siehe recomputeTrackStats).
+    cf.maxSteigen = String(igcData.maxClimb);
+    cf.maxSteigen20 = String(igcData.maxClimb20);
+    cf.maxSinken = String(igcData.maxSinkRate);
     // Original IGC filename kept as its own field (shown in the Detail
     // view, not the list) — this is what lets a later re-import of the
     // same corrected file find this exact flight again, now that the
@@ -4579,7 +4588,9 @@ function FlugbuchApp() {
       site: needsSite && inferredSite ? inferredSite : existing.site,
       maxAlt: existing.maxAlt || igcData.maxAlt,
       minAlt: existing.minAlt || igcData.minAlt,
-      maxSpeedKmh: existing.maxSpeedKmh || igcData.maxSpeedKmh,
+      // Immer aus dem gerade eingelesenen Track neu gesetzt (nicht nur wenn
+      // leer) — siehe Begründung bei Max.Steigen/-20s/Max.Sinken oben.
+      maxSpeedKmh: igcData.maxSpeedKmh,
       startPt: existing.startPt || igcData.startPt,
       endPt: existing.endPt || igcData.endPt,
       startAlt: existing.startAlt || igcData.startAlt,
