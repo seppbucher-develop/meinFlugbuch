@@ -264,10 +264,22 @@ function windowSpeedKmh(track, i, minWindowSec) {
 // ein isolierter Einzelpunkt-Ausreisser fällt darin sofort auf sein
 // tatsächliches (deutlich niedrigeres) Tempo zurück, eine echte schnelle
 // Passage bleibt auch über mehrere Sekunden hinweg schnell.
+//
+// Auch das reichte nicht ganz: bei einem zweiten realen Fall lag der
+// Ausreisser (ebenfalls ~150 km/h) inmitten einer echten Spirale/eines
+// schnellen Abstiegs (Höhe fiel dort insgesamt deutlich, Nachbarpunkte alle
+// stark schwankende Kursänderungen) — an genau diesem einen Punkt war die
+// Kursänderung zufällig trotzdem gering, und die 3s-Fenstergeschwindigkeit
+// bestätigte den Ausreisser sogar (Fenster lag selbst noch bei ~100 km/h,
+// da auch die Nachbarpunkte durch denselben Effekt überhöht waren). Ein
+// Gleitschirm erreicht auch im Vollgas-Spiralsturz keine derart hohen
+// GPS-Bodengeschwindigkeiten — deshalb zusätzlich ein deutlich tieferer
+// Plausibilitäts-Deckel als zuvor (150 km/h erwies sich in der Praxis als
+// zu hoch, um diese Art Ausreisser zuverlässig zu erkennen).
 const TURN_RATE_THRESHOLD_DEG_PER_SEC = 15;
 const SPEED_CONFIRM_WINDOW_SEC = 3;
 const SPEED_CONFIRM_MIN_RATIO = 0.6;
-const PLAUSIBLE_MAX_SPEED_KMH = 150;
+const PLAUSIBLE_MAX_SPEED_KMH = 120;
 function computeMaxStraightSpeedKmh(track) {
   if (!track || track.length < 3) return 0;
   let maxSpeed = 0;
