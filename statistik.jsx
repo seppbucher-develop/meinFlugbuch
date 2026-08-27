@@ -290,6 +290,11 @@ const MAX_STATS = [
     format: v => v.toFixed(1).replace(".", ",") + " km",
   },
   {
+    id: "maxspeed", label: "Schnellster Flug", icon: "⚡",
+    getValue: f => f.maxSpeedKmh || 0,
+    format: v => v.toFixed(1).replace(".", ",") + " km/h",
+  },
+  {
     id: "hoehe", label: "Höchster Flug", icon: "⛰",
     getValue: f => f.maxAlt || +(f.customFields?.hMax || f.customFields?.hm || 0) || 0,
     format: v => Math.round(v) + " m",
