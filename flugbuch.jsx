@@ -992,22 +992,33 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
   const scale = (manualDist > 0 && rawTotalDist > 0) ? manualDist/rawTotalDist : 1;
   const distances = useMemo(() => rawDistances.map(d => d*scale), [rawDistances, scale]);
   const totalDist = distances[distances.length-1] || 0;
+  // FlightMap reports playbackDistanceKm on the RAW (unscaled, actually
+  // flown) distance basis — same as rawDistances above — since it's
+  // computed straight from the GPS track, independent of any manually
+  // entered Distanz. Everywhere below that positions the cursor against
+  // this component's own (possibly rescaled) distances[]/totalDist needs
+  // the SAME scale factor applied first, or the cursor drifts out of sync
+  // with the map's marker whenever scale != 1 (i.e. whenever the manual
+  // Distanz differs from the raw GPS distance — the normal case): it was
+  // reaching the end of the profile's distance axis at the wrong wall-clock
+  // moment, effectively running faster or slower than the map.
+  const playbackDistanceScaled = playbackDistanceKm != null ? playbackDistanceKm * scale : null;
 
   // Cine-playback follow: while zoomed in, once the glider's position
-  // (reported by FlightMap, same "raw km" basis distances[] uses) leaves
-  // the currently visible window, jump (not smooth-scroll) to a same-size
-  // window that starts right at the glider — "gleichgrosser Kartenausschnitt
-  // weiterspringend", matching the map's own jump-to-follow behaviour.
+  // leaves the currently visible window, jump (not smooth-scroll) to a
+  // same-size window that starts right at the glider — "gleichgrosser
+  // Kartenausschnitt weiterspringend", matching the map's own jump-to-
+  // follow behaviour.
   useEffect(() => {
-    if (!isPlaybackActive || playbackDistanceKm == null || zoomLevel <= 1 || !totalDist) return;
+    if (!isPlaybackActive || playbackDistanceScaled == null || zoomLevel <= 1 || !totalDist) return;
     const windowFrac = 1/zoomLevel;
     const curStart = viewStart;
     const curEnd = viewStart + windowFrac;
-    const posFrac = playbackDistanceKm / totalDist;
+    const posFrac = playbackDistanceScaled / totalDist;
     if (posFrac < curStart || posFrac > curEnd) {
       setPanPos(Math.max(0, Math.min(1, posFrac + windowFrac/2)));
     }
-  }, [playbackDistanceKm, isPlaybackActive, zoomLevel, totalDist]);
+  }, [playbackDistanceScaled, isPlaybackActive, zoomLevel, totalDist]);
 
   useEffect(() => { setZoomLevel(1); setPanPos(0.5); }, [flight?.id]);
   useEffect(() => {
@@ -1228,7 +1239,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     // marker instead, so the red label always matches whichever marker is
     // actually visible on the map right now. Shown at every zoom level,
     // including the overview (1×) — not just once actually zoomed in.
-    const centerDist = (isPlaybackActive && playbackDistanceKm != null) ? playbackDistanceKm : (visStart+visEnd)/2;
+    const centerDist = (isPlaybackActive && playbackDistanceScaled != null) ? playbackDistanceScaled : (visStart+visEnd)/2;
     let centerAlt = null, centerLabel = "";
     if (distances.length) {
       let ci = 0, cd = Infinity;
@@ -1255,9 +1266,9 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
       ctx.fillText(centerLabel, padL+plotW/2, padT+plotH+29*dpr);
     }
 
-    if (playbackDistanceKm != null) {
-      if (playbackDistanceKm >= visStart && playbackDistanceKm <= visEnd) {
-        const px = xPos(playbackDistanceKm);
+    if (playbackDistanceScaled != null) {
+      if (playbackDistanceScaled >= visStart && playbackDistanceScaled <= visEnd) {
+        const px = xPos(playbackDistanceScaled);
         ctx.save();
         ctx.strokeStyle = "#4ade80"; ctx.lineWidth = 2*dpr;
         ctx.beginPath();
@@ -1323,7 +1334,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
       ctx.lineTo(xPos(distances[i]), yPos(track[i].gpsAlt));
       ctx.stroke();
     }
-  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceKm, isPlaybackActive]);
+  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceScaled, isPlaybackActive]);
 
   if (!track.length) return null;
 
