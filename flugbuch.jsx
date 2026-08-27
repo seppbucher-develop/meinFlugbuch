@@ -96,13 +96,12 @@ function estimateTzOffset(firstPt, dateStr) {
   return Math.round((firstPt.lon || 0) / 15);
 }
 
-function analyzeIGC(track, tzOffsetHours, dateStr) {
-  const tz = tzOffsetHours != null ? tzOffsetHours : estimateTzOffset(track[0], dateStr);
-  if (!track.length) return {};
-  const alts = track.map(p=>p.gpsAlt);
-  const maxAlt = Math.max(...alts), minAlt = Math.min(...alts);
-  const startAlt = track[0].gpsAlt, endAlt = track[track.length-1].gpsAlt;
-  const startPt = track[0], endPt = track[track.length-1];
+// Max.Steigen / Max.Sinken / Max.Steigen 20s — herausgelöst aus analyzeIGC,
+// damit dieselbe Berechnung auch für die einmalige Nachrechnen-Funktion
+// (recomputeTrackStats, siehe FlugbuchApp) genutzt werden kann, ohne den
+// ganzen (u.a. die Distanz-Optimierung enthaltenden) analyzeIGC-Durchlauf
+// erneut anzustossen.
+function computeClimbSinkStats(track) {
   // Max.Steigen / Max.Sinken: absolute maximum rate found between any two
   // consecutive track points (instantaneous, not smoothed/averaged over a
   // time window) — the person wants the raw peak value the vario would
@@ -140,6 +139,17 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
     }
   }
   maxClimb20 = isFinite(maxClimb20) ? +maxClimb20.toFixed(1) : 0;
+  return { maxClimb, maxClimb20, maxSinkRate };
+}
+
+function analyzeIGC(track, tzOffsetHours, dateStr) {
+  const tz = tzOffsetHours != null ? tzOffsetHours : estimateTzOffset(track[0], dateStr);
+  if (!track.length) return {};
+  const alts = track.map(p=>p.gpsAlt);
+  const maxAlt = Math.max(...alts), minAlt = Math.min(...alts);
+  const startAlt = track[0].gpsAlt, endAlt = track[track.length-1].gpsAlt;
+  const startPt = track[0], endPt = track[track.length-1];
+  const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(track);
   // Thermal count (separate from the climb/sink rate calc above) — counts
   // sustained climb segments using a simple threshold-crossing detector.
   const thermals=[]; let inT=false, tStart=null;
@@ -187,8 +197,50 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   // computeOpenDistanceKm weiter unten in dieser Datei (Funktionsdeklara-
   // tionen werden gehoisted, daher hier bereits aufrufbar).
   const scoreDistanceKm = computeOpenDistanceKm(track);
+  // Max Speed im Geradeausflug (siehe computeMaxStraightSpeedKmh weiter
+  // unten) — Spiralen/Wingover werden dort bewusst ausgeklammert, da sie
+  // zwar oft die höchste GPS-Geschwindigkeit im ganzen Flug liefern, aber
+  // eine Manöver- statt Gleitflug-Geschwindigkeit sind.
+  const maxSpeedKmh = computeMaxStraightSpeedKmh(track);
   return { maxAlt, minAlt, startAlt, endAlt, startPt, endPt, durationSec, durationStr, startTime, endTime,
-    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm };
+    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm, maxSpeedKmh };
+}
+
+// Kleinster Winkel zwischen zwei Peilungen (0-180°), unabhängig von der
+// 0°/360°-Wrap-Grenze. (bearingDeg selbst ist bereits weiter unten in dieser
+// Datei definiert — Funktionsdeklarationen werden gehoisted, daher hier schon
+// aufrufbar.)
+function angleDiffDeg(a, b) {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
+// Höchste GPS-Geschwindigkeit im (mehr oder weniger) Geradeausflug. Ein
+// Trackpunkt gilt als "in einer Kurve", wenn die Kursänderungsrate um ihn
+// herum über einem Schwellwert liegt — so werden Spiralen und Wingover
+// zuverlässig ausgeklammert, ohne einen festen Zeitraum/Ort vorab zu kennen
+// (die Kursänderungsrate in einer Spirale/einem Wingover liegt typischerweise
+// deutlich über 15°/s, ein normaler Geradeausflug bzw. sanfte Kurskorrekturen
+// deutlich darunter). Ein Plausibilitäts-Deckel filtert zusätzlich einzelne
+// GPS-Ausreisser (kurzer Empfangsfehler) heraus, die sonst fälschlich als
+// Rekordgeschwindigkeit übernommen würden.
+const TURN_RATE_THRESHOLD_DEG_PER_SEC = 15;
+const PLAUSIBLE_MAX_SPEED_KMH = 150;
+function computeMaxStraightSpeedKmh(track) {
+  if (!track || track.length < 3) return 0;
+  let maxSpeed = 0;
+  for (let i = 1; i < track.length - 1; i++) {
+    const dtBefore = track[i].timeSec - track[i-1].timeSec;
+    const dtAfter = track[i+1].timeSec - track[i].timeSec;
+    if (dtBefore <= 0 || dtAfter <= 0) continue;
+    const headingBefore = bearingDeg(track[i-1], track[i]);
+    const headingAfter = bearingDeg(track[i], track[i+1]);
+    const turnRate = angleDiffDeg(headingBefore, headingAfter) / ((dtBefore + dtAfter) / 2);
+    if (turnRate > TURN_RATE_THRESHOLD_DEG_PER_SEC) continue; // Kurve/Spirale/Wingover — ausklammern
+    const speedKmh = (haversineDistKm(track[i-1], track[i]) || 0) / (dtBefore / 3600);
+    if (speedKmh > maxSpeed && speedKmh <= PLAUSIBLE_MAX_SPEED_KMH) maxSpeed = speedKmh;
+  }
+  return +maxSpeed.toFixed(1);
 }
 
 // ── FlightMap ──────────────────────────────────────────────────────────────
@@ -2044,6 +2096,7 @@ function flightFieldValue(f, field){
     case "bemerkung": case "notes": case "notiz": return f.notes||"";
     case "dauer": case "duration": return (f.durationSec||parseDurToSec(f.durationStr))/3600; // hours (number)
     case "distanz": case "dist": case "km": return f.totalDist||parseFloat(cf.distKm||cf.dk||0)||0;
+    case "maxspeed": return f.maxSpeedKmh||0;
     case "höhe": case "hoehe": case "maxhöhe": case "maxhoehe": case "alt": return f.maxAlt||+(cf.hMax||cf.hm||0)||0;
     case "startalt": return f.startAlt||+(cf.msa||0)||0;
     case "endalt": return f.endAlt||+(cf.ml||0)||0;
@@ -2077,7 +2130,7 @@ function evalToken(f, tok){
     }
     let fv=flightFieldValue(f, field);
 
-    const numericFields=["name","titel","dauer","duration","distanz","dist","km","höhe","hoehe","maxhöhe","maxhoehe","alt",
+    const numericFields=["name","titel","dauer","duration","distanz","dist","km","maxspeed","höhe","hoehe","maxhöhe","maxhoehe","alt",
       "startalt","endalt","hdiff","maxsteigen","maxsteigen20","maxsinken","hgew","entfernungsl",
       "speed","kmh","rating","bewertung","jahr","year","startlat","startlon","endlat","endlon"];
     const dateFields=["datum","date"];
@@ -2152,6 +2205,7 @@ const SORT_OPTIONS = [
   { id: "reise",    label: "Reise" },
   { id: "duration", label: "Dauer" },
   { id: "dist",     label: "Distanz" },
+  { id: "maxSpeed", label: "Max Speed" },
   { id: "alt",      label: "Max. Höhe" },
   { id: "startAlt", label: "Start müM" },
   { id: "endAlt",   label: "Landung müM" },
@@ -2189,6 +2243,7 @@ function sortFieldValue(f, sortId) {
     case "endTime":  return parseDurToSec(f.endTime);
     case "duration": return f.durationSec || parseDurToSec(f.durationStr);
     case "dist":     return f.totalDist || parseFloat(cf.distKm || cf.dk || 0) || 0;
+    case "maxSpeed": return f.maxSpeedKmh || 0;
     case "alt":      return f.maxAlt || +(cf.hMax || cf.hm || 0) || 0;
     case "startAlt": return f.startAlt || +(cf.msa || 0) || 0;
     case "endAlt":   return f.endAlt || +(cf.ml || 0) || 0;
@@ -2224,10 +2279,11 @@ function sortFlights(flights, sortId, dir) {
 
 // Einzeilige Flugzeile — ein Design für schmale und breite Ansicht
 // (früher: eigene Wide-/iPhone-Varianten). IGC-/CSV-Quellenbadges bewusst
-// weggelassen (nicht relevant für die Übersicht), rechts immer Distanz und
-// Dauer, unabhängig von der aktuellen Sortierung.
+// weggelassen (nicht relevant für die Übersicht), rechts immer Max Speed,
+// Distanz und Dauer, unabhängig von der aktuellen Sortierung.
 function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSelect }) {
   const distText = f.totalDist ? `${f.totalDist} km` : null;
+  const speedText = f.maxSpeedKmh ? `${f.maxSpeedKmh} km/h` : null;
   return (
     <div onClick={selectMode ? ()=>onToggleSelect(f.id) : onClick}
       style={{padding:"5px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",alignItems:"center",gap:8,background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s",whiteSpace:"nowrap",overflow:"hidden"}}
@@ -2247,6 +2303,7 @@ function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSele
       <span style={{flex:1}} />
       <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
         {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
+        {speedText && <span style={{fontSize:11,color:"#a8d8f5"}}>{speedText}</span>}
         {distText && <span style={{fontSize:11,color:"#a8d8f5"}}>{distText}</span>}
         <span style={{fontSize:13,fontWeight:600,color:"#7dd3fc"}}>{f.durationStr||"—"}</span>
       </div>
@@ -2300,6 +2357,7 @@ const SEARCH_FIELDS = [
   { id: "bemerkung", label: "Bemerkung",      type: "text" },
   { id: "dauer",     label: "Dauer (h)",      type: "number" },
   { id: "distanz",   label: "Distanz (km)",   type: "number" },
+  { id: "maxspeed",  label: "Max Speed (km/h)", type: "number" },
   { id: "hoehe",     label: "Max. Höhe (m)",  type: "number" },
   { id: "startalt",  label: "Start müM",      type: "number" },
   { id: "endalt",    label: "Landung müM",    type: "number" },
@@ -2331,6 +2389,7 @@ const TILE_FIELD_OPTIONS = [
   { key: "duration",  label: "Dauer",         icon: "⏱",  get: fl => fl.durationStr || "—" },
   { key: "maxAlt",    label: "Max. Höhe",     icon: "⬆",  get: fl => fl.maxAlt ? fl.maxAlt+" m" : "—" },
   { key: "distanz",   label: "Distanz",       icon: "📏", get: fl => fl.totalDist ? fl.totalDist+" km" : (fl.customFields?.distKm||fl.customFields?.dk ? (fl.customFields.distKm||fl.customFields.dk)+" km" : "—") },
+  { key: "maxSpeed",  label: "Max Speed",     icon: "⚡", get: fl => fl.maxSpeedKmh ? fl.maxSpeedKmh+" km/h" : "—" },
   { key: "startAlt",  label: "Start müM",     icon: "↑",  get: fl => fl.startAlt>0 ? fl.startAlt+" m" : (fl.customFields?.msa ? fl.customFields.msa+" m" : "—") },
   { key: "endAlt",    label: "Land. müM",     icon: "↓",  get: fl => fl.endAlt>0 ? fl.endAlt+" m" : (fl.customFields?.ml ? fl.customFields.ml+" m" : "—") },
   { key: "hDiff",     label: "H.Diff.",       icon: "↕",  get: fl => fl.customFields?.hDiff ? fl.customFields.hDiff+" m" : "—" },
@@ -3432,6 +3491,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
             <InlineField label="Landung müM" value={fl.endAlt>0?String(fl.endAlt):(fl.customFields?.ml||"")}       onSave={v=>saveComputedField(fl,{endAlt:+v,customFields:{ml:v}})} unit="m" />
             <InlineField label="Max. Höhe"   value={fl.maxAlt?String(fl.maxAlt):""}                                onSave={v=>saveField({maxAlt:+v,customFields:{hm:v}})} unit="m" />
             <InlineField label="Distanz"     value={getDisplayDistance(fl)} onSave={v=>saveComputedField(fl,{totalDist:parseFloat(v)||0,customFields:{distKm:v}})} unit="km" />
+            <InlineField label="Max Speed"   value={fl.maxSpeedKmh?String(fl.maxSpeedKmh):""} onSave={v=>saveField({maxSpeedKmh:parseFloat(v)||0})} unit="km/h" />
             <StaticField label="Dauer"       value={fl.durationStr} />
             <StaticField label="H.Diff."     value={fl.customFields?.hDiff} unit="m" />
             <InlineField label="Ø Speed"     value={fl.customFields?.kmh}           onSave={v=>saveField({customFields:{kmh:v}})} unit="km/h" />
@@ -3973,6 +4033,10 @@ function FlugbuchApp() {
   const [importProgress, setImportProgress] = useState(null);
   const [igcResult, setIgcResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
+  // Ergebnis-Banner der einmaligen Nachrechnen-Funktion (recomputeTrackStats,
+  // siehe unten) — {scanned, speed, steigen, sinken} oder {running:true}
+  // während sie läuft.
+  const [recomputeResult, setRecomputeResult] = useState(null);
   // Cache der Schirme-Liste (schirme:list) für die Dauer eines IGC-Imports
   // — vermeidet, bei jeder einzelnen Datei erneut zu laden/zu speichern,
   // und stellt sicher, dass zwei Dateien mit demselben (neuen) Schirm im
@@ -4210,6 +4274,55 @@ function FlugbuchApp() {
     try { await window.storage.set(`flight:${f.id}`, JSON.stringify(f)); } catch {}
   }, []);
 
+  // Einmalige Nachrechnen-Funktion für bereits importierte Flüge: Max Speed
+  // gibt es erst seit diesem Update, und Max.Steigen/Max.Sinken/Max.Steigen
+  // 20s können bei einzelnen Flügen aus der Zeit vor deren Einführung
+  // ebenfalls noch fehlen. Läuft über alle Flüge mit echtem GPS-Track und
+  // berechnet aus genau diesem Track (kein erneuter IGC-Import nötig)
+  // nach — dieselbe "nur auffüllen, nie überschreiben"-Regel wie beim
+  // normalen Import: ein bereits vorhandener (auch manuell korrigierter)
+  // Wert bleibt unangetastet.
+  const recomputeTrackStats = useCallback(async () => {
+    setRecomputeResult({ running: true });
+    const trackedFlights = flights.filter(f => f.track && f.track.length > 1);
+    let speedCount = 0, steigenCount = 0, steigen20Count = 0, sinkenCount = 0;
+    const updated = [];
+    for (const f of trackedFlights) {
+      const cf = { ...(f.customFields||{}) };
+      const patch = {};
+      if (!f.maxSpeedKmh) {
+        const v = computeMaxStraightSpeedKmh(f.track);
+        if (v) { patch.maxSpeedKmh = v; speedCount++; }
+      }
+      if (!(cf.maxSteigen||"").trim() || !(cf.maxSteigen20||"").trim() || !(cf.maxSinken||"").trim()) {
+        const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
+        if (!(cf.maxSteigen||"").trim() && maxClimb) { cf.maxSteigen = String(maxClimb); steigenCount++; }
+        if (!(cf.maxSteigen20||"").trim() && maxClimb20) { cf.maxSteigen20 = String(maxClimb20); steigen20Count++; }
+        if (!(cf.maxSinken||"").trim() && maxSinkRate) { cf.maxSinken = String(maxSinkRate); sinkenCount++; }
+        patch.customFields = cf;
+      }
+      if (Object.keys(patch).length) {
+        const upd = { ...f, ...patch };
+        await saveFlight(upd);
+        updated.push(upd);
+      }
+    }
+    if (updated.length) {
+      setFlights(prev => prev.map(f => {
+        const u = updated.find(x => x.id === f.id);
+        return u || f;
+      }));
+      if (selected) {
+        const u = updated.find(x => x.id === selected.id);
+        if (u) setSelected(u);
+      }
+    }
+    setRecomputeResult({
+      scanned: trackedFlights.length,
+      speed: speedCount, steigen: steigenCount, steigen20: steigen20Count, sinken: sinkenCount,
+    });
+  }, [flights, saveFlight, selected]);
+
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
     const maxNr = flights.reduce((m,f)=>{
@@ -4418,6 +4531,7 @@ function FlugbuchApp() {
       site: needsSite && inferredSite ? inferredSite : existing.site,
       maxAlt: existing.maxAlt || igcData.maxAlt,
       minAlt: existing.minAlt || igcData.minAlt,
+      maxSpeedKmh: existing.maxSpeedKmh || igcData.maxSpeedKmh,
       startPt: existing.startPt || igcData.startPt,
       endPt: existing.endPt || igcData.endPt,
       startAlt: existing.startAlt || igcData.startAlt,
@@ -4925,6 +5039,32 @@ function FlugbuchApp() {
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing ? "⏳ Importiere…" : igcDirScanning ? "⏳ Suche…" : "IGC"}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Einmalige Nachrechnen-Funktion für bereits importierte Flüge (siehe
+          recomputeTrackStats) — Max Speed gibt es erst seit diesem Update,
+          Max.Steigen/Max.Sinken können bei einzelnen älteren Flügen ebenfalls
+          noch fehlen. Kein erneuter IGC-Import nötig, rechnet direkt aus dem
+          bereits gespeicherten Track. */}
+      {showImportMenu && (
+        <div style={{margin:"6px 16px 0"}}>
+          <button onClick={recomputeTrackStats} disabled={recomputeResult?.running}
+            title="Für alle Flüge mit GPS-Track: fehlende Werte bei Max Speed, Max.Steigen, Max.Steigen 20s und Max.Sinken direkt aus dem gespeicherten Track nachrechnen. Bereits vorhandene (auch manuell korrigierte) Werte bleiben unverändert."
+            style={{width:"100%",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.2)",borderRadius:8,padding:"7px 10px",color:"#7dd3fc",fontSize:11,fontWeight:600,cursor:recomputeResult?.running?"default":"pointer"}}>
+            {recomputeResult?.running ? "⏳ Berechne…" : "🔁 Max Speed/Steigen/Sinken für bestehende Flüge nachrechnen"}
+          </button>
+        </div>
+      )}
+
+      {recomputeResult && !recomputeResult.running && (
+        <div style={{margin:"8px 16px 0",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+          <span style={{fontSize:12,color:"#7dd3fc"}}>
+            {recomputeResult.speed || recomputeResult.steigen || recomputeResult.steigen20 || recomputeResult.sinken
+              ? `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — ergänzt: ${recomputeResult.speed}× Max Speed, ${recomputeResult.steigen}× Max.Steigen, ${recomputeResult.steigen20}× Max.Steigen 20s, ${recomputeResult.sinken}× Max.Sinken.`
+              : `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — überall bereits vorhanden, nichts zu ergänzen.`}
+          </span>
+          <button onClick={()=>setRecomputeResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
         </div>
       )}
 

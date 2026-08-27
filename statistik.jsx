@@ -290,6 +290,11 @@ const MAX_STATS = [
     format: v => v.toFixed(1).replace(".", ",") + " km",
   },
   {
+    id: "maxspeed", label: "Schnellster Flug", icon: "⚡",
+    getValue: f => f.maxSpeedKmh || 0,
+    format: v => v.toFixed(1).replace(".", ",") + " km/h",
+  },
+  {
     id: "hoehe", label: "Höchster Flug", icon: "⛰",
     getValue: f => f.maxAlt || +(f.customFields?.hMax || f.customFields?.hm || 0) || 0,
     format: v => Math.round(v) + " m",
@@ -326,12 +331,12 @@ function TopFlightsModal({ stat, ranked, onClose }) {
         )}
         {ranked.map((r, i) => (
           // Flugname (enthält nur die fortlaufende Flugnummer, z.B. "Flug 42")
-          // bewusst weggelassen — Datum + Startplatz identifizieren den Flug
-          // aussagekräftiger.
+          // bewusst weggelassen — Datum + Startplatz (+ Land, falls erfasst)
+          // identifizieren den Flug aussagekräftiger.
           <a key={r.flight.id} href={`flugbuch.html?openFlightId=${encodeURIComponent(r.flight.id)}`}
             style={{ display: "flex", alignItems: "center", gap: 10, padding: "3px 4px", borderBottom: i < ranked.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none", textDecoration: "none", color: "inherit" }}>
             <div style={{ flexShrink: 0, width: 22, textAlign: "center", fontSize: 12, fontWeight: 800, color: i === 0 ? "#fcd34d" : "rgba(232,244,253,0.4)" }}>{i + 1}</div>
-            <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.flight.date} · {r.flight.site || "—"}</div>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.flight.date} · {r.flight.site || "—"}{r.flight.customFields?.land ? ` · ${r.flight.customFields.land}` : ""}</div>
             <div style={{ flexShrink: 0, fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{stat.format(r.value)}</div>
           </a>
         ))}
