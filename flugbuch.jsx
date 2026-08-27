@@ -2239,15 +2239,15 @@ function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSele
         </div>
       )}
       {isLongest&&<span style={{fontSize:10,flexShrink:0}}>🏆</span>}
-      <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",flexShrink:0}}>{f.date}</span>
-      <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{f.site||"—"}</span>
-      {f.customFields?.landung && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
+      <span style={{fontSize:11,color:"#a8d8f5",flexShrink:0}}>{f.date}</span>
+      <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>{f.site||"—"}</span>
+      {f.customFields?.landung && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
       {f.customFields?.reise && <span style={{fontSize:11,fontWeight:700,color:"#fcd34d",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.customFields.reise}</span>}
-      {f.glider && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
+      {f.glider && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
       <span style={{flex:1}} />
       <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
         {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
-        {distText && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)"}}>{distText}</span>}
+        {distText && <span style={{fontSize:11,color:"#a8d8f5"}}>{distText}</span>}
         <span style={{fontSize:13,fontWeight:600,color:"#7dd3fc"}}>{f.durationStr||"—"}</span>
       </div>
     </div>
@@ -3642,10 +3642,10 @@ function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef }) {
       style={{padding:"5px 14px",cursor:"pointer",borderBottom:"1px solid rgba(255,255,255,0.04)",background:f.id===selectedId?"rgba(14,165,233,0.12)":"transparent",borderLeft:f.id===selectedId?"3px solid #7dd3fc":"3px solid transparent"}}>
       <div style={{display:"flex",alignItems:"center",gap:6}}>
         {f.id===longestId && <span style={{fontSize:11}}>🏆</span>}
-        <span style={{fontSize:11,color:"rgba(232,244,253,0.4)"}}>{f.date}</span>
+        <span style={{fontSize:11,color:"#a8d8f5"}}>{f.date}</span>
         {f.rating>0 && <span style={{fontSize:11}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
       </div>
-      <div style={{fontSize:11,color:"rgba(232,244,253,0.5)",marginTop:2}}>{f.site}</div>
+      <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{f.site}</div>
     </div>
   );
 }
