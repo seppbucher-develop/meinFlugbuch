@@ -2965,42 +2965,32 @@ function PlaceInlineField({label, value, onSave, suggestions, flights, kind}) {
   );
 }
 
-// Dropdown for assigning a flight to a Reise (travel). The list of available
-// travel names is user-managed on the Reisen page (freitext there), stored
-// under "reisen:names" — this component only reads and offers that list,
-// it never creates new names itself.
-function ReiseSelect({ value, onSave }) {
-  const [names, setNames] = useState([]);
+// Dropdown for assigning a flight to a Reise (travel). The list of
+// selectable names comes directly from every reise value already used
+// across all recorded flights (same pattern as the Startplatz-/
+// Landeplatz-suggestions elsewhere in the detail view) — not from a
+// separately maintained list, which used to leave this dropdown looking
+// almost empty ("nur '+ Neue Reise…'") whenever a flight's reise value
+// came in some other way than being typed through this exact component
+// (e.g. via Excel/CSV-Import).
+function ReiseSelect({ value, onSave, flights }) {
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await window.storage.get("reisen:names");
-        if (r) setNames(JSON.parse(r.value) || []);
-      } catch {}
-    })();
-  }, []);
-  // The current value must always be selectable, even if it isn't among the
-  // manually-managed Reisen names (e.g. trip names that came in via the
-  // Excel import rather than being typed on the Reisen page) — otherwise
+  const names = useMemo(() => {
+    const fromFlights = (flights||[]).map(f => f.customFields?.reise).filter(Boolean);
+    return [...new Set(fromFlights)].sort((a,b) => a.localeCompare(b, "de"));
+  }, [flights]);
+  // The current value must always be selectable, even if this flight is
+  // the only one with it (e.g. just typed via "+ Neue Reise…") — otherwise
   // the browser silently falls back to the first <option> ("—"), making
   // the field look empty even though the value is still stored correctly.
   const options = value && !names.includes(value) ? [value, ...names] : names;
 
-  const commitNewName = async () => {
+  const commitNewName = () => {
     const trimmed = newName.trim();
     setAdding(false); setNewName("");
     if (!trimmed) return;
     onSave(trimmed);
-    if (!names.includes(trimmed)) {
-      // Persisted to the same "reisen:names" key the separate Reisen page
-      // reads/writes, so a trip typed here shows up there too (and vice
-      // versa) instead of the two staying out of sync.
-      const next = [...names, trimmed];
-      setNames(next);
-      try { await window.storage.set("reisen:names", JSON.stringify(next)); } catch {}
-    }
   };
 
   if (adding) {
@@ -3540,7 +3530,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
               })}
               suggestions={[...new Set(flights.map(f=>f.customFields?.landung).filter(Boolean))]} />
             <InlineField label="Land" value={fl.customFields?.land||""} onSave={v=>saveField({customFields:{land:v}})} />
-            <ReiseSelect value={fl.customFields?.reise} onSave={v=>saveField({customFields:{reise:v}})} />
+            <ReiseSelect value={fl.customFields?.reise} flights={flights} onSave={v=>saveField({customFields:{reise:v}})} />
             {fl.customFields?.igcFilename && <StaticField label="IGC-Dateiname" value={fl.customFields.igcFilename} />}
             <InlineField label="Start müM"   value={fl.startAlt>0?String(fl.startAlt):(fl.customFields?.msa||"")}  onSave={v=>saveComputedField(fl,{startAlt:+v,customFields:{msa:v}})} unit="m" />
             <InlineField label="Landung müM" value={fl.endAlt>0?String(fl.endAlt):(fl.customFields?.ml||"")}       onSave={v=>saveComputedField(fl,{endAlt:+v,customFields:{ml:v}})} unit="m" />
@@ -4235,19 +4225,19 @@ function FlugbuchApp() {
   // Wie beim Datum im Flugdetail: eine Datumsänderung hier nummeriert
   // ALLE Flüge neu — deshalb erst nach expliziter Warnung anwendbar.
   const [confirmBulkDateRenumber, setConfirmBulkDateRenumber] = useState(false);
-  const [reisenNames, setReisenNames] = useState([]);
+  // Reise-Namen für Dropdowns (ReiseSelect, Mehrfachbearbeitung) — direkt
+  // aus allen bereits erfassten Flügen abgeleitet (analog zu den
+  // Startplatz-/Landeplatz-Vorschlägen), statt aus einer separat
+  // gepflegten Liste: die stand sonst leicht leer da, sobald ein Reise-Wert
+  // z.B. aus einem Excel-Import kam statt hier eingetippt zu werden.
+  const reisenNames = useMemo(() => {
+    const fromFlights = flights.map(f => f.customFields?.reise).filter(Boolean);
+    return [...new Set(fromFlights)].sort((a,b) => a.localeCompare(b, "de"));
+  }, [flights]);
   // When arriving here via a flight opened from Statistik or Reisen
   // (?openFlightId=...&returnTo=...), the back button in the detail view
   // should return to that exact page instead of this app's own list.
   const [returnTo, setReturnTo] = useState(null);
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await window.storage.get("reisen:names");
-        if (r) setReisenNames(JSON.parse(r.value) || []);
-      } catch {}
-    })();
-  }, []);
   const [copyMsg, setCopyMsg] = useState("");
   const [rowImportText, setRowImportText] = useState("");
   const [rowImportError, setRowImportError] = useState("");
