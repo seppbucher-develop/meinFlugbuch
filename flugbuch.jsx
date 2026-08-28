@@ -154,6 +154,15 @@ function fmt1(v) {
   return isNaN(n) ? "" : n.toFixed(1);
 }
 
+// Dauer immer als "Xh MMm" formatieren (z.B. "2h 27m"), unabhängig von der
+// Quelle (IGC-Track, manuell erfasste Start-/Landezeit, CSV-Import) — ein
+// CSV-Import übernahm die Dauer bisher ungefiltert im rohen Format aus der
+// Exceldatei (z.B. "0:57"), was neben echten IGC-Flügen inkonsistent aussah.
+function formatDurationHM(sec) {
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60);
+  return `${h}h ${String(m).padStart(2,"0")}m`;
+}
+
 function analyzeIGC(track, tzOffsetHours, dateStr) {
   const tz = tzOffsetHours != null ? tzOffsetHours : estimateTzOffset(track[0], dateStr);
   if (!track.length) return {};
@@ -197,8 +206,7 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   const endTime = fmtClock(track[track.length-1].timeSec);
   let durationSec = track[track.length-1].timeSec - track[0].timeSec;
   if (durationSec < 0) durationSec += 24*3600; // landing past midnight
-  const durH = Math.floor(durationSec/3600), durM = Math.floor((durationSec%3600)/60), durS = durationSec%60;
-  const durationStr = `${durH}h ${String(durM).padStart(2,"0")}m`;
+  const durationStr = formatDurationHM(durationSec);
   // H.Diff. is computed from Start-/Landeplatz-Höhe (same as the manual-
   // entry formula). Distanz is deliberately NOT computed here — IGC-
   // derived distance wasn't accurate enough to trust, so it's always left
@@ -1867,7 +1875,7 @@ function createFlightFromPDF(nr, p) {
     pilot:"", site: p.st||"", glider: p.ge||"",
     startTime: p.sz || "",
     endTime:   p.lz || "",
-    durationSec, durationStr: durStr,
+    durationSec, durationStr: durationSec ? formatDurationHM(durationSec) : "",
     maxAlt: +(p.hm||0), minAlt: +(p.ml||0),
     startAlt: +(p.msa||0), endAlt: +(p.ml||0),
     totalDist: parseFloat(p.dk||0)||0,
@@ -3001,7 +3009,7 @@ function ReiseSelect({ value, onSave, flights }) {
           placeholder="Name der Reise…"
           onKeyDown={e=>{ if(e.key==="Enter") commitNewName(); if(e.key==="Escape"){setAdding(false);setNewName("");} }}
           onBlur={commitNewName}
-          style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"4px 8px",color:"#e8f4fd",fontSize:13,textAlign:"right",maxWidth:180,boxSizing:"border-box"}} />
+          style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"4px 8px",color:"#e8f4fd",fontSize:13,textAlign:"left",maxWidth:180,boxSizing:"border-box"}} />
       </div>
     );
   }
@@ -3010,7 +3018,7 @@ function ReiseSelect({ value, onSave, flights }) {
     <div data-inline-row style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
       <span style={{fontSize:13,color:"rgba(232,244,253,0.45)",minWidth:90}}>Reise</span>
       <select value={value||""} onChange={e=>{ if(e.target.value==="__NEW__"){ setAdding(true); } else { onSave(e.target.value); } }}
-        style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"4px 8px",color:value?"#e8f4fd":"rgba(232,244,253,0.4)",fontSize:13,textAlign:"right",maxWidth:180}}>
+        style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"4px 8px",color:value?"#e8f4fd":"rgba(232,244,253,0.4)",fontSize:13,textAlign:"left",maxWidth:180}}>
         <option value="" style={{background:"#0a1628"}}>—</option>
         {options.map(n => <option key={n} value={n} style={{background:"#0a1628"}}>{n}</option>)}
         <option value="__NEW__" style={{background:"#0a1628",color:"#4ade80"}}>+ Neue Reise…</option>
@@ -3074,7 +3082,7 @@ function SchirmSelect({ value, onSave, extra }) {
       <span style={{fontSize:13,color:"rgba(232,244,253,0.45)",minWidth:90}}>Schirm</span>
       <select value={value||""} autoFocus onBlur={()=>setEditing(false)}
         onChange={e=>{ onSave(e.target.value); setEditing(false); }}
-        style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"4px 8px",color:value?"#e8f4fd":"rgba(232,244,253,0.4)",fontSize:13,textAlign:"right",maxWidth:180}}>
+        style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"4px 8px",color:value?"#e8f4fd":"rgba(232,244,253,0.4)",fontSize:13,textAlign:"left",maxWidth:180}}>
         <option value="" style={{background:"#0a1628"}}>—</option>
         {options.map(n => <option key={n} value={n} style={{background:"#0a1628"}}>{n}</option>)}
       </select>
@@ -3187,8 +3195,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
         if (diffSec < 0) diffSec += 24*3600; // landing past midnight
         if (diffSec > 0) {
           upd.durationSec = diffSec;
-          const h = Math.floor(diffSec/3600), m = Math.floor((diffSec%3600)/60);
-          upd.durationStr = `${h}h ${String(m).padStart(2,"0")}m`;
+          upd.durationStr = formatDurationHM(diffSec);
         }
       }
       const startAltNum = +upd.startAlt || +(upd.customFields?.msa||0) || 0;
@@ -4332,22 +4339,44 @@ function FlugbuchApp() {
   // können muss (siehe Max Speed: ein einzelner schlechter GPS-Fix, z.B.
   // kurz vor der Landung, konnte in der ersten Version fälschlich als
   // Rekordgeschwindigkeit übernommen werden).
+  //
+  // Läuft ausserdem über ALLE Flüge (nicht nur getrackte) und normalisiert
+  // die Dauer-Anzeige auf "Xh MMm" — betrifft vor allem ältere CSV-Importe,
+  // die das rohe Dauer-Format aus der Exceldatei (z.B. "0:57") unverändert
+  // übernommen hatten, statt es wie IGC-Flüge zu formatieren (siehe
+  // formatDurationHM). Rein kosmetisch (die zugrunde liegende durationSec
+  // bleibt unverändert), daher immer sicher zu überschreiben — "Dauer" ist
+  // in der Detailansicht ohnehin nur ein reines Anzeigefeld (StaticField),
+  // eine manuelle Korrektur ist über die UI gar nicht möglich.
   const recomputeTrackStats = useCallback(async () => {
     setRecomputeResult({ running: true });
     const trackedFlights = flights.filter(f => f.track && f.track.length > 1);
-    let speedCount = 0, steigenCount = 0, steigen20Count = 0, sinkenCount = 0;
+    let speedCount = 0, steigenCount = 0, steigen20Count = 0, sinkenCount = 0, durCount = 0;
     const updated = [];
-    for (const f of trackedFlights) {
-      const cf = { ...(f.customFields||{}) };
+    for (const f of flights) {
       const patch = {};
-      let cfChanged = false;
-      const v = computeMaxStraightSpeedKmh(f.track);
-      if (v && v !== f.maxSpeedKmh) { patch.maxSpeedKmh = v; speedCount++; }
-      const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
-      if (parseFloat(cf.maxSteigen) !== maxClimb) { cf.maxSteigen = String(maxClimb); steigenCount++; cfChanged = true; }
-      if (parseFloat(cf.maxSteigen20) !== maxClimb20) { cf.maxSteigen20 = String(maxClimb20); steigen20Count++; cfChanged = true; }
-      if (parseFloat(cf.maxSinken) !== maxSinkRate) { cf.maxSinken = String(maxSinkRate); sinkenCount++; cfChanged = true; }
-      if (cfChanged) patch.customFields = cf;
+      const hasTrack = f.track && f.track.length > 1;
+      if (hasTrack) {
+        const cf = { ...(f.customFields||{}) };
+        let cfChanged = false;
+        const v = computeMaxStraightSpeedKmh(f.track);
+        if (v && v !== f.maxSpeedKmh) { patch.maxSpeedKmh = v; speedCount++; }
+        const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
+        if (parseFloat(cf.maxSteigen) !== maxClimb) { cf.maxSteigen = String(maxClimb); steigenCount++; cfChanged = true; }
+        if (parseFloat(cf.maxSteigen20) !== maxClimb20) { cf.maxSteigen20 = String(maxClimb20); steigen20Count++; cfChanged = true; }
+        if (parseFloat(cf.maxSinken) !== maxSinkRate) { cf.maxSinken = String(maxSinkRate); sinkenCount++; cfChanged = true; }
+        if (cfChanged) patch.customFields = cf;
+      }
+      // Dauer-Darstellung vereinheitlichen ("Xh MMm") — betrifft vor allem
+      // ältere CSV-Importe, die das rohe Dauer-Format aus der Exceldatei
+      // (z.B. "0:57") direkt übernommen hatten, statt es wie IGC-Flüge auf
+      // "2h 27m" zu normalisieren. Läuft über ALLE Flüge, nicht nur
+      // getrackte, da genau die betroffenen CSV-Importe meist keinen Track
+      // haben.
+      if (f.durationSec > 0) {
+        const normalized = formatDurationHM(f.durationSec);
+        if (f.durationStr !== normalized) { patch.durationStr = normalized; durCount++; }
+      }
       if (Object.keys(patch).length) {
         const upd = { ...f, ...patch };
         await saveFlight(upd);
@@ -4365,8 +4394,8 @@ function FlugbuchApp() {
       }
     }
     setRecomputeResult({
-      scanned: trackedFlights.length,
-      speed: speedCount, steigen: steigenCount, steigen20: steigen20Count, sinken: sinkenCount,
+      scanned: flights.length, scannedTrack: trackedFlights.length,
+      speed: speedCount, steigen: steigenCount, steigen20: steigen20Count, sinken: sinkenCount, dauer: durCount,
     });
   }, [flights, saveFlight, selected]);
 
@@ -5104,13 +5133,14 @@ function FlugbuchApp() {
           recomputeTrackStats) — Max Speed, Max.Steigen, Max.Steigen 20s und
           Max.Sinken werden IMMER neu aus dem bereits gespeicherten Track
           berechnet (auch zur Korrektur bereits gespeicherter Fehlwerte),
-          kein erneuter IGC-Import nötig. */}
+          kein erneuter IGC-Import nötig. Normalisiert ausserdem die Dauer-
+          Anzeige ("Xh MMm") über ALLE Flüge, nicht nur getrackte. */}
       {showImportMenu && (
         <div style={{margin:"6px 16px 0"}}>
           <button onClick={recomputeTrackStats} disabled={recomputeResult?.running}
-            title="Für alle Flüge mit GPS-Track: Max Speed, Max.Steigen, Max.Steigen 20s und Max.Sinken direkt aus dem gespeicherten Track neu berechnen — korrigiert auch bereits gespeicherte Werte (z.B. aus einer älteren, ungenaueren Version des Algorithmus)."
+            title="Für alle Flüge mit GPS-Track: Max Speed, Max.Steigen, Max.Steigen 20s und Max.Sinken direkt aus dem gespeicherten Track neu berechnen — korrigiert auch bereits gespeicherte Werte (z.B. aus einer älteren, ungenaueren Version des Algorithmus). Vereinheitlicht ausserdem bei allen Flügen die Dauer-Anzeige auf 'Xh MMm'."
             style={{width:"100%",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.2)",borderRadius:8,padding:"7px 10px",color:"#7dd3fc",fontSize:11,fontWeight:600,cursor:recomputeResult?.running?"default":"pointer"}}>
-            {recomputeResult?.running ? "⏳ Berechne…" : "🔁 Max Speed/Steigen/Sinken für bestehende Flüge nachrechnen"}
+            {recomputeResult?.running ? "⏳ Berechne…" : "🔁 Max Speed/Steigen/Sinken/Dauer für bestehende Flüge nachrechnen"}
           </button>
         </div>
       )}
@@ -5118,9 +5148,9 @@ function FlugbuchApp() {
       {recomputeResult && !recomputeResult.running && (
         <div style={{margin:"8px 16px 0",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
           <span style={{fontSize:12,color:"#7dd3fc"}}>
-            {recomputeResult.speed || recomputeResult.steigen || recomputeResult.steigen20 || recomputeResult.sinken
-              ? `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — neu berechnet: ${recomputeResult.speed}× Max Speed, ${recomputeResult.steigen}× Max.Steigen, ${recomputeResult.steigen20}× Max.Steigen 20s, ${recomputeResult.sinken}× Max.Sinken.`
-              : `✅ ${recomputeResult.scanned} Flüge mit Track geprüft — überall bereits aktuell, nichts zu ändern.`}
+            {recomputeResult.speed || recomputeResult.steigen || recomputeResult.steigen20 || recomputeResult.sinken || recomputeResult.dauer
+              ? `✅ ${recomputeResult.scanned} Flüge geprüft (${recomputeResult.scannedTrack} mit Track) — neu berechnet: ${recomputeResult.speed}× Max Speed, ${recomputeResult.steigen}× Max.Steigen, ${recomputeResult.steigen20}× Max.Steigen 20s, ${recomputeResult.sinken}× Max.Sinken, ${recomputeResult.dauer}× Dauer-Format.`
+              : `✅ ${recomputeResult.scanned} Flüge geprüft — überall bereits aktuell, nichts zu ändern.`}
           </span>
           <button onClick={()=>setRecomputeResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
         </div>
