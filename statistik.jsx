@@ -395,9 +395,26 @@ function computeTypDebugGroups(flights) {
     if (!groups.has(key)) groups.set(key, { raw, count: 0, samples: [] });
     const g = groups.get(key);
     g.count++;
-    if (g.samples.length < 8) g.samples.push(f);
+    // Nur die "GS"-Gruppe (Normalfall, meist tausende Flüge) wird nie als
+    // Chip-Liste gerendert (siehe TypDebugPanel, isGS-Check) — dort reicht
+    // die Zählung, Chips sparen wir uns. Alle abweichenden Gruppen sind in
+    // der Praxis klein (Dutzende, nicht Tausende) und werden komplett
+    // gesammelt, damit auf dem Handy (keine Konsole verfügbar) wirklich
+    // jeder abweichende Flug sichtbar ist statt nur eine Stichprobe.
+    if ((raw || "").trim() !== "GS") g.samples.push(f);
   });
+  groups.forEach(g => g.samples.sort((a, b) => (a.date || "").localeCompare(b.date || "")));
   return [...groups.values()].sort((a, b) => b.count - a.count);
+}
+
+// Ein Flug gilt für die Diagnose als "im Monat X/Jahr Y", wenn Datum
+// TT.MM.JJJJ dort hineinfällt — dieselbe Erkennung wie computeMonthPivot
+// oben, damit sich die Hervorhebung 1:1 mit der Monatsübersicht deckt.
+function isInMonth(f, year, month) {
+  const parts = (f.date || "").split(".");
+  const yr = (f.year || parts[2] || "").toString();
+  const mo = parts.length === 3 ? parseInt(parts[1], 10) : NaN;
+  return yr === year && mo === month;
 }
 
 function TypDebugPanel({ flights, onClose }) {
@@ -411,7 +428,7 @@ function TypDebugPanel({ flights, onClose }) {
           <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
         </div>
         <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginBottom: 12 }}>
-          {flights.length} Flüge insgesamt · customFields.typ gruppiert nach exaktem Rohwert (JSON.stringify macht Leerzeichen/Groß-Klein-Unterschiede sichtbar). Rot = weicht von "GS" ab.
+          {flights.length} Flüge insgesamt · customFields.typ gruppiert nach exaktem Rohwert (JSON.stringify macht Leerzeichen/Groß-Klein-Unterschiede sichtbar). Rot = weicht von "GS" ab, jetzt vollständig (nicht mehr nur Stichprobe) — Treffer im August 2026 sind zusätzlich gelb umrandet.
         </div>
         {groups.map((g, i) => {
           const trimmed = (g.raw || "").trim();
@@ -426,7 +443,8 @@ function TypDebugPanel({ flights, onClose }) {
                 <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 6 }}>
                   {g.samples.map(f => (
                     <a key={f.id} href={`flugbuch.html?openFlightId=${encodeURIComponent(f.id)}`}
-                      style={{ fontSize: 11, color: "#7dd3fc", textDecoration: "none", background: "rgba(125,211,252,0.1)", borderRadius: 6, padding: "2px 6px" }}>
+                      style={{ fontSize: 11, color: "#7dd3fc", textDecoration: "none", background: "rgba(125,211,252,0.1)", borderRadius: 6, padding: "2px 6px",
+                        border: isInMonth(f, "2026", 8) ? "1px solid #fbbf24" : "1px solid transparent" }}>
                       {f.date}
                     </a>
                   ))}
