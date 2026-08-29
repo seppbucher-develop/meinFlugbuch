@@ -2404,10 +2404,10 @@ function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSele
       {f.customFields?.landung && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
       {f.customFields?.reise && <span style={{fontSize:11,fontWeight:700,color:"#fcd34d",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.customFields.reise}</span>}
       {f.glider && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
-      {sortExtra && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {SORT_OPTIONS.find(o=>o.id===sortId)?.label}: {sortExtra}</span>}
       <span style={{flex:1}} />
       <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
         {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
+        {sortExtra && <span style={{fontSize:11,color:"#a8d8f5"}}>{sortExtra}</span>}
         {speedText && <span style={{fontSize:11,color:"#a8d8f5"}}>{speedText}</span>}
         {distText && <span style={{fontSize:11,color:"#a8d8f5"}}>{distText}</span>}
         <span style={{fontSize:13,fontWeight:600,color:"#7dd3fc"}}>{f.durationStr||"—"}</span>
@@ -3821,7 +3821,7 @@ function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef, sor
         {f.rating>0 && <span style={{fontSize:11}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
       </div>
       <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{f.site}</div>
-      {sortExtra && <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{SORT_OPTIONS.find(o=>o.id===sortId)?.label}: {sortExtra}</div>}
+      {sortExtra && <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{sortExtra}</div>}
     </div>
   );
 }
