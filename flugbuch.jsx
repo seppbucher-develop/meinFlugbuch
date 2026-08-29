@@ -4173,6 +4173,10 @@ function FlugbuchApp() {
   // oder {running:true} während sie läuft.
   const [rawBackfillResult, setRawBackfillResult] = useState(null);
   const rawBackfillFileRef = useRef(null);
+  // true während der eigentliche Ordner-Scan läuft (vor backfillRawIgcFiles
+  // selbst, siehe runIgcDirBackfill) — analog igcDirScanning beim regulären
+  // Ordner-Import.
+  const [rawBackfillScanning, setRawBackfillScanning] = useState(false);
   // Cache der Schirme-Liste (schirme:list) für die Dauer eines IGC-Imports
   // — vermeidet, bei jeder einzelnen Datei erneut zu laden/zu speichern,
   // und stellt sicher, dass zwei Dateien mit demselben (neuen) Schirm im
@@ -4765,6 +4769,28 @@ function FlugbuchApp() {
     setRawBackfillResult({ updated, ambiguous, matchless, total: igcFiles.length });
   }, [flights, attachIgcToFlight]);
 
+  // Nutzt denselben rekursiven Ordner-Scan wie der reguläre IGC-Ordner-
+  // Import (scanIgcDirRecursive) — bewusst OHNE dessen "schon bekannter
+  // Dateiname"-Filter (runIgcDirImport): die Einmalfunktion soll ja gerade
+  // Dateien nochmals prüfen, die zu einem bereits bestehenden Flug gehören,
+  // nicht nur wirklich neue. Läuft also über wirklich jede .igc-Datei im
+  // Ordner — backfillRawIgcFiles selbst überspringt ohnehin alles ohne
+  // eindeutigen Datum+Startzeit-Treffer.
+  const runIgcDirBackfill = useCallback(async () => {
+    if (!igcDirHandle) return;
+    setRawBackfillScanning(true);
+    try {
+      const allFiles = await scanIgcDirRecursive(igcDirHandle);
+      setRawBackfillScanning(false);
+      if (!allFiles.length) { setRawBackfillResult({ updated: 0, ambiguous: 0, matchless: 0, total: 0 }); return; }
+      await backfillRawIgcFiles(allFiles);
+    } catch (e) {
+      console.error("IGC-Ordner-Scan für Nachsichern fehlgeschlagen:", e);
+      setRawBackfillScanning(false);
+      setRawBackfillResult({ error: e.message || String(e) });
+    }
+  }, [igcDirHandle, backfillRawIgcFiles]);
+
   // Zweiter Teil des Imports (nach einer evtl. NewSchirmDialog-Bestätigung)
   // — arbeitet auf bereits geparsten Dateien, damit ein pausierter Import
   // nach der Bestätigung nicht alle Dateien erneut einlesen/parsen muss.
@@ -5293,23 +5319,44 @@ function FlugbuchApp() {
           Original-IGC-Speicherung importiert wurden. Ordnet die exakt
           passende Original-IGC-Datei nachträglich zu (Zuordnung strikt über
           Datum+Startzeit) und aktualisiert dabei Track/Karte/Höhenprofil und
-          alle daraus berechneten Werte wie bei einem regulären Re-Import. */}
+          alle daraus berechneten Werte wie bei einem regulären Re-Import.
+          Nutzt, genau wie der reguläre Import oben, den bereits gewählten
+          IGC-Ordner samt rekursivem Scan, falls einer konfiguriert ist —
+          eine kleine "📄"-Schaltfläche erlaubt trotzdem die manuelle
+          Dateiauswahl, wie beim Import-Kachel-Muster oben. */}
       {showImportMenu && (
-        <div style={{margin:"6px 16px 0"}}>
+        <div style={{margin:"6px 16px 0",position:"relative"}}>
           <input ref={rawBackfillFileRef} type="file" accept=".igc" multiple style={{display:"none"}}
             onChange={e=>{ backfillRawIgcFiles(Array.from(e.target.files)); e.target.value=""; }} />
-          <button onClick={()=>rawBackfillFileRef.current?.click()} disabled={rawBackfillResult?.running}
-            title="Bereits vorhandene .igc-Dateien (z.B. vom Vario-Laufwerk) auswählen — jede Datei wird ausschliesslich dem bestehenden Flug mit exakt gleichem Datum UND gleicher Startzeit zugeordnet, dort als Original-Datei nachträglich gespeichert und wie bei einem regulären Re-Import eingelesen (Track, Karte, Höhenprofil, Distanz, Dauer, Steigen/Sinken, Max Speed usw. entsprechen danach exakt der Originaldatei). Bereits manuell gepflegte Felder bleiben unangetastet. Für Flüge ohne eindeutigen Treffer passiert nichts."
-            style={{width:"100%",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:8,padding:"7px 10px",color:"#a78bfa",fontSize:11,fontWeight:600,cursor:rawBackfillResult?.running?"default":"pointer"}}>
-            {rawBackfillResult?.running ? "⏳ Aktualisiere…" : "🗄️ Original-IGC-Dateien für bestehende Flüge nachsichern (Einmalfunktion)"}
+          <button onClick={()=>{
+              if (igcDirFsapiSupported && igcDirHandle) runIgcDirBackfill();
+              else rawBackfillFileRef.current?.click();
+            }}
+            disabled={rawBackfillResult?.running || rawBackfillScanning}
+            title={igcDirFsapiSupported && igcDirHandle
+              ? `Ordner „${igcDirName}" komplett durchsuchen (rekursiv, auch bereits bekannte Dateien) — jede gefundene .igc-Datei wird dem bestehenden Flug mit exakt gleichem Datum UND gleicher Startzeit zugeordnet, dort als Original-Datei gespeichert und wie bei einem regulären Re-Import eingelesen (Track, Karte, Höhenprofil, Distanz, Dauer, Steigen/Sinken, Max Speed usw. entsprechen danach exakt der Originaldatei). Bereits manuell gepflegte Felder bleiben unangetastet. Für Flüge ohne eindeutigen Treffer passiert nichts.`
+              : "Bereits vorhandene .igc-Dateien (z.B. vom Vario-Laufwerk) auswählen — jede Datei wird ausschliesslich dem bestehenden Flug mit exakt gleichem Datum UND gleicher Startzeit zugeordnet, dort als Original-Datei nachträglich gespeichert und wie bei einem regulären Re-Import eingelesen (Track, Karte, Höhenprofil, Distanz, Dauer, Steigen/Sinken, Max Speed usw. entsprechen danach exakt der Originaldatei). Bereits manuell gepflegte Felder bleiben unangetastet. Für Flüge ohne eindeutigen Treffer passiert nichts."}
+            style={{width:"100%",boxSizing:"border-box",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:8,padding:"7px 34px 7px 10px",color:"#a78bfa",fontSize:11,fontWeight:600,cursor:(rawBackfillResult?.running||rawBackfillScanning)?"default":"pointer"}}>
+            {rawBackfillScanning ? "⏳ Durchsuche Ordner…" : rawBackfillResult?.running ? "⏳ Aktualisiere…" : `🗄️ Original-IGC-Dateien für bestehende Flüge nachsichern (Einmalfunktion)${igcDirHandle ? ` — Ordner „${igcDirName}"` : ""}`}
           </button>
+          {igcDirFsapiSupported && igcDirHandle && (
+            <button
+              onClick={()=>rawBackfillFileRef.current?.click()}
+              disabled={rawBackfillResult?.running || rawBackfillScanning}
+              title="Statt den ganzen Ordner zu durchsuchen: einzelne .igc-Dateien direkt über die Dateiauswahl wählen"
+              style={{position:"absolute",top:"50%",right:6,transform:"translateY(-50%)",width:20,height:20,padding:0,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(167,139,250,0.15)",border:"1px solid rgba(167,139,250,0.3)",borderRadius:6,color:"#a78bfa",fontSize:10,cursor:(rawBackfillResult?.running||rawBackfillScanning)?"default":"pointer"}}>
+              📄
+            </button>
+          )}
         </div>
       )}
 
       {rawBackfillResult && !rawBackfillResult.running && (
-        <div style={{margin:"8px 16px 0",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-          <span style={{fontSize:12,color:"#a78bfa"}}>
-            {`✅ ${rawBackfillResult.total} Dateien geprüft — ${rawBackfillResult.updated}× Flug aktualisiert (inkl. Original-Datei), ${rawBackfillResult.ambiguous}× mehrdeutig (übersprungen), ${rawBackfillResult.matchless}× kein passender Flug gefunden.`}
+        <div style={{margin:"8px 16px 0",background:rawBackfillResult.error?"rgba(239,68,68,0.08)":"rgba(167,139,250,0.08)",border:`1px solid ${rawBackfillResult.error?"rgba(239,68,68,0.3)":"rgba(167,139,250,0.25)"}`,borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+          <span style={{fontSize:12,color:rawBackfillResult.error?"#f87171":"#a78bfa"}}>
+            {rawBackfillResult.error
+              ? "❌ "+rawBackfillResult.error
+              : `✅ ${rawBackfillResult.total} Dateien geprüft — ${rawBackfillResult.updated}× Flug aktualisiert (inkl. Original-Datei), ${rawBackfillResult.ambiguous}× mehrdeutig (übersprungen), ${rawBackfillResult.matchless}× kein passender Flug gefunden.`}
           </span>
           <button onClick={()=>setRawBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(167,139,250,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
         </div>
