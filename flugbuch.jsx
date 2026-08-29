@@ -2147,6 +2147,7 @@ function flightFieldValue(f, field){
     case "name": case "titel": return f.name||"";
     case "site": case "start": case "startplatz": return f.site||"";
     case "landung": case "landeplatz": return cf.landung||"";
+    case "land": case "country": return cf.land||"";
     case "schirm": case "glider": case "gerät": case "geraet": return f.glider||"";
     case "typ": case "type": return cf.typ||"";
     case "pilot": return f.pilot||"";
@@ -2250,7 +2251,7 @@ function evalToken(f, tok){
     return fvStr.toLowerCase().includes(rawStr.toLowerCase());
   }
   // plain word => search across all text
-  const hay=[f.name,f.site,f.glider,f.pilot,f.customFields?.landung,f.customFields?.reise,f.comment,f.notes,f.date,f.year].join(" ").toLowerCase();
+  const hay=[f.name,f.site,f.glider,f.pilot,f.customFields?.landung,f.customFields?.land,f.customFields?.reise,f.comment,f.notes,f.date,f.year].join(" ").toLowerCase();
   return hay.includes(tok.toLowerCase());
 }
 // ── SORT ENGINE ──────────────────────────────────────────────────────────
@@ -2263,6 +2264,7 @@ const SORT_OPTIONS = [
   { id: "endTime",  label: "Landezeit" },
   { id: "site",     label: "Startplatz" },
   { id: "landung",  label: "Landeplatz" },
+  { id: "land",     label: "Land" },
   { id: "glider",   label: "Schirm" },
   { id: "typ",      label: "Typ" },
   { id: "reise",    label: "Reise" },
@@ -2318,6 +2320,7 @@ function sortFieldValue(f, sortId) {
     case "entfernungSL": return f.entfernungSL || 0;
     case "site":     return (f.site || "").toLowerCase();
     case "landung":  return (cf.landung || "").toLowerCase();
+    case "land":     return (cf.land || "").toLowerCase();
     case "glider":   return (f.glider || "").toLowerCase();
     case "typ":      return (cf.typ || "").toLowerCase();
     case "pilot":    return (f.pilot || "").toLowerCase();
@@ -2409,6 +2412,7 @@ const SEARCH_FIELDS = [
   { id: "name",      label: "Name/Titel",     type: "text" },
   { id: "site",      label: "Startplatz",     type: "text" },
   { id: "landung",   label: "Landeplatz",     type: "text" },
+  { id: "land",      label: "Land",           type: "text" },
   { id: "glider",    label: "Schirm",         type: "text" },
   { id: "typ",       label: "Typ",            type: "text" },
   { id: "pilot",     label: "Pilot",          type: "text" },
