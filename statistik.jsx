@@ -378,8 +378,71 @@ function MaxStatsSection({ flights }) {
   );
 }
 
+// ── TEMPORÄR: Typ-Diagnose ───────────────────────────────────────────────
+// Debug-Hilfsmittel zur Untersuchung der Diskrepanz zwischen Flugbuch- und
+// Statistik-Flugzahl bei aktivem Typ-Filter (siehe Chat vom 2026-08-29).
+// Gruppiert alle Flüge nach dem exakten, ungetrimmten Rohwert von
+// customFields.typ (via JSON.stringify), damit unsichtbare Abweichungen
+// (Groß-/Kleinschreibung, führende/eingebettete Leerzeichen) auffallen,
+// die beim Filtern nach "GS" ansonsten stillschweigend durchfallen.
+// Nach Abschluss der Diagnose wieder entfernen: diese Funktion,
+// TypDebugPanel, den State/Button in StatistikApp und diesen Kommentar.
+function computeTypDebugGroups(flights) {
+  const groups = new Map();
+  flights.forEach(f => {
+    const raw = f.customFields?.typ;
+    const key = JSON.stringify(raw);
+    if (!groups.has(key)) groups.set(key, { raw, count: 0, samples: [] });
+    const g = groups.get(key);
+    g.count++;
+    if (g.samples.length < 8) g.samples.push(f);
+  });
+  return [...groups.values()].sort((a, b) => b.count - a.count);
+}
+
+function TypDebugPanel({ flights, onClose }) {
+  const groups = React.useMemo(() => computeTypDebugGroups(flights), [flights]);
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 480, maxHeight: "80vh", overflowY: "auto", background: "#0f1f33", borderTop: "1px solid rgba(255,255,255,0.12)", borderRadius: "16px 16px 0 0", padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>🐞 Typ-Diagnose</div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginBottom: 12 }}>
+          {flights.length} Flüge insgesamt · customFields.typ gruppiert nach exaktem Rohwert (JSON.stringify macht Leerzeichen/Groß-Klein-Unterschiede sichtbar). Rot = weicht von "GS" ab.
+        </div>
+        {groups.map((g, i) => {
+          const trimmed = (g.raw || "").trim();
+          const isGS = trimmed === "GS";
+          return (
+            <div key={i} style={{ padding: "8px 4px", borderBottom: i < groups.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, fontWeight: 700 }}>
+                <span style={{ color: isGS ? "#7dd3fc" : "#f87171", fontFamily: "monospace" }}>{JSON.stringify(g.raw)}</span>
+                <span style={{ color: "rgba(232,244,253,0.6)" }}>{g.count}×</span>
+              </div>
+              {!isGS && (
+                <div style={{ marginTop: 4, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                  {g.samples.map(f => (
+                    <a key={f.id} href={`flugbuch.html?openFlightId=${encodeURIComponent(f.id)}`}
+                      style={{ fontSize: 11, color: "#7dd3fc", textDecoration: "none", background: "rgba(125,211,252,0.1)", borderRadius: 6, padding: "2px 6px" }}>
+                      {f.date}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function StatistikApp() {
   const [flights, setFlights] = React.useState(null); // null = noch am Laden
+  const [typDebugOpen, setTypDebugOpen] = React.useState(false); // TEMPORÄR — Typ-Diagnose, siehe TypDebugPanel
 
   React.useEffect(() => {
     (async () => {
@@ -574,6 +637,15 @@ function StatistikApp() {
           <div style={{ fontSize: 12, color: "rgba(232,244,253,0.45)" }}>{all.length} Flüge insgesamt · {filtered.length} nach Filter</div>
         </div>
       </div>
+
+      {/* TEMPORÄR — Typ-Diagnose-Button, siehe TypDebugPanel oben; nach Klärung wieder entfernen */}
+      <div style={{ padding: "0 16px 4px" }}>
+        <button onClick={() => setTypDebugOpen(true)}
+          style={{ background: "rgba(248,113,113,0.1)", border: "1px solid rgba(248,113,113,0.25)", borderRadius: 8, padding: "6px 10px", color: "#f87171", fontSize: 11, cursor: "pointer" }}>
+          🐞 Typ-Diagnose (temporär)
+        </button>
+      </div>
+      {typDebugOpen && <TypDebugPanel flights={all} onClose={() => setTypDebugOpen(false)} />}
 
       <div style={{ padding: "4px 16px 14px" }}>
         <ViewSwitcher view={view} onChange={changeView} />
