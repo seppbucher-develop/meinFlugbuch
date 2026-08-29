@@ -95,9 +95,20 @@
       async get(key) {
         try {
           const raw = await idbGet(keyFor(key));
+          // localStorage only ever gets a value here as set()'s fallback
+          // after a failed IndexedDB write, so a value that differs from
+          // what's in IndexedDB is a more recent save that never made it
+          // there — previously only checked when IndexedDB had no entry
+          // at all, so such a write stayed silently invisible on every
+          // future load. Heal it by writing it back into IndexedDB.
+          let lsRaw = null;
+          try { lsRaw = localStorage.getItem(keyFor(key)); } catch {}
+          if (lsRaw !== null && lsRaw !== raw) {
+            try { await idbSet(keyFor(key), lsRaw); } catch {}
+            return { key, value: lsRaw };
+          }
           if (raw !== null) return { key, value: raw };
-          const lsRaw = localStorage.getItem(keyFor(key));
-          return lsRaw !== null ? { key, value: lsRaw } : null;
+          return null;
         } catch (e) {
           console.error("storage.get error, falling back to localStorage:", e);
           try {
