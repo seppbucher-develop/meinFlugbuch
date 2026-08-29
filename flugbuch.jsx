@@ -3143,7 +3143,17 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
     const saveField = async (patch) => {
       const upd = { ...fl, ...patch,
         customFields: { ...(fl.customFields||{}), ...(patch.customFields||{}) } };
-      await saveFlight(upd);
+      const result = await saveFlight(upd);
+      // Bei einem tatsächlich fehlgeschlagenen Speichern (z.B. ein
+      // zirkuläres Objekt in customFields, das JSON.stringify zum Werfen
+      // bringt) den lokalen State bewusst NICHT aktualisieren — sonst zeigt
+      // die UI einen Wert als gespeichert an, der es nie wurde (siehe Chat
+      // vom 2026-08-29). Stattdessen sichtbar warnen, auch ohne
+      // Browser-Konsole erreichbar (z.B. am Handy).
+      if (!result.ok) {
+        alert("Speichern fehlgeschlagen — die Änderung wurde NICHT übernommen.\n\nFehler: " + (result.error?.message || String(result.error)));
+        return;
+      }
       setFlights(p=>p.map(f=>f.id===upd.id?upd:f));
       setSelected(upd);
     };
@@ -3208,7 +3218,14 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
         const kmh = distNum / (upd.durationSec / 3600);
         upd.customFields = { ...upd.customFields, kmh: kmh.toFixed(1) };
       }
-      await saveFlight(upd);
+      const result = await saveFlight(upd);
+      // Siehe saveField oben — bei tatsächlichem Fehlschlag den lokalen
+      // State nicht aktualisieren, sonst zeigt die UI einen nie
+      // gespeicherten Wert als gespeichert an.
+      if (!result.ok) {
+        alert("Speichern fehlgeschlagen — die Änderung wurde NICHT übernommen.\n\nFehler: " + (result.error?.message || String(result.error)));
+        return;
+      }
       setFlights(p=>p.map(f=>f.id===upd.id?upd:f));
       setSelected(upd);
     };
@@ -4322,8 +4339,26 @@ function FlugbuchApp() {
     })();
   }, []);
 
+    // Bisher wurde ein Fehler hier komplett stillschweigend verschluckt —
+    // inklusive eines synchron werfenden JSON.stringify(f) (z.B. bei einem
+    // zirkulären Objekt in customFields), was Aufrufer wie saveField unten
+    // nie erfuhren: sie aktualisierten den lokalen React-State trotzdem, der
+    // Flug sah im UI "gespeichert" aus, obwohl in Wahrheit nichts in
+    // IndexedDB/localStorage ankam (siehe Chat vom 2026-08-29 — Flüge mit
+    // "GS" im UI, aber leerem Typ laut Statistik/Storage). Jetzt wird der
+    // Fehler geloggt und ein Erfolgs-/Fehler-Ergebnis zurückgegeben, damit
+    // saveField/saveComputedField den Nutzer warnen können, statt einen
+    // nie gespeicherten Wert als gespeichert anzuzeigen. Bestehende
+    // Aufrufer, die das Ergebnis ignorieren (await saveFlight(x);), sind
+    // davon nicht betroffen — sie verhalten sich wie zuvor.
     const saveFlight = useCallback(async (f) => {
-    try { await window.storage.set(`flight:${f.id}`, JSON.stringify(f)); } catch {}
+    try {
+      await window.storage.set(`flight:${f.id}`, JSON.stringify(f));
+      return { ok: true };
+    } catch (e) {
+      console.error("Flug konnte nicht gespeichert werden:", f?.id, e);
+      return { ok: false, error: e };
+    }
   }, []);
 
   // Einmalige Nachrechnen-Funktion für bereits importierte Flüge: läuft über
