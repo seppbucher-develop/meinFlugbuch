@@ -124,10 +124,29 @@
         try {
           await migrateFromLocalStorageOnce();
           const raw = await idbGet(keyFor(key));
+          // localStorage only ever gets a value here as set()'s fallback
+          // after a failed IndexedDB write (the one-time migration above
+          // only fills gaps, never overwrites an existing IndexedDB entry)
+          // — so if it holds something *different* from what's in
+          // IndexedDB, that's a more recent save that never made it into
+          // IndexedDB. Previously this was only ever checked when
+          // IndexedDB had NO entry at all (raw === null); whenever
+          // IndexedDB already held some (now stale) value for the key,
+          // the newer localStorage one was silently ignored — an edit
+          // could show correctly right after saving (the in-memory app
+          // state was updated regardless) yet silently revert to the old
+          // value on the next load, since every future get() kept
+          // returning the stale IndexedDB copy. See customFields.typ
+          // desync, chat 2026-08-29. Any divergence here is now healed by
+          // writing the localStorage value back into IndexedDB.
+          let lsRaw = null;
+          try { lsRaw = localStorage.getItem(keyFor(key)); } catch {}
+          if (lsRaw !== null && lsRaw !== raw) {
+            try { await idbSet(keyFor(key), lsRaw); } catch {}
+            return { key, value: lsRaw };
+          }
           if (raw !== null) return { key, value: raw };
-          // Fallback read in case IndexedDB is empty but localStorage has it
-          const lsRaw = localStorage.getItem(keyFor(key));
-          return lsRaw !== null ? { key, value: lsRaw } : null;
+          return null;
         } catch (e) {
           console.error("storage.get error, falling back to localStorage:", e);
           try {
