@@ -2343,13 +2343,51 @@ function sortFlights(flights, sortId, dir) {
   return dir === "desc" ? sorted.reverse() : sorted;
 }
 
+// Sortier-Felder, deren Wert in FlightRow ohnehin schon zu sehen ist —
+// wird nach einem davon sortiert, muss kein zusätzliches Feld eingeblendet
+// werden, weil es schon auf der Zeile steht.
+const FLIGHT_ROW_VISIBLE_SORT_IDS = new Set([
+  "date", "site", "landung", "reise", "glider", "maxSpeed", "dist", "duration", "rating",
+]);
+
+// Formatiert den Wert des aktuell gewählten Sortierfelds für die Anzeige in
+// einer Flugzeile, damit man beim Sortieren nach einem sonst nicht
+// sichtbaren Feld (z.B. Land, Pilot, H.Diff.) auch sieht, wonach die Liste
+// gerade geordnet ist — statt raten zu müssen.
+function sortFieldDisplay(f, sortId) {
+  const cf = f.customFields || {};
+  switch (sortId) {
+    case "number": case "name": return f.name || null;
+    case "jahr": case "year": return f.year || null;
+    case "startTime": return f.startTime || null;
+    case "endTime": return f.endTime || null;
+    case "land": return cf.land || null;
+    case "typ": return cf.typ || null;
+    case "pilot": return f.pilot || null;
+    case "alt": return f.maxAlt ? f.maxAlt+" m" : ((cf.hMax||cf.hm) ? (cf.hMax||cf.hm)+" m" : null);
+    case "startAlt": return f.startAlt>0 ? f.startAlt+" m" : (cf.msa ? cf.msa+" m" : null);
+    case "endAlt": return f.endAlt>0 ? f.endAlt+" m" : (cf.ml ? cf.ml+" m" : null);
+    case "hDiff": return cf.hDiff ? cf.hDiff+" m" : null;
+    case "speed": return cf.kmh ? cf.kmh+" km/h" : null;
+    case "maxSteigen": return (cf.maxSteigen||f.maxClimb) ? fmt1(cf.maxSteigen||f.maxClimb)+" m/s" : null;
+    case "maxSteigen20": return (cf.maxSteigen20||f.maxClimb20) ? fmt1(cf.maxSteigen20||f.maxClimb20)+" m/s" : null;
+    case "maxSinken": return cf.maxSinken ? fmt1(cf.maxSinken)+" m/s" : null;
+    case "hGew": return cf.hGew ? cf.hGew+" m" : null;
+    case "entfernungSL": return f.entfernungSL!=null ? f.entfernungSL+" km" : null;
+    default: return null;
+  }
+}
+
 // Einzeilige Flugzeile — ein Design für schmale und breite Ansicht
 // (früher: eigene Wide-/iPhone-Varianten). IGC-/CSV-Quellenbadges bewusst
 // weggelassen (nicht relevant für die Übersicht), rechts immer Max Speed,
 // Distanz und Dauer, unabhängig von der aktuellen Sortierung.
-function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSelect }) {
+function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSelect, sortId }) {
   const distText = f.totalDist ? `${f.totalDist} km` : null;
   const speedText = f.maxSpeedKmh ? `${f.maxSpeedKmh} km/h` : null;
+  // Zusätzliches Feld für das aktuelle Sortierkriterium — nur wenn es nicht
+  // schon durch eines der fest angezeigten Felder oben abgedeckt ist.
+  const sortExtra = !FLIGHT_ROW_VISIBLE_SORT_IDS.has(sortId) ? sortFieldDisplay(f, sortId) : null;
   return (
     <div onClick={selectMode ? ()=>onToggleSelect(f.id) : onClick}
       style={{padding:"5px 16px",borderBottom:"1px solid rgba(255,255,255,0.04)",cursor:"pointer",display:"flex",alignItems:"center",gap:8,background:isSelected?"rgba(14,165,233,0.1)":"transparent",transition:"background 0.15s",whiteSpace:"nowrap",overflow:"hidden"}}
@@ -2366,6 +2404,7 @@ function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSele
       {f.customFields?.landung && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0}}>→ {f.customFields.landung}</span>}
       {f.customFields?.reise && <span style={{fontSize:11,fontWeight:700,color:"#fcd34d",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.customFields.reise}</span>}
       {f.glider && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
+      {sortExtra && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {SORT_OPTIONS.find(o=>o.id===sortId)?.label}: {sortExtra}</span>}
       <span style={{flex:1}} />
       <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
         {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
@@ -3750,7 +3789,7 @@ function SidebarList({ flights, selectedId, onSelect, longestId }) {
       </div>
       {sortId !== "date" ? (
         sortFlights(filtered, sortId, sortDir).map(f => (
-          <SidebarFlightRow key={f.id} f={f} selectedId={selectedId} longestId={longestId} onSelect={onSelect}
+          <SidebarFlightRow key={f.id} f={f} selectedId={selectedId} longestId={longestId} onSelect={onSelect} sortId={sortId}
             registerRef={el=>{ rowRefs.current[f.id]=el; }} />
         ))
       ) : years.map(yr => {
@@ -3759,7 +3798,7 @@ function SidebarList({ flights, selectedId, onSelect, longestId }) {
           <div key={yr}>
             <div style={{padding:"8px 14px",fontSize:12,fontWeight:700,color:"#7dd3fc",background:"rgba(255,255,255,0.02)"}}>{yr} · {yFlights.length}</div>
             {yFlights.map(f => (
-              <SidebarFlightRow key={f.id} f={f} selectedId={selectedId} longestId={longestId} onSelect={onSelect}
+              <SidebarFlightRow key={f.id} f={f} selectedId={selectedId} longestId={longestId} onSelect={onSelect} sortId={sortId}
                 registerRef={el=>{ rowRefs.current[f.id]=el; }} />
             ))}
           </div>
@@ -3769,7 +3808,10 @@ function SidebarList({ flights, selectedId, onSelect, longestId }) {
   );
 }
 
-function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef }) {
+const SIDEBAR_ROW_VISIBLE_SORT_IDS = new Set(["date", "site", "rating"]);
+
+function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef, sortId }) {
+  const sortExtra = !SIDEBAR_ROW_VISIBLE_SORT_IDS.has(sortId) ? sortFieldDisplay(f, sortId) : null;
   return (
     <div ref={registerRef} onClick={()=>onSelect(f)}
       style={{padding:"5px 14px",cursor:"pointer",borderBottom:"1px solid rgba(255,255,255,0.04)",background:f.id===selectedId?"rgba(14,165,233,0.12)":"transparent",borderLeft:f.id===selectedId?"3px solid #7dd3fc":"3px solid transparent"}}>
@@ -3779,6 +3821,7 @@ function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef }) {
         {f.rating>0 && <span style={{fontSize:11}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
       </div>
       <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{f.site}</div>
+      {sortExtra && <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{SORT_OPTIONS.find(o=>o.id===sortId)?.label}: {sortExtra}</div>}
     </div>
   );
 }
@@ -5665,7 +5708,7 @@ function FlugbuchApp() {
           </div>
         )}
         {sortFlights(filteredFlights, sortId, sortDir).map(f => (
-          <FlightRow key={f.id} f={f} isLongest={f.id===longestId}
+          <FlightRow key={f.id} f={f} isLongest={f.id===longestId} sortId={sortId}
             selectMode={selectMode} isSelected={selectedIds.has(f.id)}
             onToggleSelect={id=>setSelectedIds(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;})}
             onClick={()=>{setSelected(f);setView("detail");}} />
