@@ -4168,8 +4168,8 @@ function FlugbuchApp() {
   // während sie läuft.
   const [recomputeResult, setRecomputeResult] = useState(null);
   // Ergebnis-Banner der einmaligen Funktion, die für bereits bestehende
-  // Flüge nachträglich die Original-IGC-Datei sichert (siehe
-  // backfillRawIgcFiles weiter unten) — {saved, ambiguous, matchless, total}
+  // Flüge nachträglich die Original-IGC-Datei zuordnet (siehe
+  // backfillRawIgcFiles weiter unten) — {updated, ambiguous, matchless, total}
   // oder {running:true} während sie läuft.
   const [rawBackfillResult, setRawBackfillResult] = useState(null);
   const rawBackfillFileRef = useRef(null);
@@ -4483,45 +4483,6 @@ function FlugbuchApp() {
     });
   }, [flights, saveFlight, selected]);
 
-  // ── Einmalfunktion: Original-IGC-Dateien für bestehende Flüge nachsichern
-  // ──────────────────────────────────────────────────────────────────────
-  // Vor storeRawIgcFile wurden importierte IGC-Dateien nur geparst, nie als
-  // solche gespeichert (siehe Kommentar dort). Für Flüge, die schon vor
-  // dieser Änderung importiert wurden, lässt sich die Originaldatei hiermit
-  // nachträglich sichern — ganz bewusst KEIN erneuter Import: es wird
-  // ausschliesslich die rohe Datei zum jeweils passenden, bereits
-  // bestehenden Flug abgelegt, kein einziges Flugfeld wird dabei verändert.
-  // "Passend" heisst hier strikt exaktes Datum UND exakte Startzeit (wie im
-  // Feld gespeichert) — bei mehreren oder keinem Treffer wird die Datei
-  // übersprungen, statt zu raten.
-  const backfillRawIgcFiles = useCallback(async (files) => {
-    const igcFiles = files.filter(f => /\.igc$/i.test(f.name));
-    if (!igcFiles.length) return;
-    setRawBackfillResult({ running: true });
-    let saved = 0, ambiguous = 0, matchless = 0;
-    for (const file of igcFiles) {
-      try {
-        const text = await file.text();
-        const { track, date, tzOffsetHours } = parseIGC(text);
-        if (!track.length) { matchless++; continue; }
-        const { startTime } = analyzeIGC(track, tzOffsetHours, date);
-        const candidates = flights.filter(f => f.date === date && f.startTime === startTime);
-        if (candidates.length === 1) {
-          await storeRawIgcFile(candidates[0].id, file);
-          saved++;
-        } else if (candidates.length > 1) {
-          ambiguous++;
-        } else {
-          matchless++;
-        }
-      } catch (e) {
-        console.error("IGC-Datei beim Nachsichern übersprungen:", file.name, e);
-        matchless++;
-      }
-    }
-    setRawBackfillResult({ saved, ambiguous, matchless, total: igcFiles.length });
-  }, [flights]);
-
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
     const maxNr = flights.reduce((m,f)=>{
@@ -4669,8 +4630,9 @@ function FlugbuchApp() {
     return { name: cleaned, schirmId: entry.id };
   }, []);
 
-  // Applies parsed IGC data onto an existing flight (shared by both the
-  // filename-match and the date-match paths, so they stay in sync).
+  // Applies parsed IGC data onto an existing flight (shared by the
+  // filename-match and date-match import paths AND by the one-time
+  // backfillRawIgcFiles further below, so all three stay in sync).
   const attachIgcToFlight = useCallback(async (existing, file, track, date, pilot, glider, igcData, igcFilename, overrideMap) => {
     const cf = { ...(existing.customFields||{}) };
     // Gleiche Regel wie der Typ-Auto-Effekt in FlightDetail: nur setzen,
@@ -4757,6 +4719,51 @@ function FlugbuchApp() {
     setFlights(prev=>prev.map(f=>f.id===updated.id?updated:f));
     if (selected?.id===updated.id) setSelected(updated);
   }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
+
+  // ── Einmalfunktion: Original-IGC-Dateien für bestehende Flüge nachsichern
+  // ──────────────────────────────────────────────────────────────────────
+  // Vor storeRawIgcFile wurden importierte IGC-Dateien nur geparst, nie als
+  // solche gespeichert (siehe Kommentar dort). Für Flüge, die schon vor
+  // dieser Änderung importiert wurden, lässt sich die Originaldatei hiermit
+  // nachträglich zuordnen — über genau denselben Weg wie ein regulärer
+  // Re-Import (attachIgcToFlight), NICHT nur ein reines Ablegen der rohen
+  // Bytes: Track, Karte, Höhenprofil und alle daraus berechneten Werte
+  // (Distanz, Dauer, Steigen/Sinken, Max Speed, …) sollen exakt der
+  // Originaldatei entsprechen, sobald eine vorliegt — nicht einem davon
+  // möglicherweise abweichenden, älteren gespeicherten Track. Bereits
+  // manuell gepflegte Felder (Startplatz, XContest-Distanz, Kommentar,
+  // Bewertung, …) bleiben dabei unangetastet, exakt wie bei jedem anderen
+  // IGC-Re-Import (siehe attachIgcToFlight). "Passend" heisst hier strikt
+  // exaktes Datum UND exakte Startzeit (wie im Feld gespeichert) — bei
+  // mehreren oder keinem Treffer wird die Datei übersprungen, statt zu raten.
+  const backfillRawIgcFiles = useCallback(async (files) => {
+    const igcFiles = files.filter(f => /\.igc$/i.test(f.name));
+    if (!igcFiles.length) return;
+    setRawBackfillResult({ running: true });
+    let updated = 0, ambiguous = 0, matchless = 0;
+    for (const file of igcFiles) {
+      try {
+        const text = await file.text();
+        const { track, date, pilot, glider, tzOffsetHours } = parseIGC(text);
+        if (!track.length) { matchless++; continue; }
+        const igcData = analyzeIGC(track, tzOffsetHours, date);
+        const candidates = flights.filter(f => f.date === date && f.startTime === igcData.startTime);
+        if (candidates.length === 1) {
+          const baseName = file.name.replace(/\.igc$/i, "");
+          await attachIgcToFlight(candidates[0], file, track, date, pilot, glider, igcData, baseName);
+          updated++;
+        } else if (candidates.length > 1) {
+          ambiguous++;
+        } else {
+          matchless++;
+        }
+      } catch (e) {
+        console.error("IGC-Datei beim Nachsichern übersprungen:", file.name, e);
+        matchless++;
+      }
+    }
+    setRawBackfillResult({ updated, ambiguous, matchless, total: igcFiles.length });
+  }, [flights, attachIgcToFlight]);
 
   // Zweiter Teil des Imports (nach einer evtl. NewSchirmDialog-Bestätigung)
   // — arbeitet auf bereits geparsten Dateien, damit ein pausierter Import
@@ -5283,17 +5290,18 @@ function FlugbuchApp() {
 
       {/* Einmalige Nachsicher-Funktion für bereits bestehende Flüge (siehe
           backfillRawIgcFiles) — für Flüge, die noch vor Einführung der
-          Original-IGC-Speicherung importiert wurden. Legt ausschliesslich
-          die exakt passende Original-IGC-Datei nachträglich ab (Zuordnung
-          strikt über Datum+Startzeit), ändert sonst nichts am Flug. */}
+          Original-IGC-Speicherung importiert wurden. Ordnet die exakt
+          passende Original-IGC-Datei nachträglich zu (Zuordnung strikt über
+          Datum+Startzeit) und aktualisiert dabei Track/Karte/Höhenprofil und
+          alle daraus berechneten Werte wie bei einem regulären Re-Import. */}
       {showImportMenu && (
         <div style={{margin:"6px 16px 0"}}>
           <input ref={rawBackfillFileRef} type="file" accept=".igc" multiple style={{display:"none"}}
             onChange={e=>{ backfillRawIgcFiles(Array.from(e.target.files)); e.target.value=""; }} />
           <button onClick={()=>rawBackfillFileRef.current?.click()} disabled={rawBackfillResult?.running}
-            title="Bereits vorhandene .igc-Dateien (z.B. vom Vario-Laufwerk) auswählen — jede Datei wird ausschliesslich dem bestehenden Flug mit exakt gleichem Datum UND gleicher Startzeit zugeordnet und dort als Original-Datei nachträglich gespeichert. Kein erneuter Import, kein Flugfeld wird dabei verändert. Für Flüge ohne eindeutigen Treffer passiert nichts."
+            title="Bereits vorhandene .igc-Dateien (z.B. vom Vario-Laufwerk) auswählen — jede Datei wird ausschliesslich dem bestehenden Flug mit exakt gleichem Datum UND gleicher Startzeit zugeordnet, dort als Original-Datei nachträglich gespeichert und wie bei einem regulären Re-Import eingelesen (Track, Karte, Höhenprofil, Distanz, Dauer, Steigen/Sinken, Max Speed usw. entsprechen danach exakt der Originaldatei). Bereits manuell gepflegte Felder bleiben unangetastet. Für Flüge ohne eindeutigen Treffer passiert nichts."
             style={{width:"100%",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:8,padding:"7px 10px",color:"#a78bfa",fontSize:11,fontWeight:600,cursor:rawBackfillResult?.running?"default":"pointer"}}>
-            {rawBackfillResult?.running ? "⏳ Sichere…" : "🗄️ Original-IGC-Dateien für bestehende Flüge nachsichern (Einmalfunktion)"}
+            {rawBackfillResult?.running ? "⏳ Aktualisiere…" : "🗄️ Original-IGC-Dateien für bestehende Flüge nachsichern (Einmalfunktion)"}
           </button>
         </div>
       )}
@@ -5301,7 +5309,7 @@ function FlugbuchApp() {
       {rawBackfillResult && !rawBackfillResult.running && (
         <div style={{margin:"8px 16px 0",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
           <span style={{fontSize:12,color:"#a78bfa"}}>
-            {`✅ ${rawBackfillResult.total} Dateien geprüft — ${rawBackfillResult.saved}× gesichert, ${rawBackfillResult.ambiguous}× mehrdeutig (übersprungen), ${rawBackfillResult.matchless}× kein passender Flug gefunden.`}
+            {`✅ ${rawBackfillResult.total} Dateien geprüft — ${rawBackfillResult.updated}× Flug aktualisiert (inkl. Original-Datei), ${rawBackfillResult.ambiguous}× mehrdeutig (übersprungen), ${rawBackfillResult.matchless}× kein passender Flug gefunden.`}
           </span>
           <button onClick={()=>setRawBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(167,139,250,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
         </div>
