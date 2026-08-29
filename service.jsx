@@ -13,6 +13,108 @@ function formatBytes(n) {
   return (n / (1024 * 1024)).toFixed(2) + " MB";
 }
 
+// Formatiert einen gespeicherten ISO-Zeitstempel wie "29.08.2026, 14:32" für
+// die Anzeige bei den Backup-/Restore-Knöpfen.
+function formatTimestamp(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (isNaN(d)) return null;
+  return d.toLocaleString("de-CH", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+// ── CSV/IGC-Export ───────────────────────────────────────────────────────
+// Lädt Flüge/Material/Schirme direkt aus derselben IndexedDB, genau wie
+// schirme.jsx das für seine eigene Anzeige tut (service.jsx teilt keinen
+// Code mit den anderen eigenständigen Seiten, daher hier dupliziert).
+async function loadAllFlights() {
+  const keys = await window.storage.list("flight:");
+  const raw = await Promise.all((keys?.keys || []).map(async k => {
+    try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; } catch { return null; }
+  }));
+  return raw.filter(Boolean);
+}
+async function loadAllMaterial() {
+  const keys = await window.storage.list("entry:");
+  const raw = await Promise.all((keys?.keys || []).map(async k => {
+    try { const r = await window.storage.get(k); return r ? JSON.parse(r.value) : null; } catch { return null; }
+  }));
+  return raw.filter(Boolean);
+}
+async function loadSchirmeList() {
+  try {
+    const r = await window.storage.get("schirme:list");
+    return r ? JSON.parse(r.value) : [];
+  } catch { return []; }
+}
+
+// Generischer CSV-Baustein: erzeugt aus einer Liste beliebiger Objekte eine
+// Datei mit genau einer Spalte pro tatsächlich vorkommendem Feld (Union
+// aller Schlüssel, in der Reihenfolge ihres ersten Auftretens) — bewusst
+// nichts hart verdrahtet, damit ALLE Datenbankfelder mitkommen, auch
+// künftig neu hinzugekommene. Verschachtelte Objekte, die selbst eigene
+// "Felder" darstellen (customFields bei Flügen), werden dafür zu eigenen
+// Spalten "customFields.xyz" aufgelöst statt als ein JSON-Klumpen in einer
+// Zelle zu landen; alles andere Verschachtelte (z.B. track, startPt, endPt)
+// wird als JSON-Text in seiner eigenen Spalte abgelegt.
+function flattenForCsv(record, flattenKeys) {
+  const out = {};
+  for (const [k, v] of Object.entries(record)) {
+    if (flattenKeys.includes(k) && v && typeof v === "object" && !Array.isArray(v)) {
+      for (const [sk, sv] of Object.entries(v)) out[`${k}.${sk}`] = sv;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+function csvCell(v) {
+  let s;
+  if (v === null || v === undefined) s = "";
+  else if (typeof v === "object") s = JSON.stringify(v);
+  else s = String(v);
+  if (/[",\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function buildCsv(records, flattenKeys = []) {
+  const flat = records.map(r => flattenForCsv(r, flattenKeys));
+  const keys = [];
+  const seen = new Set();
+  for (const r of flat) for (const k of Object.keys(r)) if (!seen.has(k)) { seen.add(k); keys.push(k); }
+  const lines = [keys.map(csvCell).join(",")];
+  for (const r of flat) lines.push(keys.map(k => csvCell(r[k])).join(","));
+  // BOM voran, damit Excel Umlaute (ü, ö, …) korrekt als UTF-8 erkennt.
+  return "\uFEFF" + lines.join("\r\n");
+}
+
+// Baut denselben rekonstruierten IGC-Text wie der "⬇ IGC"-Knopf im Flugbuch
+// selbst (siehe DetailContent in flugbuch.jsx) — die App speichert keine
+// rohe IGC-Datei, sondern nur den geparsten Track, und rekonstruiert daraus
+// bei Bedarf eine gültige (wenn auch minimale) IGC-Datei. Dieselbe Logik
+// hier dupliziert, da service.jsx als eigenständige Seite keinen Code mit
+// flugbuch.jsx teilt.
+function buildIgcTextFromFlight(fl) {
+  const t = fl.track;
+  if (!t || t.length < 2) return null;
+  const d = fl.rawDate || fl.date || "";
+  const parts = d.split(".");
+  const dateStr = parts.length === 3 ? parts[0].padStart(2, "0") + parts[1].padStart(2, "0") + parts[2].slice(-2) : "010101";
+  const fmtTime = s => { const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60; return String(h).padStart(2, "0") + String(m).padStart(2, "0") + String(sec).padStart(2, "0"); };
+  const fmtLat = lat => { const a = Math.abs(lat), dg = Math.floor(a), m = (a - dg) * 60000; return String(dg).padStart(2, "0") + String(Math.round(m)).padStart(5, "0") + (lat >= 0 ? "N" : "S"); };
+  const fmtLon = lon => { const a = Math.abs(lon), dg = Math.floor(a), m = (a - dg) * 60000; return String(dg).padStart(3, "0") + String(Math.round(m)).padStart(5, "0") + (lon >= 0 ? "E" : "W"); };
+  const NL = "\r\n";
+  let igc = "AXXX" + NL + "HFDTE" + dateStr + NL;
+  igc += "HFPLTPILOTINCHARGE:" + (fl.pilot || "") + NL;
+  igc += "HFGTYGLIDERTYPE:" + (fl.glider || "") + NL;
+  igc += "HFGIDGLIDERID:" + NL;
+  for (const p of t) {
+    const ts = fmtTime(p.timeSec || 0);
+    const alt = Math.round(p.gpsAlt || 0);
+    igc += "B" + ts + fmtLat(p.lat) + fmtLon(p.lon) + "A" + String(alt).padStart(5, "0") + String(alt).padStart(5, "0") + NL;
+  }
+  const filenameBase = (fl.customFields?.igcFilename || fl.name || fl.id || "flug").toString();
+  return { filenameBase, text: igc };
+}
+
 function ServiceApp() {
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState(null); // {type:"ok"|"error", text}
@@ -161,6 +263,38 @@ function ServiceApp() {
     setFolderBackups([]);
   };
 
+  // Zeitpunkt des letzten erfolgreichen Backups/Restores — dauerhaft
+  // gespeichert (wie alles andere hier über window.storage/IndexedDB),
+  // damit die Anzeige bei den Knöpfen auch einen App-Neustart übersteht.
+  const [lastBackupAt, setLastBackupAt] = React.useState(null);
+  const [lastRestoreAt, setLastRestoreAt] = React.useState(null);
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const b = await window.storage.get("settings:lastBackupAt");
+        if (b && b.value) setLastBackupAt(b.value);
+        const r = await window.storage.get("settings:lastRestoreAt");
+        if (r && r.value) setLastRestoreAt(r.value);
+      } catch {}
+    })();
+  }, []);
+
+  // Berechtigung für den gewählten Backup-Ordner anfragen (falls nötig) —
+  // von exportBackup UND exportCsvIgc genutzt, jeweils ganz am Anfang des
+  // Klick-Handlers aufgerufen, noch bevor irgendein await die Nutzer-Geste
+  // dieses Klicks verbraucht (sonst würde requestPermission() vom Browser
+  // stillschweigend abgelehnt).
+  const requestDirWriteHandle = async () => {
+    if (!(fsapiSupported && dirHandle)) return null;
+    try {
+      let perm = await dirHandle.queryPermission({ mode: "readwrite" });
+      if (perm !== "granted") perm = await dirHandle.requestPermission({ mode: "readwrite" });
+      if (perm === "granted") { setDirPermission("granted"); return dirHandle; }
+      setDirPermission(perm);
+    } catch (e) { console.error("Berechtigung für Backup-Ordner fehlgeschlagen:", e); }
+    return null;
+  };
+
   const loadStats = React.useCallback(async () => {
     try {
       const all = await window.storage.list("");
@@ -181,15 +315,7 @@ function ServiceApp() {
     // nötig) — noch bevor irgendein await die Nutzer-Geste dieses Klicks
     // verbraucht, sonst würde requestPermission() vom Browser stillschweigend
     // abgelehnt (dieselbe Ursache wie beim navigator.share()-Problem vorhin).
-    let writeHandle = null;
-    if (fsapiSupported && dirHandle) {
-      try {
-        let perm = await dirHandle.queryPermission({ mode: "readwrite" });
-        if (perm !== "granted") perm = await dirHandle.requestPermission({ mode: "readwrite" });
-        if (perm === "granted") { writeHandle = dirHandle; setDirPermission("granted"); }
-        else setDirPermission(perm);
-      } catch (e) { console.error("Berechtigung für Backup-Ordner fehlgeschlagen:", e); }
-    }
+    let writeHandle = await requestDirWriteHandle();
     try {
       // Wirklich JEDEN Schlüssel sichern — Flüge (flight:*), Material
       // (entry:*), Statistik-Filter (statistikFilters), eigene Felder
@@ -229,6 +355,9 @@ function ServiceApp() {
 
       const markBackedUp = async () => {
         try { await window.storage.set("settings:backupDirty", "0"); } catch {}
+        const iso = new Date().toISOString();
+        try { await window.storage.set("settings:lastBackupAt", iso); } catch {}
+        setLastBackupAt(iso);
       };
 
       // Bevorzugter Weg, falls ein Ordner festgelegt und die Berechtigung
@@ -330,10 +459,102 @@ function ServiceApp() {
       }
 
       await window.storage.set("settings:backupDirty", "0");
+      const iso = new Date().toISOString();
+      try { await window.storage.set("settings:lastRestoreAt", iso); } catch {}
+      setLastRestoreAt(iso);
       setMsg({ type: "ok", text: `✓ ${count} Einträge wiederhergestellt.` });
       loadStats();
     } catch (e) {
       setMsg({ type: "error", text: "Fehler beim Wiederherstellen: " + (e.message || String(e)) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Erzeugt flugbuch.csv, material.csv, schirme.csv (je eine Spalte pro
+  // Datenbankfeld) sowie eine ZIP-Datei mit den rekonstruierten IGC-Dateien
+  // aller Flüge mit Track — und legt alle vier am selben Ort ab wie das
+  // Backup oben (automatischer Backup-Ordner, sonst Teilen/Download, exakt
+  // dieselbe Reihenfolge wie exportBackup).
+  const exportCsvIgc = async () => {
+    setBusy(true); setMsg(null);
+    let writeHandle = await requestDirWriteHandle();
+    try {
+      const [flights, material, schirme] = await Promise.all([
+        loadAllFlights(), loadAllMaterial(), loadSchirmeList(),
+      ]);
+
+      const flugbuchCsv = buildCsv(flights, ["customFields"]);
+      const materialCsv = buildCsv(material);
+      const schirmeCsv = buildCsv(schirme);
+
+      if (typeof JSZip === "undefined") throw new Error("ZIP-Bibliothek (JSZip) konnte nicht geladen werden.");
+      const zip = new JSZip();
+      const usedNames = new Set();
+      let igcCount = 0;
+      for (const fl of flights) {
+        const built = buildIgcTextFromFlight(fl);
+        if (!built) continue;
+        const safeBase = built.filenameBase.replace(/[\\/:*?"<>|]/g, "_");
+        let name = safeBase + ".igc", i = 2;
+        while (usedNames.has(name)) { name = `${safeBase}_${i}.igc`; i++; }
+        usedNames.add(name);
+        zip.file(name, built.text);
+        igcCount++;
+      }
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+
+      const files = [
+        { name: "flugbuch.csv", blob: new Blob([flugbuchCsv], { type: "text/csv;charset=utf-8" }) },
+        { name: "material.csv", blob: new Blob([materialCsv], { type: "text/csv;charset=utf-8" }) },
+        { name: "schirme.csv", blob: new Blob([schirmeCsv], { type: "text/csv;charset=utf-8" }) },
+        { name: "flugbuch-igc.zip", blob: zipBlob },
+      ];
+      const summary = `flugbuch.csv, material.csv, schirme.csv, flugbuch-igc.zip (${flights.length} Flüge, ${material.length} Material-Einträge, ${schirme.length} Schirme, ${igcCount} IGC-Dateien)`;
+
+      // Wie beim Backup: bevorzugt direkt in den festgelegten Ordner
+      // schreiben, ganz ohne Dialog.
+      if (writeHandle) {
+        try {
+          for (const f of files) {
+            const fileHandle = await writeHandle.getFileHandle(f.name, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(f.blob);
+            await writable.close();
+          }
+          setMsg({ type: "ok", text: `✓ Export gespeichert in „${writeHandle.name}": ${summary}.` });
+          setBusy(false);
+          return;
+        } catch (e) {
+          console.error("Direktes Schreiben in Backup-Ordner fehlgeschlagen, weiche auf Teilen/Download aus:", e);
+          // Kein return — fällt bewusst durch auf den bestehenden Weg unten.
+        }
+      }
+
+      if (navigator.share && navigator.canShare) {
+        try {
+          const shareFiles = files.map(f => new File([f.blob], f.name, { type: f.blob.type || "application/octet-stream" }));
+          if (navigator.canShare({ files: shareFiles })) {
+            await navigator.share({ files: shareFiles });
+            setMsg({ type: "ok", text: `✓ Export geteilt: ${summary}.` });
+            setBusy(false);
+            return;
+          }
+        } catch (e) {
+          if (e && e.name === "AbortError") { setBusy(false); return; }
+        }
+      }
+
+      for (const f of files) {
+        const url = URL.createObjectURL(f.blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = f.name;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+      setMsg({ type: "ok", text: `✓ Export heruntergeladen: ${summary}.` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Exportieren: " + (e.message || String(e)) });
     } finally {
       setBusy(false);
     }
@@ -455,17 +676,38 @@ function ServiceApp() {
             {!fsapiSupported && " Auf diesem Browser läuft „Backup sichern” über den Teilen-/Download-Dialog (die automatische Ordner-Option oben gibt es nur in Chrome/Edge am PC)."}
           </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={exportBackup} disabled={busy}
-              style={{ flex: "1 1 160px", background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 10, padding: "12px", color: "#4ade80", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
-              {busy ? "⏳ …" : "☁️ Backup sichern"}
-            </button>
-            <button onClick={() => fileRef.current?.click()} disabled={busy}
-              style={{ flex: "1 1 160px", background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 10, padding: "12px", color: "#7dd3fc", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
-              ⬆ Backup importieren (Datei wählen)
-            </button>
+            <div style={{ flex: "1 1 160px" }}>
+              <button onClick={exportBackup} disabled={busy}
+                style={{ width: "100%", boxSizing: "border-box", background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 10, padding: "12px", color: "#4ade80", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+                {busy ? "⏳ …" : "☁️ Backup sichern"}
+              </button>
+              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginTop: 6, textAlign: "center" }}>
+                {lastBackupAt ? `Letztes Backup: ${formatTimestamp(lastBackupAt)}` : "Noch kein Backup gesichert."}
+              </div>
+            </div>
+            <div style={{ flex: "1 1 160px" }}>
+              <button onClick={() => fileRef.current?.click()} disabled={busy}
+                style={{ width: "100%", boxSizing: "border-box", background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 10, padding: "12px", color: "#7dd3fc", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+                ⬆ Backup importieren (Datei wählen)
+              </button>
+              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginTop: 6, textAlign: "center" }}>
+                {lastRestoreAt ? `Letzter Restore: ${formatTimestamp(lastRestoreAt)}` : "Noch kein Restore durchgeführt."}
+              </div>
+            </div>
             <input ref={fileRef} type="file" accept=".json,.gz,.json.gz" style={{ display: "none" }}
               onChange={e => { if (e.target.files[0]) importBackup(e.target.files[0]); e.target.value = ""; }} />
           </div>
+        </div>
+
+        <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📤 Exportieren (CSV &amp; IGC)</div>
+          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 16, lineHeight: 1.5 }}>
+            Erzeugt vier Dateien — flugbuch.csv, material.csv und schirme.csv (je eine Spalte pro Datenbankfeld) sowie eine ZIP-Datei mit den IGC-Dateien aller Flüge — und legt sie am selben Ort ab wie das Backup oben{dirName ? ` (Ordner „${dirName}")` : ""}.
+          </div>
+          <button onClick={exportCsvIgc} disabled={busy}
+            style={{ width: "100%", boxSizing: "border-box", background: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: "12px", color: "#fcd34d", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+            {busy ? "⏳ …" : "📤 Exportieren"}
+          </button>
         </div>
 
         <a href="schirme.html"
