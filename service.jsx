@@ -86,12 +86,48 @@ function buildCsv(records, flattenKeys = []) {
   return "\uFEFF" + lines.join("\r\n");
 }
 
-// Baut denselben rekonstruierten IGC-Text wie der "⬇ IGC"-Knopf im Flugbuch
-// selbst (siehe DetailContent in flugbuch.jsx) — die App speichert keine
-// rohe IGC-Datei, sondern nur den geparsten Track, und rekonstruiert daraus
-// bei Bedarf eine gültige (wenn auch minimale) IGC-Datei. Dieselbe Logik
-// hier dupliziert, da service.jsx als eigenständige Seite keinen Code mit
-// flugbuch.jsx teilt.
+// Liest die tatsächlich importierte Original-IGC-Datei eines Flugs zurück
+// (gespeichert von storeRawIgcFile in flugbuch.jsx, siehe dort) — oder null,
+// wenn (noch) keine gespeichert ist, z.B. ein Flug von vor dieser Änderung,
+// der noch nicht per Einmalfunktion nachgesichert wurde. Erkennt Gzip
+// anhand der Magic Bytes 1f 8b statt eines eigenen Markers.
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+function base64ToArrayBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+async function loadRawIgcFile(flightId) {
+  try {
+    const r = await window.storage.get(`igcfile:${flightId}`);
+    if (!r || !r.value) return null;
+    const buf = base64ToArrayBuffer(r.value);
+    const bytes = new Uint8Array(buf);
+    const isGzip = bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+    if (!isGzip) return buf;
+    if (typeof DecompressionStream === "undefined") return buf;
+    const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return await (await new Response(stream).blob()).arrayBuffer();
+  } catch { return null; }
+}
+
+// Fallback für Flüge OHNE gespeicherte Original-Datei: rekonstruiert
+// denselben minimalen (aber gültigen) IGC-Text wie der "⬇ IGC"-Knopf im
+// Flugbuch selbst, wenn ihm ebenfalls keine Originaldatei vorliegt (siehe
+// DetailContent in flugbuch.jsx) — rein aus dem gespeicherten Track,
+// weniger genau als das Original (z.B. keine Logger-eigenen Zusatzfelder),
+// aber besser als gar keine Datei für ältere, noch nicht nachgesicherte
+// Flüge. Dieselbe Logik hier dupliziert, da service.jsx als eigenständige
+// Seite keinen Code mit flugbuch.jsx teilt.
 function buildIgcTextFromFlight(fl) {
   const t = fl.track;
   if (!t || t.length < 2) return null;
@@ -493,13 +529,24 @@ function ServiceApp() {
       const usedNames = new Set();
       let igcCount = 0;
       for (const fl of flights) {
-        const built = buildIgcTextFromFlight(fl);
-        if (!built) continue;
-        const safeBase = built.filenameBase.replace(/[\\/:*?"<>|]/g, "_");
+        // Bevorzugt die tatsächlich importierte Originaldatei; nur wenn
+        // dafür keine gespeichert ist, aus dem Track rekonstruieren (siehe
+        // buildIgcTextFromFlight oben).
+        const raw = await loadRawIgcFile(fl.id);
+        let safeBase, content;
+        if (raw) {
+          safeBase = (fl.customFields?.igcFilename || fl.name || fl.id || "flug").toString().replace(/[\\/:*?"<>|]/g, "_");
+          content = raw;
+        } else {
+          const built = buildIgcTextFromFlight(fl);
+          if (!built) continue;
+          safeBase = built.filenameBase.replace(/[\\/:*?"<>|]/g, "_");
+          content = built.text;
+        }
         let name = safeBase + ".igc", i = 2;
         while (usedNames.has(name)) { name = `${safeBase}_${i}.igc`; i++; }
         usedNames.add(name);
-        zip.file(name, built.text);
+        zip.file(name, content);
         igcCount++;
       }
       const zipBlob = await zip.generateAsync({ type: "blob" });

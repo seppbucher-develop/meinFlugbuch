@@ -68,6 +68,70 @@ function parseIGC(text) {
   return { track, date, pilot, glider, tzOffsetHours };
 }
 
+// ── Rohe IGC-Datei sichern ───────────────────────────────────────────────
+// Bis jetzt hat der Import nur den geparsten Track gespeichert, nie die
+// Original-Datei — ein Export musste die IGC-Datei deshalb aus dem Track
+// rekonstruieren (siehe der "⬇ IGC"-Knopf in DetailContent weiter unten),
+// was formal gültig, aber eben nicht mehr die ursprüngliche Datei ist
+// (z.B. keine zusätzlichen Header-Felder des Loggers, keine baugleichen
+// B-Record-Rundungen). Ab
+// jetzt wird bei jedem Import zusätzlich die exakte Originaldatei
+// gzip-komprimiert (spart auf Dauer deutlich Platz — IGC-Text komprimiert
+// sehr gut) und als Base64-String unter "igcfile:<flightId>" abgelegt —
+// dieselbe generische window.storage/IndexedDB, die auch von Backup/Restore
+// automatisch mitgesichert wird, ohne dass dafür dort irgendetwas
+// angepasst werden musste.
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunkSize = 0x8000; // in Stücken, um Stack-Limits bei sehr grossen Dateien zu vermeiden
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+function base64ToArrayBuffer(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+async function storeRawIgcFile(flightId, file) {
+  if (!flightId || !file) return;
+  try {
+    const buf = await file.arrayBuffer();
+    let toStore = buf;
+    if (typeof CompressionStream !== "undefined") {
+      try {
+        const gz = new Blob([buf]).stream().pipeThrough(new CompressionStream("gzip"));
+        toStore = await (await new Response(gz).blob()).arrayBuffer();
+      } catch (e) { console.error("IGC-Rohdatei: gzip fehlgeschlagen, speichere unkomprimiert:", e); }
+    }
+    await window.storage.set(`igcfile:${flightId}`, arrayBufferToBase64(toStore));
+  } catch (e) { console.error("Rohe IGC-Datei konnte nicht gespeichert werden:", e); }
+}
+// Liest die Original-IGC-Datei eines Flugs zurück (ArrayBuffer, oder null,
+// wenn keine gespeichert ist — z.B. ein Flug von vor dieser Änderung).
+// Erkennt Gzip anhand der Magic Bytes 1f 8b statt eines eigenen Markers,
+// damit auch eine (im seltenen Fall unkomprimiert gespeicherte) Datei ohne
+// CompressionStream-Unterstützung beim Speichern korrekt gelesen wird.
+async function loadRawIgcFile(flightId) {
+  try {
+    const r = await window.storage.get(`igcfile:${flightId}`);
+    if (!r || !r.value) return null;
+    const buf = base64ToArrayBuffer(r.value);
+    const bytes = new Uint8Array(buf);
+    const isGzip = bytes.length > 2 && bytes[0] === 0x1f && bytes[1] === 0x8b;
+    if (!isGzip) return buf;
+    if (typeof DecompressionStream === "undefined") return buf;
+    const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return await (await new Response(stream).blob()).arrayBuffer();
+  } catch (e) { console.error("Rohe IGC-Datei konnte nicht gelesen werden:", e); return null; }
+}
+async function deleteRawIgcFile(flightId) {
+  try { await window.storage.delete(`igcfile:${flightId}`); } catch {}
+}
+
 // No HFTZN in the file: look up the real IANA timezone for the takeoff
 // point (via the tz-lookup library, loaded in index.html/flugbuch.html)
 // and ask the browser's own Intl API for the correct UTC offset on that
@@ -3294,28 +3358,41 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
           {hideBackButton && <button onClick={()=>{ if (returnTo) { window.location.href = returnTo; } else { setView("list"); } }} style={{background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:20,padding:"6px 14px",color:"rgba(232,244,253,0.6)",fontSize:13,cursor:"pointer"}}>✕ Liste</button>}
           <div style={{display:"flex",gap:5,flexWrap:"wrap",justifyContent:"flex-end"}}>
             {fl.track?.length > 1 && (
-              <button onClick={()=>{
-                const t = fl.track;
-                const d = fl.rawDate||fl.date||"";
-                const parts = d.split(".");
-                const dateStr = parts.length===3 ? parts[0].padStart(2,"0")+parts[1].padStart(2,"0")+parts[2].slice(-2) : "010101";
-                const fmtTime = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60; return String(h).padStart(2,"0")+String(m).padStart(2,"0")+String(sec).padStart(2,"0"); };
-                const fmtLat = lat => { const a=Math.abs(lat),d=Math.floor(a),m=(a-d)*60000; return String(d).padStart(2,"0")+String(Math.round(m)).padStart(5,"0")+(lat>=0?"N":"S"); };
-                const fmtLon = lon => { const a=Math.abs(lon),d=Math.floor(a),m=(a-d)*60000; return String(d).padStart(3,"0")+String(Math.round(m)).padStart(5,"0")+(lon>=0?"E":"W"); };
-                const NL = "\r\n";
-                let igc = "AXXX"+NL+"HFDTE"+dateStr+NL;
-                igc += "HFPLTPILOTINCHARGE:"+(fl.pilot||"")+NL;
-                igc += "HFGTYGLIDERTYPE:"+(fl.glider||"")+NL;
-                igc += "HFGIDGLIDERID:"+NL;
-                for (const p of t) {
-                  const ts = fmtTime(p.timeSec||0);
-                  const alt = Math.round(p.gpsAlt||0);
-                  igc += "B"+ts+fmtLat(p.lat)+fmtLon(p.lon)+"A"+String(alt).padStart(5,"0")+String(alt).padStart(5,"0")+NL;
+              <button onClick={async ()=>{
+                // Bevorzugt die tatsächlich importierte Originaldatei
+                // exportieren (seit dieser Speicherung, siehe
+                // storeRawIgcFile) — nur wenn dafür (noch) keine gespeichert
+                // ist (z.B. ein Flug von vor dieser Änderung, noch nicht per
+                // Einmalfunktion nachgesichert), wird wie bisher aus dem
+                // gespeicherten Track eine minimale, aber gültige IGC-Datei
+                // rekonstruiert.
+                const raw = await loadRawIgcFile(fl.id);
+                let blob;
+                if (raw) {
+                  blob = new Blob([raw], { type: "application/octet-stream" });
+                } else {
+                  const t = fl.track;
+                  const d = fl.rawDate||fl.date||"";
+                  const parts = d.split(".");
+                  const dateStr = parts.length===3 ? parts[0].padStart(2,"0")+parts[1].padStart(2,"0")+parts[2].slice(-2) : "010101";
+                  const fmtTime = s => { const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),sec=s%60; return String(h).padStart(2,"0")+String(m).padStart(2,"0")+String(sec).padStart(2,"0"); };
+                  const fmtLat = lat => { const a=Math.abs(lat),d=Math.floor(a),m=(a-d)*60000; return String(d).padStart(2,"0")+String(Math.round(m)).padStart(5,"0")+(lat>=0?"N":"S"); };
+                  const fmtLon = lon => { const a=Math.abs(lon),d=Math.floor(a),m=(a-d)*60000; return String(d).padStart(3,"0")+String(Math.round(m)).padStart(5,"0")+(lon>=0?"E":"W"); };
+                  const NL = "\r\n";
+                  let igc = "AXXX"+NL+"HFDTE"+dateStr+NL;
+                  igc += "HFPLTPILOTINCHARGE:"+(fl.pilot||"")+NL;
+                  igc += "HFGTYGLIDERTYPE:"+(fl.glider||"")+NL;
+                  igc += "HFGIDGLIDERID:"+NL;
+                  for (const p of t) {
+                    const ts = fmtTime(p.timeSec||0);
+                    const alt = Math.round(p.gpsAlt||0);
+                    igc += "B"+ts+fmtLat(p.lat)+fmtLon(p.lon)+"A"+String(alt).padStart(5,"0")+String(alt).padStart(5,"0")+NL;
+                  }
+                  // application/octet-stream statt text/plain — sonst hängen
+                  // manche Browser beim Speichern eigenmächtig ".txt" an den
+                  // (bereits korrekten) ".igc"-Dateinamen an.
+                  blob = new Blob([igc], { type: "application/octet-stream" });
                 }
-                // application/octet-stream statt text/plain — sonst hängen
-                // manche Browser beim Speichern eigenmächtig ".txt" an den
-                // (bereits korrekten) ".igc"-Dateinamen an.
-                const blob = new Blob([igc], { type: "application/octet-stream" });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement("a");
                 a.href = url; a.download=(fl.customFields?.igcFilename||fl.name||"flug")+".igc";
@@ -3591,6 +3668,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                   style={{flex:1,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px",color:"#e8f4fd",fontSize:14,cursor:"pointer"}}>Abbrechen</button>
                 <button onClick={async()=>{
                     try{await window.storage.delete(`flight:${fl.id}`);}catch{}
+                    await deleteRawIgcFile(fl.id);
                     setFlights(prev=>prev.filter(f=>f.id!==fl.id));
                     setSelected(null);
                     setConfirmDelete(null);
@@ -4089,6 +4167,12 @@ function FlugbuchApp() {
   // siehe unten) — {scanned, speed, steigen, sinken} oder {running:true}
   // während sie läuft.
   const [recomputeResult, setRecomputeResult] = useState(null);
+  // Ergebnis-Banner der einmaligen Funktion, die für bereits bestehende
+  // Flüge nachträglich die Original-IGC-Datei sichert (siehe
+  // backfillRawIgcFiles weiter unten) — {saved, ambiguous, matchless, total}
+  // oder {running:true} während sie läuft.
+  const [rawBackfillResult, setRawBackfillResult] = useState(null);
+  const rawBackfillFileRef = useRef(null);
   // Cache der Schirme-Liste (schirme:list) für die Dauer eines IGC-Imports
   // — vermeidet, bei jeder einzelnen Datei erneut zu laden/zu speichern,
   // und stellt sicher, dass zwei Dateien mit demselben (neuen) Schirm im
@@ -4399,6 +4483,45 @@ function FlugbuchApp() {
     });
   }, [flights, saveFlight, selected]);
 
+  // ── Einmalfunktion: Original-IGC-Dateien für bestehende Flüge nachsichern
+  // ──────────────────────────────────────────────────────────────────────
+  // Vor storeRawIgcFile wurden importierte IGC-Dateien nur geparst, nie als
+  // solche gespeichert (siehe Kommentar dort). Für Flüge, die schon vor
+  // dieser Änderung importiert wurden, lässt sich die Originaldatei hiermit
+  // nachträglich sichern — ganz bewusst KEIN erneuter Import: es wird
+  // ausschliesslich die rohe Datei zum jeweils passenden, bereits
+  // bestehenden Flug abgelegt, kein einziges Flugfeld wird dabei verändert.
+  // "Passend" heisst hier strikt exaktes Datum UND exakte Startzeit (wie im
+  // Feld gespeichert) — bei mehreren oder keinem Treffer wird die Datei
+  // übersprungen, statt zu raten.
+  const backfillRawIgcFiles = useCallback(async (files) => {
+    const igcFiles = files.filter(f => /\.igc$/i.test(f.name));
+    if (!igcFiles.length) return;
+    setRawBackfillResult({ running: true });
+    let saved = 0, ambiguous = 0, matchless = 0;
+    for (const file of igcFiles) {
+      try {
+        const text = await file.text();
+        const { track, date, tzOffsetHours } = parseIGC(text);
+        if (!track.length) { matchless++; continue; }
+        const { startTime } = analyzeIGC(track, tzOffsetHours, date);
+        const candidates = flights.filter(f => f.date === date && f.startTime === startTime);
+        if (candidates.length === 1) {
+          await storeRawIgcFile(candidates[0].id, file);
+          saved++;
+        } else if (candidates.length > 1) {
+          ambiguous++;
+        } else {
+          matchless++;
+        }
+      } catch (e) {
+        console.error("IGC-Datei beim Nachsichern übersprungen:", file.name, e);
+        matchless++;
+      }
+    }
+    setRawBackfillResult({ saved, ambiguous, matchless, total: igcFiles.length });
+  }, [flights]);
+
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
     const maxNr = flights.reduce((m,f)=>{
@@ -4548,7 +4671,7 @@ function FlugbuchApp() {
 
   // Applies parsed IGC data onto an existing flight (shared by both the
   // filename-match and the date-match paths, so they stay in sync).
-  const attachIgcToFlight = useCallback(async (existing, track, date, pilot, glider, igcData, igcFilename, overrideMap) => {
+  const attachIgcToFlight = useCallback(async (existing, file, track, date, pilot, glider, igcData, igcFilename, overrideMap) => {
     const cf = { ...(existing.customFields||{}) };
     // Gleiche Regel wie der Typ-Auto-Effekt in FlightDetail: nur setzen,
     // wenn noch kein Typ vorhanden ist und der Flug nicht explizit vom
@@ -4630,6 +4753,7 @@ function FlugbuchApp() {
       totalDist: backfill.totalDist != null ? backfill.totalDist : existing.totalDist,
     };
     await saveFlight(updated);
+    await storeRawIgcFile(updated.id, file);
     setFlights(prev=>prev.map(f=>f.id===updated.id?updated:f));
     if (selected?.id===updated.id) setSelected(updated);
   }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
@@ -4667,7 +4791,7 @@ function FlugbuchApp() {
         // cleared) never got a chance to be recalculated. Now it fills in
         // anything currently blank, without touching values that are
         // already set (manually or from a previous import).
-        await attachIgcToFlight(existing, track, date, pilot, glider, igcData, baseName, overrideMap);
+        await attachIgcToFlight(existing, file, track, date, pilot, glider, igcData, baseName, overrideMap);
         updatedCount++;
       } else {
         // No filename match — try matching by date instead, but only
@@ -4676,7 +4800,7 @@ function FlugbuchApp() {
         // silently overwritten just because the date happens to match).
         const dateCandidates = flights.filter(f => f.date===dateStr && (!f.track || f.track.length<=1));
         if (dateCandidates.length === 1) {
-          await attachIgcToFlight(dateCandidates[0], track, date, pilot, glider, igcData, baseName, overrideMap);
+          await attachIgcToFlight(dateCandidates[0], file, track, date, pilot, glider, igcData, baseName, overrideMap);
           updatedCount++;
         } else if (dateCandidates.length > 1) {
           // Ambiguous — don't guess. Resolved via a picker after this loop.
@@ -4717,6 +4841,7 @@ function FlugbuchApp() {
             ...igcData, startPt:igcData.startPt, endPt:igcData.endPt,
             totalDist: backfill.totalDist || 0 };
           await saveFlight(newF);
+          await storeRawIgcFile(newF.id, file);
           newFlights.push(newF);
         }
       }
@@ -5156,6 +5281,32 @@ function FlugbuchApp() {
         </div>
       )}
 
+      {/* Einmalige Nachsicher-Funktion für bereits bestehende Flüge (siehe
+          backfillRawIgcFiles) — für Flüge, die noch vor Einführung der
+          Original-IGC-Speicherung importiert wurden. Legt ausschliesslich
+          die exakt passende Original-IGC-Datei nachträglich ab (Zuordnung
+          strikt über Datum+Startzeit), ändert sonst nichts am Flug. */}
+      {showImportMenu && (
+        <div style={{margin:"6px 16px 0"}}>
+          <input ref={rawBackfillFileRef} type="file" accept=".igc" multiple style={{display:"none"}}
+            onChange={e=>{ backfillRawIgcFiles(Array.from(e.target.files)); e.target.value=""; }} />
+          <button onClick={()=>rawBackfillFileRef.current?.click()} disabled={rawBackfillResult?.running}
+            title="Bereits vorhandene .igc-Dateien (z.B. vom Vario-Laufwerk) auswählen — jede Datei wird ausschliesslich dem bestehenden Flug mit exakt gleichem Datum UND gleicher Startzeit zugeordnet und dort als Original-Datei nachträglich gespeichert. Kein erneuter Import, kein Flugfeld wird dabei verändert. Für Flüge ohne eindeutigen Treffer passiert nichts."
+            style={{width:"100%",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:8,padding:"7px 10px",color:"#a78bfa",fontSize:11,fontWeight:600,cursor:rawBackfillResult?.running?"default":"pointer"}}>
+            {rawBackfillResult?.running ? "⏳ Sichere…" : "🗄️ Original-IGC-Dateien für bestehende Flüge nachsichern (Einmalfunktion)"}
+          </button>
+        </div>
+      )}
+
+      {rawBackfillResult && !rawBackfillResult.running && (
+        <div style={{margin:"8px 16px 0",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+          <span style={{fontSize:12,color:"#a78bfa"}}>
+            {`✅ ${rawBackfillResult.total} Dateien geprüft — ${rawBackfillResult.saved}× gesichert, ${rawBackfillResult.ambiguous}× mehrdeutig (übersprungen), ${rawBackfillResult.matchless}× kein passender Flug gefunden.`}
+          </span>
+          <button onClick={()=>setRawBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(167,139,250,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
+        </div>
+      )}
+
       {igcDirResult && (
         <div style={{margin:"8px 16px 0",background:igcDirResult.error?"rgba(239,68,68,0.08)":"rgba(167,139,250,0.1)",border:`1px solid ${igcDirResult.error?"rgba(239,68,68,0.3)":"rgba(167,139,250,0.3)"}`,borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <span style={{fontSize:12,color:igcDirResult.error?"#f87171":"#a78bfa"}}>
@@ -5191,7 +5342,7 @@ function FlugbuchApp() {
           onClose={()=>setPendingDateAmbiguous(q=>q.slice(1))}
           onAssign={async (chosen) => {
             const item = pendingDateAmbiguous[0];
-            await attachIgcToFlight(chosen, item.track, item.date, item.pilot, item.glider, item.igcData, item.baseName);
+            await attachIgcToFlight(chosen, item.file, item.track, item.date, item.pilot, item.glider, item.igcData, item.baseName);
             // Remove the just-assigned flight from every remaining item's
             // candidate list — otherwise a second IGC file for the same
             // date could still be assigned to the same flight, silently
@@ -5229,6 +5380,7 @@ function FlugbuchApp() {
               ...item.igcData, startPt:item.igcData.startPt, endPt:item.igcData.endPt,
               totalDist: backfill.totalDist || 0 };
             await saveFlight(newF);
+            await storeRawIgcFile(newF.id, item.file);
             setFlights(prev=>[newF,...prev]);
             setPendingDateAmbiguous(q=>q.slice(1));
           }}
@@ -5314,6 +5466,7 @@ function FlugbuchApp() {
                   const ids = [...selectedIds];
                   for (const id of ids) {
                     try { await window.storage.delete(`flight:${id}`); } catch {}
+                    await deleteRawIgcFile(id);
                   }
                   setFlights(prev=>prev.filter(f=>!selectedIds.has(f.id)));
                   setCopyMsg(`✓ ${ids.length} Flug${ids.length!==1?"e":""} gelöscht.`);
