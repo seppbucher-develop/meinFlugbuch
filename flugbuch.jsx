@@ -101,44 +101,55 @@ function estimateTzOffset(firstPt, dateStr) {
 // (recomputeTrackStats, siehe FlugbuchApp) genutzt werden kann, ohne den
 // ganzen (u.a. die Distanz-Optimierung enthaltenden) analyzeIGC-Durchlauf
 // erneut anzustossen.
-function computeClimbSinkStats(track) {
-  // Max.Steigen / Max.Sinken: absolute maximum rate found between any two
-  // consecutive track points (instantaneous, not smoothed/averaged over a
-  // time window) — the person wants the raw peak value the vario would
-  // have shown, not a windowed approximation.
-  let maxClimb = -Infinity, maxSinkRate = Infinity;
-  for (let i=1; i<track.length; i++) {
-    const dt = track[i].timeSec - track[i-1].timeSec;
+const CLIMB_WINDOW_SEC = 3;
+const CLIMB_WINDOW_SEC_20 = 20;
+// Reine Sicherheitsmarge gegen einen einzelnen GPS-Höhenausreisser
+// (Mehrwegeffekt, kurzer Signalverlust) — analog zu PLAUSIBLE_MAX_SPEED_KMH
+// bei der Max-Speed-Berechnung: ein Gleitschirm erreicht auch im
+// extremsten Manöver keine höheren Vertikalraten.
+const PLAUSIBLE_MAX_VARIO_MS = 25;
+
+// Höchste/tiefste Steig-/Sinkrate über ein gleitendes Zeitfenster von
+// mindestens windowSec Sekunden (Zwei-Zeiger-Technik: j läuft nur vorwärts,
+// daher ein einziger Durchlauf über den Track). Kandidaten jenseits von
+// ±PLAUSIBLE_MAX_VARIO_MS werden komplett verworfen statt auf die Grenze
+// gekappt, damit der gemeldete Wert immer ein tatsächlich im Fenster
+// gemessener, plausibler Wert bleibt (und nicht künstlich exakt bei 25.0
+// landet).
+function windowedClimbSinkExtremes(track, windowSec) {
+  let maxRate = -Infinity, minRate = Infinity;
+  let j = 0;
+  for (let i=0; i<track.length; i++) {
+    const t0 = track[i].timeSec;
+    const target = t0 + windowSec;
+    while (j < track.length && track[j].timeSec < target) j++;
+    if (j >= track.length) break;
+    if (j === i) continue;
+    const dt = track[j].timeSec - t0;
     if (dt <= 0) continue;
-    const rate = (track[i].gpsAlt - track[i-1].gpsAlt) / dt;
-    if (rate > maxClimb) maxClimb = rate;
-    if (rate < maxSinkRate) maxSinkRate = rate;
+    const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
+    if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
+    if (rate > maxRate) maxRate = rate;
+    if (rate < minRate) minRate = rate;
   }
-  maxClimb = isFinite(maxClimb) ? +maxClimb.toFixed(1) : 0;
-  maxSinkRate = isFinite(maxSinkRate) ? +maxSinkRate.toFixed(1) : 0;
-  // "Max.Steigen 20s": same sliding-window approach as maxClimb above, but
-  // with the classic 20-second window used by most vario/competition tools
-  // (rather than the 30s window empirically tuned for maxClimb) — kept as
-  // a separate figure since the two windows deliberately serve different
-  // comparisons (this app's own Max.Steigen vs. externally-reported 20s
-  // climb values).
-  const CLIMB_WINDOW_SEC_20 = 20;
-  let maxClimb20 = -Infinity;
-  {
-    let j = 0;
-    for (let i=0; i<track.length; i++) {
-      const t0 = track[i].timeSec;
-      const target = t0 + CLIMB_WINDOW_SEC_20;
-      while (j < track.length && track[j].timeSec < target) j++;
-      if (j >= track.length) break;
-      if (j === i) continue;
-      const dt = track[j].timeSec - t0;
-      if (dt <= 0) continue;
-      const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
-      if (rate > maxClimb20) maxClimb20 = rate;
-    }
-  }
-  maxClimb20 = isFinite(maxClimb20) ? +maxClimb20.toFixed(1) : 0;
+  return { maxRate, minRate };
+}
+
+function computeClimbSinkStats(track) {
+  // Max.Steigen / Max.Sinken: nicht mehr der rohe Punkt-zu-Punkt-Sprung
+  // (der war schutzlos einem einzelnen GPS-Höhenausreisser ausgesetzt),
+  // sondern wie bei Max Speed über ein kurzes gleitendes 3-Sekunden-Fenster
+  // plus Plausibilitätsgrenze.
+  const { maxRate: maxClimbRaw, minRate: maxSinkRaw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC);
+  const maxClimb = isFinite(maxClimbRaw) ? +maxClimbRaw.toFixed(1) : 0;
+  const maxSinkRate = isFinite(maxSinkRaw) ? +maxSinkRaw.toFixed(1) : 0;
+  // "Max.Steigen 20s": gleiches Fensterprinzip, aber mit dem in Wettbewerbs-/
+  // Vario-Tools üblichen 20-Sekunden-Fenster statt der 3s oben — bewusst als
+  // eigener, separater Wert geführt, da die beiden Fenster unterschiedliche
+  // Vergleiche bedienen sollen (Max.Steigen dieser App vs. extern berichtete
+  // 20s-Steigwerte).
+  const { maxRate: maxClimb20Raw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC_20);
+  const maxClimb20 = isFinite(maxClimb20Raw) ? +maxClimb20Raw.toFixed(1) : 0;
   return { maxClimb, maxClimb20, maxSinkRate };
 }
 
