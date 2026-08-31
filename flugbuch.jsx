@@ -288,21 +288,23 @@ function isWindowStraight(track, lo, hi, corridorDeg) {
   return true;
 }
 
-// Erkennt "Kreisen" (Thermik-/Spiral-Kurbeln) an einem Trackpunkt für die
+// Aufsummierte Kursänderung an einem Trackpunkt über ein gleitendes
+// Zeitfenster — Grundlage der Kreisen-/Thermik-Erkennung für die
 // Kamera-Führung während der Video-Wiedergabe (FlightMap, siehe placeOn
-// weiter unten): anders als isWindowStraight oben (das fragt "bleibt JEDES
+// weiter unten). Anders als isWindowStraight oben (das fragt "bleibt JEDES
 // Segment nahe der Gesamtpeilung") summiert dies die tatsächlich geflogene
-// Kursänderung über ein gleitendes Zeitfenster auf. Im Geradeausflug bleibt
-// diese Summe klein (auch bei ein paar sanften Richtungskorrekturen), in
-// einer Thermikspirale addiert sie sich innerhalb weniger Sekunden auf
-// mehrere hundert Grad — unabhängig von der Drehrichtung, daher Betrag statt
-// Vorzeichen.
+// Kursänderung auf. Im Geradeausflug bleibt diese Summe klein (auch bei ein
+// paar sanften Richtungskorrekturen), in einer Thermikspirale addiert sie
+// sich innerhalb weniger Sekunden auf mehrere hundert Grad — unabhängig von
+// der Drehrichtung, daher Betrag statt Vorzeichen. Liefert nur die rohe
+// Summe zurück; FlightMap entscheidet daraus mit Hysterese (siehe
+// circlingStateRef dort), damit die Kreisen-Erkennung nicht bei jedem
+// kleinen Schwanken um eine einzelne feste Schwelle hin- und herkippt.
 const CIRCLING_WINDOW_SEC = 12;
-const CIRCLING_TURN_THRESHOLD_DEG = 210;
-function isCirclingAt(track, i) {
-  if (!track || track.length < 3) return false;
+function circlingTurnSumDeg(track, i) {
+  if (!track || track.length < 3) return 0;
   const { lo, hi } = timeWindowBounds(track, i, CIRCLING_WINDOW_SEC);
-  if (hi - lo < 2) return false;
+  if (hi - lo < 2) return 0;
   let totalTurn = 0, prevHeading = null;
   for (let k = lo; k < hi; k++) {
     // Extrem kurze Schritte (GPS-Jitter im Stand/bei sehr langsamer Fahrt)
@@ -316,7 +318,7 @@ function isCirclingAt(track, i) {
     }
     prevHeading = heading;
   }
-  return totalTurn >= CIRCLING_TURN_THRESHOLD_DEG;
+  return totalTurn;
 }
 
 // Höchste GPS-Geschwindigkeit im (mehr oder weniger) Geradeausflug — siehe
@@ -620,6 +622,10 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   const previewPlayMarkerRef = useRef(null);
   const playRafRef = useRef(null);
   const playLastTsRef = useRef(null);
+  // Hysterese-Zustand der Kreisen-Erkennung (siehe circlingTurnSumDeg unten)
+  // — lebt als Ref statt als State, weil er pro Wiedergabe-Frame gelesen
+  // und geschrieben wird und kein eigenes Re-Render auslösen soll.
+  const circlingStateRef = useRef(false);
 
   const togglePlay = () => setIsPlaying(p => !p);
 
@@ -927,12 +933,16 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     const alt = a.gpsAlt + ((b.gpsAlt||a.gpsAlt) - a.gpsAlt)*frac;
     const spanBack = track[Math.max(0,i-3)], spanFwd = track[Math.min(track.length-1,i+3)];
     const hdg = bearingDeg(spanBack, spanFwd);
-    // Kamera-Führung während der Wiedergabe (siehe isCirclingAt oben): beim
-    // Kreisen (Thermik) bleibt die Karte bewusst unbewegt — nur der Schirm
-    // bewegt sich darauf; im Geradeausflug folgt die Kamera stattdessen
-    // jeden Frame dem Schirm (fixer Punkt am Bildschirm, Karte "läuft"
-    // darunter durch).
-    const circling = isCirclingAt(track, i);
+    // Kamera-Führung während der Wiedergabe (siehe circlingTurnSumDeg oben):
+    // beim Kreisen (Thermik) bleibt die Karte grundsätzlich stehen — nur der
+    // Schirm bewegt sich darauf; im Geradeausflug folgt die Kamera
+    // stattdessen jeden Frame dem Schirm (fixer Punkt am Bildschirm, Karte
+    // "läuft" darunter durch). Hysterese (hoher Schwellwert zum Reingehen,
+    // deutlich niedrigerer zum Rausgehen) verhindert, dass die Erkennung an
+    // der Schwelle flattert — jeder Wechsel bewegt sonst spürbar die Kamera.
+    const turnSum = circlingTurnSumDeg(track, i);
+    const circling = circlingStateRef.current ? turnSum >= 90 : turnSum >= 210;
+    circlingStateRef.current = circling;
     // Weitergereicht an FlightProfile (siehe playbackPhase dort), damit das
     // Höhenprofil beim Kreisen ebenfalls stehen bleibt statt weiterzulaufen
     // — sonst würde ein gezoomtes Profilfenster die Karte über highlightRange
@@ -976,13 +986,29 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       }
       if (ref.current._imgEl) ref.current._imgEl.style.transform = `rotate(${hdg}deg)`;
       if (ref.current._altEl) ref.current._altEl.textContent = (alt!=null ? Math.round(alt) : "")+"m";
-      // Beim Kreisen: Kamera bewusst NICHT anfassen — die Karte steht still,
-      // nur der Marker bewegt sich darauf. Im Geradeausflug dagegen jeden
-      // Frame auf den Marker zentrieren (gleicher Zoom, kein Sprung erst am
-      // Bildrand) — der Schirm bleibt so am Bildschirm stehen, während die
-      // Karte darunter durchläuft.
-      if (isPlaying && map.jumpTo && !circling) {
-        map.jumpTo({ center: [lon, lat], zoom: map.getZoom() });
+      if (isPlaying && map.jumpTo) {
+        if (!circling) {
+          // Geradeausflug: jeden Frame exakt auf den Marker zentrieren
+          // (gleicher Zoom) — der Schirm bleibt so am Bildschirm stehen,
+          // während die Karte darunter durchläuft.
+          map.jumpTo({ center: [lon, lat], zoom: map.getZoom() });
+        } else if (map.easeTo && map.project && map.getContainer) {
+          // Beim Kreisen bleibt die Kamera grundsätzlich stehen. Nur wenn
+          // der Marker die mittleren 80% des sichtbaren Kartenausschnitts
+          // verlässt (z.B. durch Thermik-Drift), sanft nachführen — ohne
+          // den Zoomfaktor zu ändern. Vorher (Karte per fitBounds auf den
+          // gerade sichtbaren Kartenausschnitt neu zugeschnitten, sobald der
+          // Marker ihn ganz verliess) konnte das den Zoom sichtbar
+          // zurücksetzen; ein reines easeTo mit festem Zoom tut das nicht.
+          const el = map.getContainer();
+          const w = el.clientWidth, h = el.clientHeight;
+          if (w && h) {
+            const pt = map.project([lon, lat]);
+            const marginX = w * 0.1, marginY = h * 0.1; // mittlere 80% = 10% Rand je Seite
+            const outOfZone = pt.x < marginX || pt.x > w - marginX || pt.y < marginY || pt.y > h - marginY;
+            if (outOfZone) map.easeTo({ center: [lon, lat], zoom: map.getZoom(), duration: 600 });
+          }
+        }
       }
     };
     if (previewReadyRef.current) placeOn(previewMapRef.current, previewPlayMarkerRef, false);
@@ -1181,7 +1207,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
   // once the cursor reaches the right edge (that used to leave the
   // background standing still in between, then swap it out abruptly).
   // Paused while circling (playbackPhase, reported by FlightMap's own
-  // isCirclingAt) so the profile mirrors the map: standing still in a
+  // circling detection) so the profile mirrors the map: standing still in a
   // thermal, scrolling again once back in straight flight.
   useEffect(() => {
     if (!isPlaybackActive || playbackDistanceScaled == null || zoomLevel <= 1 || !totalDist) return;
