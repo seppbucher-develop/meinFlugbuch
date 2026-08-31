@@ -838,6 +838,17 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       refMarkerRefObj.current = new sdk.Marker({ element: el, rotationAlignment: "viewport", pitchAlignment: "viewport" })
         .setLngLat([refPoint.lon, refPoint.lat]).addTo(map);
     }
+    // Während der Wiedergabe übernimmt placeOn (weiter unten) exklusiv die
+    // Kameraführung mit bewusst unverändertem Zoom. Ein gezoomtes
+    // Höhenprofil meldet highlightRange dabei laufend neu (jeder
+    // Fortschritt der Wiedergabeposition), was hier bei jedem Frame ein
+    // fitBounds auf die gerade sichtbare Profil-Distanz ausgelöst hätte —
+    // und damit einen neuen, zur Profilbreite passenden Zoom berechnet, der
+    // mit dem in placeOn fixierten Zoom kollidierte (sichtbar z.B. als
+    // Zoom-Rücksprung, sobald ein längerer Geradeausflug-Abschnitt vor
+    // einer Thermik eine grössere Fläche abdeckte). Marker-Auf-/Abbau oben
+    // bleibt davon unberührt.
+    if (isPlaying) return;
     const fitToPoints = (pts) => {
       if (!pts.length) return;
       const lons = pts.map(p=>p.lon), lats = pts.map(p=>p.lat);
