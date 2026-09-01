@@ -1,0 +1,53 @@
+name: Version automatisch hochzählen
+
+# Läuft nach jedem Push auf master (z.B. nach einem PR-Merge) und erhöht die
+# Patch-Version automatisch anhand des jeweils letzten Git-Tags
+# (v1.0.0 -> v1.0.1 -> v1.0.2 -> ...), aktualisiert version.json und setzt
+# den neuen Tag. Größere Sprünge (Minor/Major, z.B. v1.1.0 oder v2.0.0)
+# weiterhin manuell taggen -- der nächste automatische Bump zählt dann ab
+# diesem Tag weiter. Siehe README.md.
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  bump-version:
+    # Verhindert eine Endlosschleife: der Versions-Commit unten trägt
+    # "[skip ci]" in der Commit-Nachricht, wodurch GitHub diesen Workflow für
+    # genau diesen Push gar nicht erst startet.
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Nächste Patch-Version berechnen
+        id: version
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          LATEST_TAG=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          if [ -z "$LATEST_TAG" ]; then LATEST_TAG="v0.0.0"; fi
+          VERSION_NUM="${LATEST_TAG#v}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$VERSION_NUM"
+          NEW_TAG="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+          echo "Letzter Tag: $LATEST_TAG -> Neuer Tag: $NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: version.json aktualisieren, committen, taggen, pushen
+        run: |
+          set -euo pipefail
+          NEW_TAG="${{ steps.version.outputs.new_tag }}"
+          printf '{\n  "version": "%s"\n}\n' "$NEW_TAG" > version.json
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.json
+          git commit -m "Version $NEW_TAG [skip ci]"
+          git tag -a "$NEW_TAG" -m "Version $NEW_TAG"
+          git push origin HEAD:master
+          git push origin "$NEW_TAG"
