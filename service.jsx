@@ -339,18 +339,22 @@ function ServiceApp() {
       const payload = { exportedAt: new Date().toISOString(), entries };
       const json = JSON.stringify(payload);
       const dateStamp = new Date().toISOString().slice(0, 10);
+      // window.APP_VERSION kommt aus version.json (siehe service.html bzw.
+      // scripts/update-version.sh) — im Dateinamen sofort erkennbar, mit
+      // welcher App-Version ein Backup erstellt wurde.
+      const versionTag = (window.APP_VERSION || "unbekannt").replace(/[\\/:*?"<>|]/g, "_");
 
       let blob, filename;
       try {
         if (typeof CompressionStream !== "undefined") {
           const gzStream = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
           blob = await new Response(gzStream).blob();
-          filename = `flugbuch-backup-${dateStamp}.json.gz`;
+          filename = `flugbuch-backup-${versionTag}-${dateStamp}.json.gz`;
         }
       } catch (e) { console.error("Backup: gzip compression failed, falling back to plain JSON:", e); }
       if (!blob) {
         blob = new Blob([json], { type: "application/json" });
-        filename = `flugbuch-backup-${dateStamp}.json`;
+        filename = `flugbuch-backup-${versionTag}-${dateStamp}.json`;
       }
 
       const markBackedUp = async () => {
