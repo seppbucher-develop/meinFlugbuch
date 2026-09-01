@@ -10,7 +10,7 @@
 // CACHE_VERSION hochzählen, sonst wird die Änderung nicht ausgerollt, da
 // alte Service-Worker-Installationen sonst ihren alten Cache "STATIC_CACHE"
 // unverändert weiterverwenden.
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const CACHE_NAME = "flugbuch-cache-" + CACHE_VERSION;
 
 const CORE_ASSETS = [
@@ -27,6 +27,7 @@ const CORE_ASSETS = [
   "service.html",
   "service.jsx",
   "manifest.json",
+  "version.json",
   "favicon.ico",
   "icons/icon-32.png",
   "icons/icon-48.png",

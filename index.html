@@ -111,6 +111,13 @@
     display: none;
   }
   .dirty-dot.show { display: block; }
+
+  .version-tag {
+    margin-top: 22px;
+    font-size: 11px;
+    color: rgba(232,244,253,0.3);
+    text-align: center;
+  }
 </style>
 </head>
 <body>
@@ -151,7 +158,24 @@
         <div class="arrow">›</div>
       </a>
     </div>
+    <div class="version-tag" id="versionTag"></div>
   </div>
+
+  <script>
+    // Versionsnummer aus version.json (wird von scripts/update-version.sh
+    // aus dem jeweils letzten Git-Tag erzeugt, siehe dort) — Cache-Buster
+    // wie beim Laden der .jsx-Dateien, damit nach einem Release nicht die
+    // von GitHub Pages zwischengespeicherte alte Nummer angezeigt wird.
+    (function () {
+      fetch("version.json?v=" + Date.now())
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          const el = document.getElementById("versionTag");
+          if (el && data && data.version) el.textContent = data.version;
+        })
+        .catch(() => {});
+    })();
+  </script>
 
   <script>
     // Identischer Storage-Zugriff (nur lesend) wie in flugbuch.html/

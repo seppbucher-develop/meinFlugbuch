@@ -246,6 +246,13 @@
     if (typeof Babel === "undefined") { status.textContent = "FEHLER: Babel konnte nicht geladen werden (CDN blockiert?)"; status.style.color="#f87171"; return; }
     status.textContent = "React/Babel geladen ✓ — lade Seiten-Code…";
 
+    // Versionsnummer aus version.json (siehe scripts/update-version.sh) für
+    // den Backup-Dateinamen bereitstellen, bevor service.jsx läuft.
+    try {
+      const vResp = await fetch("version.json?v=" + Date.now());
+      window.APP_VERSION = vResp.ok ? (await vResp.json()).version : null;
+    } catch { window.APP_VERSION = null; }
+
     let appSource;
     try {
       // Cache-Buster: hängt bei jedem Laden einen neuen Zeitstempel an, damit
