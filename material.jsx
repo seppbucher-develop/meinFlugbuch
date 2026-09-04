@@ -43,39 +43,6 @@ const MATERIAL_FIELDS = [
   { id: "bemerkung", label: "Bemerkung", type: "text" },
 ];
 
-function pad2(n) { return String(n).padStart(2, "0"); }
-
-function parseMaterialExcelWorkbook(arrayBuffer) {
-  if (!window.XLSX) throw new Error("Excel-Bibliothek nicht geladen (XLSX)");
-  const wb = window.XLSX.read(arrayBuffer, { type: "array", cellDates: true });
-  const sheet = wb.Sheets["Diverses"];
-  if (!sheet) throw new Error('Reiter "Diverses" nicht gefunden');
-  const rows = window.XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
-  // Header steht in Zeile 2 (Zeile 1 ist leer) — Datenzeilen ab Zeile 3.
-  return rows.slice(2);
-}
-
-function createEntryFromExcelRow(row, rowNumber) {
-  const [datum, art, typ, wer, sn, fabrikation, hersteller, was, wo, preis, bemerkung] = row;
-  let dateStr = "";
-  if (datum instanceof Date && !isNaN(datum)) {
-    dateStr = `${pad2(datum.getDate())}.${pad2(datum.getMonth() + 1)}.${datum.getFullYear()}`;
-  } else if (typeof datum === "string") {
-    dateStr = datum.trim();
-  }
-  return {
-    id: `mat_${rowNumber}_${Date.now()}`,
-    datum: dateStr,
-    art: art || "", typ: typ || "", wer: wer || "",
-    sn: sn != null ? String(sn) : "",
-    fabrikation: fabrikation != null ? String(fabrikation) : "",
-    hersteller: hersteller || "", was: was || "", wo: wo || "",
-    preis: preis != null && preis !== "" ? Number(preis) : null,
-    bemerkung: bemerkung || "",
-    excelImportKey: `mat-xls-${rowNumber}`,
-  };
-}
-
 function parseDateToTs(d) {
   if (!d) return 0;
   const p = d.split(".");
@@ -208,9 +175,6 @@ function MaterialApp() {
   const [filterArt, setFilterArt] = React.useState(new Set());
   const [filterMaster, setFilterMaster] = React.useState(null); // {field,label,id,name} aus ?schirmId=… etc.
   const [masterNames, setMasterNames] = React.useState({}); // Art -> [Name, …] für Typ-Vorschläge
-  const [importing, setImporting] = React.useState(false);
-  const [importResult, setImportResult] = React.useState(null);
-  const fileRef = React.useRef(null);
 
   const load = React.useCallback(async () => {
     try {
@@ -288,44 +252,6 @@ function MaterialApp() {
     markDirty();
   };
 
-  const importExcel = async (file) => {
-    setImporting(true); setImportResult(null);
-    try {
-      const buf = await file.arrayBuffer();
-      const rows = parseMaterialExcelWorkbook(buf);
-      const alreadyImported = new Set((entries || []).map(e => e.excelImportKey).filter(Boolean));
-      const newEntries = [];
-      let skipped = 0;
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const rowNumber = i + 3;
-        if (!row || row.every(c => c === null || c === "")) continue;
-        if (!(row[0] instanceof Date) || isNaN(row[0])) continue;
-        const key = `mat-xls-${rowNumber}`;
-        if (alreadyImported.has(key)) { skipped++; continue; }
-        const entry = createEntryFromExcelRow(row, rowNumber);
-        await window.storage.set(`entry:${entry.id}`, JSON.stringify(entry));
-        newEntries.push(entry);
-      }
-      if (newEntries.length) {
-        let list = await migrateNotschirmToSchirm(newEntries);
-        const updated = await syncMaterialWithMasters(list);
-        if (updated.length) {
-          const byId = new Map(updated.map(e => [e.id, e]));
-          list = list.map(e => byId.get(e.id) || e);
-        }
-        setEntries(prev => [...list, ...prev]);
-        loadMasterNames();
-        markDirty();
-      }
-      setImportResult({ created: newEntries.length, skipped, total: rows.length });
-    } catch (e) {
-      setImportResult({ error: e.message || String(e) });
-    } finally {
-      setImporting(false);
-    }
-  };
-
   const all = entries || [];
   const artOptions = React.useMemo(() => {
     const set = new Set();
@@ -371,22 +297,7 @@ function MaterialApp() {
           style={{ background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 8, padding: "8px 14px", color: "#4ade80", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
           + Neuer Eintrag
         </button>
-        <button onClick={() => fileRef.current?.click()} disabled={importing}
-          style={{ background: "rgba(250,204,21,0.12)", border: "1px solid rgba(250,204,21,0.3)", borderRadius: 8, padding: "8px 14px", color: "#facc15", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-          {importing ? "⏳ Importiere…" : "📊 Excel importieren"}
-        </button>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls" style={{ display: "none" }}
-          onChange={e => { if (e.target.files[0]) importExcel(e.target.files[0]); e.target.value = ""; }} />
       </div>
-
-      {importResult && (
-        <div style={{ margin: "0 16px 10px", background: importResult.error ? "rgba(239,68,68,0.08)" : "rgba(250,204,21,0.1)", border: `1px solid ${importResult.error ? "rgba(239,68,68,0.3)" : "rgba(250,204,21,0.3)"}`, borderRadius: 10, padding: "8px 12px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: 12, color: importResult.error ? "#f87171" : "#facc15" }}>
-            {importResult.error ? "❌ " + importResult.error : `✅ ${importResult.created} neu importiert · ${importResult.skipped} bereits vorhanden`}
-          </span>
-          <button onClick={() => setImportResult(null)} style={{ background: "none", border: "none", color: "rgba(250,204,21,0.5)", cursor: "pointer", fontSize: 16 }}>✕</button>
-        </div>
-      )}
 
       {filterMaster ? (
         <div style={{ margin: "0 16px 12px", background: "rgba(125,211,252,0.1)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 10, padding: "8px 12px", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
@@ -413,7 +324,7 @@ function MaterialApp() {
       <div style={{ padding: "0 16px" }}>
         {filtered.length === 0 && (
           <div style={{ padding: "40px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>
-            Noch keine Einträge. Über „Excel importieren" oder „+ Neuer Eintrag" loslegen.
+            Noch keine Einträge. Über „+ Neuer Eintrag" loslegen.
           </div>
         )}
         {filtered.map(e => (
