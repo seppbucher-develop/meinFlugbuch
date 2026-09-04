@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Geräte — Flugbuch</title>
+
+<meta name="theme-color" content="#ffffff" />
+
+<link rel="icon" href="favicon.ico?v=2" sizes="any" />
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png?v=2" />
+<link rel="icon" type="image/png" sizes="96x96" href="icons/icon-96.png?v=2" />
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=2" />
+<link rel="manifest" href="manifest.json?v=2" />
+
+<style>
+  html, body { margin:0; padding:0; background:#040e20; -webkit-tap-highlight-color: transparent; }
+  #root { min-height: 100vh; }
+  #load-status { color:#fcd34d; font-family:monospace; font-size:11px; padding:14px; white-space:pre-wrap; }
+</style>
+
+<script src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js"></script>
+</head>
+<body>
+<div id="load-status">Lade React/Babel…</div>
+<div id="root"></div>
+
+<script>
+  // Identischer Storage-Shim wie in flugbuch.html/statistik.html (gleicher
+  // DB_NAME, STORE, PREFIX) — dieselbe IndexedDB desselben Origins.
+  // Material-Einträge liegen unter "entry:" (statt "flight:"), sind also
+  // vollständig von den Flugdaten getrennt, auch wenn sie in derselben DB
+  // liegen.
+  (function () {
+    const DB_NAME = "flugbuch-db";
+    const STORE = "kv";
+    let dbPromise = null;
+
+    function openDb() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise((resolve, reject) => {
+        if (!window.indexedDB) { reject(new Error("IndexedDB not available")); return; }
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = () => { req.result.createObjectStore(STORE); };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      return dbPromise;
+    }
+
+    async function idbGet(key) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).get(key);
+        req.onsuccess = () => resolve(req.result !== undefined ? req.result : null);
+        req.onerror = () => reject(req.error);
+      });
+    }
+    async function idbSet(key, value) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).put(value, key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    async function idbDelete(key) {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readwrite");
+        tx.objectStore(STORE).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    async function idbKeys() {
+      const db = await openDb();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE, "readonly");
+        const req = tx.objectStore(STORE).getAllKeys();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    const PREFIX = "flugbuch:";
+    function keyFor(key) { return PREFIX + key; }
+
+    window.storage = {
+      async get(key) {
+        try {
+          const raw = await idbGet(keyFor(key));
+          // localStorage only ever gets a value here as set()'s fallback
+          // after a failed IndexedDB write, so a value that differs from
+          // what's in IndexedDB is a more recent save that never made it
+          // there — previously only checked when IndexedDB had no entry
+          // at all, so such a write stayed silently invisible on every
+          // future load. Heal it by writing it back into IndexedDB.
+          let lsRaw = null;
+          try { lsRaw = localStorage.getItem(keyFor(key)); } catch {}
+          if (lsRaw !== null && lsRaw !== raw) {
+            try { await idbSet(keyFor(key), lsRaw); } catch {}
+            return { key, value: lsRaw };
+          }
+          if (raw !== null) return { key, value: raw };
+          return null;
+        } catch (e) {
+          console.error("storage.get error, falling back to localStorage:", e);
+          try {
+            const raw = localStorage.getItem(keyFor(key));
+            return raw !== null ? { key, value: raw } : null;
+          } catch { return null; }
+        }
+      },
+      async set(key, value) {
+        try {
+          await idbSet(keyFor(key), value);
+          return { key, value };
+        } catch (e) {
+          console.error("storage.set error, falling back to localStorage:", e);
+          try { localStorage.setItem(keyFor(key), value); return { key, value }; }
+          catch (e2) { console.error("localStorage fallback also failed:", e2); return null; }
+        }
+      },
+      async delete(key) {
+        try {
+          const existedIdb = (await idbGet(keyFor(key))) !== null;
+          await idbDelete(keyFor(key));
+          try { localStorage.removeItem(keyFor(key)); } catch {}
+          return { key, deleted: existedIdb };
+        } catch (e) {
+          console.error("storage.delete error, falling back to localStorage:", e);
+          try {
+            const k = keyFor(key);
+            const existed = localStorage.getItem(k) !== null;
+            localStorage.removeItem(k);
+            return { key, deleted: existed };
+          } catch { return null; }
+        }
+      },
+      async list(prefix) {
+        try {
+          const fullPrefix = PREFIX + (prefix || "");
+          const allKeys = await idbKeys();
+          const keys = allKeys.filter(k => typeof k === "string" && k.startsWith(fullPrefix)).map(k => k.slice(PREFIX.length));
+          return { keys, prefix };
+        } catch (e) {
+          console.error("storage.list error, falling back to localStorage:", e);
+          try {
+            const fullPrefix = PREFIX + (prefix || "");
+            const keys = [];
+            for (let i = 0; i < localStorage.length; i++) {
+              const k = localStorage.key(i);
+              if (k && k.startsWith(fullPrefix)) keys.push(k.slice(PREFIX.length));
+            }
+            return { keys, prefix };
+          } catch { return null; }
+        }
+      },
+    };
+  })();
+
+  window.addEventListener("error", function (e) {
+    const el = document.getElementById("load-status");
+    el.style.display = "block";
+    el.style.color = "#f87171";
+    el.textContent = "JS-FEHLER: " + (e.error ? (e.error.stack || e.error.message) : e.message) + " (Zeile " + e.lineno + ")";
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    const el = document.getElementById("load-status");
+    el.style.display = "block";
+    el.style.color = "#f87171";
+    el.textContent = "PROMISE-FEHLER: " + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason));
+  });
+
+  async function checkAndRender() {
+    const status = document.getElementById("load-status");
+    if (typeof React === "undefined") { status.textContent = "FEHLER: React konnte nicht geladen werden (CDN blockiert?)"; status.style.color="#f87171"; return; }
+    if (typeof ReactDOM === "undefined") { status.textContent = "FEHLER: ReactDOM konnte nicht geladen werden (CDN blockiert?)"; status.style.color="#f87171"; return; }
+    if (typeof Babel === "undefined") { status.textContent = "FEHLER: Babel konnte nicht geladen werden (CDN blockiert?)"; status.style.color="#f87171"; return; }
+    status.textContent = "React/Babel geladen ✓ — lade Seiten-Code…";
+
+    let appSource;
+    try {
+      // Cache-Buster: hängt bei jedem Laden einen neuen Zeitstempel an, damit
+      // nach einem git push immer die aktuelle Version geladen wird statt
+      // einer vom Browser zwischengespeicherten alten Fassung (GitHub Pages
+      // liefert Dateien mit einem 10-Minuten-Cache aus).
+      const resp = await fetch("geraete.jsx?v=" + Date.now());
+      if (!resp.ok) { status.textContent = "FEHLER beim Laden von geraete.jsx: HTTP " + resp.status; status.style.color = "#f87171"; return; }
+      appSource = await resp.text();
+      status.textContent = "Code geladen ✓ (" + appSource.length + " Zeichen) — kompiliere…";
+    } catch (e) {
+      status.style.color = "#f87171";
+      status.textContent = "FEHLER beim Laden von geraete.jsx:\n" + (e.message || String(e));
+      return;
+    }
+
+    let compiled;
+    try {
+      compiled = Babel.transform(appSource, { presets: ["react"] }).code;
+      status.textContent = "Kompiliert ✓ — starte Seite…";
+    } catch (e) {
+      status.style.color = "#f87171";
+      status.textContent = "BABEL-KOMPILIER-FEHLER:\n" + (e.message || String(e));
+      return;
+    }
+    try {
+      const runApp = new Function("React", "ReactDOM", compiled + "\n; return GeraeteApp;");
+      const GeraeteApp = runApp(React, ReactDOM);
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(React.createElement(GeraeteApp));
+      setTimeout(function() {
+        if (!status.textContent.includes("FEHLER")) status.style.display = "none";
+      }, 800);
+    } catch (e) {
+      status.style.color = "#f87171";
+      status.textContent = "RENDER-FEHLER:\n" + (e.message || String(e)) + "\n\n" + (e.stack || "");
+    }
+  }
+
+  window.addEventListener("load", function() {
+    setTimeout(checkAndRender, 300);
+  });
+</script>
+
+<script>
+  // Service Worker: ermöglicht Offline-Nutzung ab dem zweiten Online-Start.
+  // Siehe sw.js für die Cache-Strategie (network-first, cache-fallback).
+  window.addEventListener("load", function() {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.js").catch(function(e) {
+        console.error("Service-Worker-Registrierung fehlgeschlagen:", e);
+      });
+    }
+  });
+</script>
+
+<div id="offline-banner" style="display:none;position:fixed;bottom:calc(10px + env(safe-area-inset-bottom, 0px));left:10px;right:10px;background:rgba(245,158,11,0.8);color:#1a1200;font-weight:700;text-align:center;padding:7px 16px;border-radius:10px;z-index:9999;font-family:system-ui,sans-serif;font-size:14px;">
+  📴 Offline — zuletzt gespeicherter Stand
+</div>
+<script>
+  function updateOfflineBanner() {
+    var el = document.getElementById("offline-banner");
+    if (el) el.style.display = navigator.onLine ? "none" : "block";
+  }
+  window.addEventListener("online", updateOfflineBanner);
+  window.addEventListener("offline", updateOfflineBanner);
+  updateOfflineBanner();
+</script>
+</body>
+</html>

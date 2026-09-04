@@ -46,6 +46,15 @@ async function loadSchirmeList() {
     return r ? JSON.parse(r.value) : [];
   } catch { return []; }
 }
+async function loadSitzeList() {
+  try { const r = await window.storage.get("sitze:list"); return r ? JSON.parse(r.value) : []; } catch { return []; }
+}
+async function loadGeraeteList() {
+  try { const r = await window.storage.get("geraete:list"); return r ? JSON.parse(r.value) : []; } catch { return []; }
+}
+async function loadDivList() {
+  try { const r = await window.storage.get("div:list"); return r ? JSON.parse(r.value) : []; } catch { return []; }
+}
 
 // Generischer CSV-Baustein: erzeugt aus einer Liste beliebiger Objekte eine
 // Datei mit genau einer Spalte pro tatsächlich vorkommendem Feld (Union
@@ -475,22 +484,26 @@ function ServiceApp() {
     }
   };
 
-  // Erzeugt flugbuch.csv, material.csv, schirme.csv (je eine Spalte pro
-  // Datenbankfeld) sowie eine ZIP-Datei mit den rekonstruierten IGC-Dateien
-  // aller Flüge mit Track — und legt alle vier am selben Ort ab wie das
-  // Backup oben (automatischer Backup-Ordner, sonst Teilen/Download, exakt
-  // dieselbe Reihenfolge wie exportBackup).
+  // Erzeugt flugbuch.csv, material.csv sowie schirme.csv/sitze.csv/
+  // geraete.csv/div.csv (je eine Spalte pro Datenbankfeld) und eine ZIP-
+  // Datei mit den rekonstruierten IGC-Dateien aller Flüge mit Track — und
+  // legt alle Dateien am selben Ort ab wie das Backup oben (automatischer
+  // Backup-Ordner, sonst Teilen/Download, exakt dieselbe Reihenfolge wie
+  // exportBackup).
   const exportCsvIgc = async () => {
     setBusy(true); setMsg(null);
     let writeHandle = await requestDirWriteHandle();
     try {
-      const [flights, material, schirme] = await Promise.all([
-        loadAllFlights(), loadAllMaterial(), loadSchirmeList(),
+      const [flights, material, schirme, sitze, geraete, div] = await Promise.all([
+        loadAllFlights(), loadAllMaterial(), loadSchirmeList(), loadSitzeList(), loadGeraeteList(), loadDivList(),
       ]);
 
       const flugbuchCsv = buildCsv(flights, ["customFields"]);
       const materialCsv = buildCsv(material);
       const schirmeCsv = buildCsv(schirme);
+      const sitzeCsv = buildCsv(sitze);
+      const geraeteCsv = buildCsv(geraete);
+      const divCsv = buildCsv(div);
 
       if (typeof JSZip === "undefined") throw new Error("ZIP-Bibliothek (JSZip) konnte nicht geladen werden.");
       const zip = new JSZip();
@@ -512,9 +525,12 @@ function ServiceApp() {
         { name: "flugbuch.csv", blob: new Blob([flugbuchCsv], { type: "text/csv;charset=utf-8" }) },
         { name: "material.csv", blob: new Blob([materialCsv], { type: "text/csv;charset=utf-8" }) },
         { name: "schirme.csv", blob: new Blob([schirmeCsv], { type: "text/csv;charset=utf-8" }) },
+        { name: "sitze.csv", blob: new Blob([sitzeCsv], { type: "text/csv;charset=utf-8" }) },
+        { name: "geraete.csv", blob: new Blob([geraeteCsv], { type: "text/csv;charset=utf-8" }) },
+        { name: "div.csv", blob: new Blob([divCsv], { type: "text/csv;charset=utf-8" }) },
         { name: "flugbuch-igc.zip", blob: zipBlob },
       ];
-      const summary = `flugbuch.csv, material.csv, schirme.csv, flugbuch-igc.zip (${flights.length} Flüge, ${material.length} Material-Einträge, ${schirme.length} Schirme, ${igcCount} IGC-Dateien)`;
+      const summary = `flugbuch.csv, material.csv, schirme.csv, sitze.csv, geraete.csv, div.csv, flugbuch-igc.zip (${flights.length} Flüge, ${material.length} Material-Einträge, ${schirme.length} Schirme, ${igcCount} IGC-Dateien)`;
 
       // Wie beim Backup: bevorzugt direkt in den festgelegten Ordner
       // schreiben, ganz ohne Dialog.
@@ -706,23 +722,13 @@ function ServiceApp() {
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
           <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📤 Exportieren (CSV &amp; IGC)</div>
           <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 16, lineHeight: 1.5 }}>
-            Erzeugt vier Dateien — flugbuch.csv, material.csv und schirme.csv (je eine Spalte pro Datenbankfeld) sowie eine ZIP-Datei mit den IGC-Dateien aller Flüge — und legt sie am selben Ort ab wie das Backup oben{dirName ? ` (Ordner „${dirName}")` : ""}.
+            Erzeugt flugbuch.csv, material.csv, schirme.csv, sitze.csv, geraete.csv und div.csv (je eine Spalte pro Datenbankfeld) sowie eine ZIP-Datei mit den IGC-Dateien aller Flüge — und legt sie am selben Ort ab wie das Backup oben{dirName ? ` (Ordner „${dirName}")` : ""}.
           </div>
           <button onClick={exportCsvIgc} disabled={busy}
             style={{ width: "100%", boxSizing: "border-box", background: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: "12px", color: "#fcd34d", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
             {busy ? "⏳ …" : "📤 Exportieren"}
           </button>
         </div>
-
-        <a href="schirme.html"
-          style={{ display: "flex", alignItems: "center", gap: 14, background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14, textDecoration: "none", color: "inherit" }}>
-          <img src="icons/icon-header-128.png?v=2" alt="" style={{ width: 26, height: 26, flexShrink: 0 }} />
-          <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 2 }}>Schirme</div>
-            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)" }}>Hersteller, Typ, letzter Check — verknüpft mit Material</div>
-          </div>
-          <div style={{ fontSize: 18, color: "rgba(232,244,253,0.3)" }}>›</div>
-        </a>
 
         {msg && (
           <div style={{ background: msg.type === "ok" ? "rgba(74,222,128,0.1)" : "rgba(239,68,68,0.1)", border: `1px solid ${msg.type === "ok" ? "rgba(74,222,128,0.3)" : "rgba(239,68,68,0.3)"}`, borderRadius: 10, padding: "10px 14px", fontSize: 12, color: msg.type === "ok" ? "#4ade80" : "#f87171", marginBottom: 14 }}>

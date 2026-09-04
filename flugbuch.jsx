@@ -4668,8 +4668,8 @@ function FlugbuchApp() {
   // bekannten Hersteller-Namen ab (siehe splitFirstWordAsHersteller/
   // KNOWN_SCHIRM_HERSTELLER oben) und sucht/erzeugt in der Schirme-Liste
   // (schirme:list, dieselbe Liste wie auf der Schirme-Seite) den
-  // zugehörigen Eintrag — siehe schirme.jsx (generateFromFlights/
-  // matchesSchirm) für die analoge Logik dort. Gibt den bereinigten Namen
+  // zugehörigen Eintrag — siehe schirme.jsx (generateAll/matchesSchirm)
+  // für die analoge Logik dort. Gibt den bereinigten Namen
   // (ohne Hersteller-Wort, falls einer erkannt wurde) und die schirmId
   // zurück, die dann in customFields.schirmId abgelegt wird, damit die
   // Schirme-Seite den Flug robust zuordnen kann.
