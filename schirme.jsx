@@ -254,90 +254,6 @@ function SchirmeApp() {
     }
   };
 
-  // Führt Schirme-Einträge mit identischem Namen (Duplikate, z.B. durch
-  // Alt-Daten von vor dieser Umstellung) zu einem einzigen zusammen.
-  // Primär bleibt der Eintrag, auf den mindestens ein Flug im Flugbuch
-  // verweist (customFields.schirmId) — bei mehreren mit Flügen gewinnt
-  // der mit den meisten; hat keiner Flüge, gewinnt der mit den meisten
-  // Material-Einträgen. Alle Flüge und Material-Einträge der übrigen
-  // Duplikate werden auf den primären Eintrag umgehängt, fehlende
-  // Stammdaten (Hersteller/Typ/Letzter Check) vom Duplikat übernommen,
-  // falls beim primären Eintrag noch leer, und die Duplikate danach aus
-  // der Liste entfernt.
-  const consolidateDuplicates = async () => {
-    setBusy(true); setMsg(null);
-    try {
-      const fl = flights || await loadAllFlights();
-      const mat = material.length ? material : await loadAllMaterial();
-      const groups = new Map(); // normalisierter Name -> [Einträge]
-      schirme.forEach(s => {
-        const key = (s.name || "").trim().toLowerCase();
-        if (!key) return;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(s);
-      });
-      const dupGroups = [...groups.values()].filter(g => g.length > 1);
-      if (!dupGroups.length) {
-        setMsg({ type: "ok", text: "Keine doppelten Schirm-Namen gefunden — nichts zu tun." });
-        return;
-      }
-
-      const flightCount = id => fl.filter(f => f.customFields?.schirmId === id).length;
-      const materialCount = id => mat.filter(m => m.schirmId === id).length;
-
-      let nextSchirme = [...schirme];
-      let workingFl = fl;
-      let workingMat = mat;
-      let mergedGroups = 0, removedEntries = 0, movedFlights = 0, movedMaterial = 0;
-
-      for (const group of dupGroups) {
-        const withFlights = group.filter(s => flightCount(s.id) > 0).sort((a, b) => flightCount(b.id) - flightCount(a.id));
-        const primary = withFlights[0] || [...group].sort((a, b) => materialCount(b.id) - materialCount(a.id))[0];
-        const dupes = group.filter(s => s.id !== primary.id);
-        if (!dupes.length) continue;
-
-        let merged = { ...primary };
-        for (const d of dupes) {
-          if (!merged.hersteller && d.hersteller) merged.hersteller = d.hersteller;
-          if (!merged.typ && d.typ) merged.typ = d.typ;
-          if (!merged.letzterCheck && d.letzterCheck) merged.letzterCheck = d.letzterCheck;
-        }
-
-        const dupIds = new Set(dupes.map(d => d.id));
-        const flToFix = workingFl.filter(f => dupIds.has(f.customFields?.schirmId));
-        if (flToFix.length) {
-          const updated = flToFix.map(f => ({ ...f, customFields: { ...(f.customFields || {}), schirmId: primary.id } }));
-          await Promise.all(updated.map(f => window.storage.set(`flight:${f.id}`, JSON.stringify(f))));
-          const byId = new Map(updated.map(f => [f.id, f]));
-          workingFl = workingFl.map(f => byId.get(f.id) || f);
-          movedFlights += updated.length;
-        }
-        const matToFix = workingMat.filter(m => dupIds.has(m.schirmId));
-        if (matToFix.length) {
-          const updated = matToFix.map(m => ({ ...m, schirmId: primary.id }));
-          await Promise.all(updated.map(m => window.storage.set(`entry:${m.id}`, JSON.stringify(m))));
-          const byId = new Map(updated.map(m => [m.id, m]));
-          workingMat = workingMat.map(m => byId.get(m.id) || m);
-          movedMaterial += updated.length;
-        }
-
-        nextSchirme = nextSchirme.filter(s => !dupIds.has(s.id)).map(s => s.id === primary.id ? merged : s);
-        removedEntries += dupes.length;
-        mergedGroups++;
-      }
-
-      await saveSchirme(nextSchirme);
-      setFlights(workingFl);
-      setMaterial(workingMat);
-      if (movedFlights || movedMaterial) markDirty();
-      setMsg({ type: "ok", text: `✓ ${mergedGroups} Duplikat-Gruppe(n) zusammengeführt: ${removedEntries} doppelte(r) Schirm-Eintrag/Einträge entfernt, ${movedFlights} Flug(e) und ${movedMaterial} Material-Eintrag(e) umgehängt.` });
-    } catch (e) {
-      setMsg({ type: "error", text: "Fehler beim Zusammenführen: " + (e.message || String(e)) });
-    } finally {
-      setBusy(false);
-    }
-  };
-
   // Primär über die schirmId (robust, eindeutig) — Text-Vergleich nur noch
   // als Rückfallebene für Flüge, die diese Seite noch nie durchlaufen hat
   // (z.B. druckfrisch importiert, "Synchronisieren" noch nicht erneut
@@ -470,11 +386,6 @@ function SchirmeApp() {
           title="Legt für jeden in Flügen oder Material (Art=Schirm) verwendeten Namen einen Eintrag an, falls noch keiner existiert, und repariert alle Verknüpfungen."
           style={{ background: "rgba(74,222,128,0.12)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 8, padding: "9px 14px", color: "#4ade80", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
           {busy ? "⏳ …" : "🔄 Schirme synchronisieren"}
-        </button>
-        <button onClick={consolidateDuplicates} disabled={busy}
-          title="Führt Schirme mit identischem Namen zu einem einzigen Eintrag zusammen — primär bleibt der mit Flügen im Flugbuch, alle Material-Einträge und Flüge der Duplikate werden umgehängt."
-          style={{ background: "rgba(250,204,21,0.12)", border: "1px solid rgba(250,204,21,0.3)", borderRadius: 8, padding: "9px 14px", color: "#facc15", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
-          {busy ? "⏳ …" : "🧹 Duplikate zusammenführen"}
         </button>
       </div>
 
