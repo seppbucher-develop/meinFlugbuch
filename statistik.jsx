@@ -254,18 +254,18 @@ function ReisePivotTable({ flights }) {
           <div key={r.reise} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth }}>
             <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reise}</div>
             {r.minutesByYear.map((min, i) => (
-              <div key={i} style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? formatMinutes(min) : "·"}</div>
+              <div key={i} style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? Math.round(min) : "·"}</div>
             ))}
-            <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{formatMinutes(r.total)}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{Math.round(r.total)}</div>
           </div>
         ))}
         {pivot.rows.length > 0 && (
           <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)", minWidth }}>
             <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
             {pivot.yearTotals.map((min, i) => (
-              <div key={i} style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? formatMinutes(min) : "·"}</div>
+              <div key={i} style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? Math.round(min) : "·"}</div>
             ))}
-            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.grandTotal)}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{Math.round(pivot.grandTotal)}</div>
           </div>
         )}
       </div>
