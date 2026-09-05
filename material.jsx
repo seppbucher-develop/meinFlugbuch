@@ -223,7 +223,7 @@ function MaterialApp() {
       if (!id) continue;
       loadMasterList(cfg.key).then(list => {
         const m = list.find(x => x.id === id);
-        setFilterMaster({ field: cfg.field, label: cfg.label, id, name: m ? m.name : id });
+        setFilterMaster({ art, field: cfg.field, label: cfg.label, id, name: m ? m.name : id, hersteller: m?.hersteller || "" });
       });
       break;
     }
@@ -268,6 +268,16 @@ function MaterialApp() {
 
   const totalSpent = filtered.reduce((s, e) => s + (Number(e.preis) || 0), 0);
 
+  // Ist die Filterung auf genau einen Stammdaten-Eintrag eingeschränkt (z.B.
+  // material.html?schirmId=… bzw. Klick auf "🔗 Material" bei einem
+  // bestimmten Schirm), sollen die Felder eines neu angelegten Eintrags so
+  // weit wie möglich schon aus diesem Stammdaten-Eintrag vorbelegt sein,
+  // statt komplett leer zu starten — Art, Typ (= Name im Stamm), Hersteller
+  // sowie die Verknüpfung selbst (schirmId/sitzId/geraetId/divId).
+  const newEntryDefaults = filterMaster
+    ? { art: filterMaster.art, typ: filterMaster.name, hersteller: filterMaster.hersteller || "", [filterMaster.field]: filterMaster.id }
+    : {};
+
   if (entries === null) {
     return <div style={{ padding: 24, color: "rgba(232,244,253,0.5)", fontFamily: "system-ui,sans-serif" }}>Lade Material…</div>;
   }
@@ -293,7 +303,7 @@ function MaterialApp() {
       </div>
 
       <div style={{ padding: "10px 16px", display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button onClick={() => setEditing({})}
+        <button onClick={() => setEditing(newEntryDefaults)}
           style={{ background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.3)", borderRadius: 8, padding: "8px 14px", color: "#4ade80", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
           + Neuer Eintrag
         </button>
