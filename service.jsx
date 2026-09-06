@@ -227,6 +227,37 @@ function ServiceApp() {
     }
   };
 
+  // Standardradius (km) für die "In der Nähe"-Suche im Flugbuch (Feld
+  // "naehe" in der erweiterten Suche): zeigt Flüge, deren Start- oder
+  // Landeplatz innerhalb dieses Radius um den aktuellen (per Browser-
+  // Geolocation ermittelten) Standort liegt. 5 km Standard, pro Suche im
+  // Flugbuch selbst überschreibbar — hier wird nur der Vorgabewert gesetzt.
+  const [nearbyRadius, setNearbyRadius] = React.useState("5");
+  const [nearbyRadiusSaved, setNearbyRadiusSaved] = React.useState(false);
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("settings:nearbyRadiusKm");
+        if (r && r.value) { setNearbyRadius(r.value); setNearbyRadiusSaved(true); }
+      } catch {}
+    })();
+  }, []);
+  const saveNearbyRadius = async () => {
+    const num = parseFloat(nearbyRadius.replace(",", "."));
+    if (!isFinite(num) || num <= 0) {
+      setMsg({ type: "error", text: "Bitte eine Zahl grösser 0 eingeben (z.B. 5)." });
+      return;
+    }
+    try {
+      await window.storage.set("settings:nearbyRadiusKm", String(num));
+      await window.storage.set("settings:backupDirty", "1");
+      setNearbyRadiusSaved(true);
+      setMsg({ type: "ok", text: `✓ Radius gespeichert: ${num} km.` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Speichern: " + (e.message || String(e)) });
+    }
+  };
+
   // Lokaler Backup-Ordner (File System Access API) — nur Chrome/Edge
   // Desktop unterstützen das; auf allen anderen Browsern (Safari, Firefox,
   // jedes Handy) bleibt es beim Teilen/Download-Weg weiter unten.
@@ -678,6 +709,26 @@ function ServiceApp() {
           </div>
           {placeRadiusSaved && (
             <div style={{ fontSize: 11, color: "rgba(74,222,128,0.8)", marginTop: 8 }}>✓ Aktueller Radius: {placeRadius} km.</div>
+          )}
+        </div>
+
+        <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📍 Umkreissuche (aktueller Standort)</div>
+          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+            Im Flugbuch lässt sich über das 📍-Symbol bei der Suche nach Flügen filtern, deren Start- oder Landeplatz in der Nähe des aktuellen Standorts (Browser-Geolocation) liegt. Dieser Radius ist der Vorgabewert dafür — pro Suche im Flugbuch selbst weiterhin änderbar.
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Standardradius (km)</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input value={nearbyRadius} onChange={e => setNearbyRadius(e.target.value)}
+              inputMode="decimal" placeholder="5"
+              style={{ flex: "1 1 120px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
+            <button onClick={saveNearbyRadius}
+              style={{ flexShrink: 0, background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 10, padding: "10px 16px", color: "#4ade80", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Speichern
+            </button>
+          </div>
+          {nearbyRadiusSaved && (
+            <div style={{ fontSize: 11, color: "rgba(74,222,128,0.8)", marginTop: 8 }}>✓ Aktueller Standardradius: {nearbyRadius} km.</div>
           )}
         </div>
 
