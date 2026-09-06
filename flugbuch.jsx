@@ -2218,6 +2218,44 @@ function haversineDistKm(a, b) {
   const x = Math.sin(dLat/2)**2 + Math.cos(a.lat*Math.PI/180)*Math.cos(b.lat*Math.PI/180)*Math.sin(dLon/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
 }
+// ── "IN DER NÄHE"-SUCHE (Start-/Landeplatz nahe am aktuellen Standort) ──
+// Fragt die Position per Browser-Geolocation ab (Promise-Wrapper um die
+// callback-basierte API). maximumAge lässt den Browser einen kurz zuvor
+// ermittelten Fix wiederverwenden (kein erneuter GPS-Fix bei mehreren
+// Klicks auf 📍 innert weniger Minuten), timeout verhindert ein endloses
+// Warten, falls kein Fix zustande kommt (z.B. Gerät ohne GPS/WLAN drinnen).
+function requestGeoPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      reject(new Error("Geolokalisierung wird von diesem Browser nicht unterstützt."));
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      err => reject(new Error(
+        err.code === err.PERMISSION_DENIED
+          ? "Standortzugriff wurde verweigert."
+          : "Standort konnte nicht ermittelt werden."
+      )),
+      { enableHighAccuracy: false, timeout: 15000, maximumAge: 5 * 60 * 1000 }
+    );
+  });
+}
+// Wert-Format des naehe-Felds: "<radiusKm>" (Radius gesetzt, Standort noch
+// nicht erfasst) oder "<radiusKm>@<lat>,<lon>" (beides vorhanden). Wird
+// sowohl von evalToken (Auswertung) als auch vom SearchBar-Zeilen-Editor
+// (Anzeige/Bearbeitung) verwendet, damit beide exakt dasselbe verstehen.
+function parseNearbyValue(raw) {
+  const m = String(raw ?? "").trim().match(/^(-?\d+(?:[.,]\d+)?)(?:@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?))?$/);
+  if (!m) return null;
+  const radiusKm = parseFloat(m[1].replace(",", "."));
+  if (!isFinite(radiusKm) || radiusKm <= 0) return null;
+  return {
+    radiusKm,
+    lat: m[2] != null ? parseFloat(m[2]) : null,
+    lon: m[3] != null ? parseFloat(m[3]) : null,
+  };
+}
 // ── AUTOMATISCHE ORTS-/LAND-ZUORDNUNG BEIM IGC-IMPORT ────────────────────
 // Findet unter den vorhandenen Flügen den nächstgelegenen mit gefülltem
 // Feld innerhalb des konfigurierten Radius (unter Service einstellbar) —
@@ -2347,6 +2385,22 @@ function evalToken(f, tok){
       const has = field==="igc" ? (f.track?.length>1) : (f.customFields?.training||"").trim().toUpperCase()==="T";
       const want = ["ja","vorhanden","true","1"].includes(raw.toLowerCase());
       return op==="!=" ? has!==want : has===want;
+    }
+    // naehe:<radiusKm> bzw. naehe:<radiusKm>@<lat>,<lon> — Start- ODER
+    // Landeplatz liegt innerhalb radiusKm um den (im Wert mitgeführten)
+    // Standort. Ohne erfassten Standort (noch kein "@lat,lon" im Wert,
+    // z.B. weil die Ortung im SearchBar noch aussteht) wird nichts
+    // ausgefiltert — wie bei anderen Feldern mit ungültigem/unvollständigem
+    // Vergleichswert (siehe isNaN(cmp) unten).
+    if(field==="naehe" || field==="nähe" || field==="umkreis"){
+      const parsed = parseNearbyValue(raw);
+      if(!parsed || parsed.lat==null || parsed.lon==null) return true;
+      const userPt = {lat:parsed.lat, lon:parsed.lon};
+      const dStart = haversineDistKm(userPt, f.startPt);
+      const dEnd = haversineDistKm(userPt, f.endPt);
+      const dMin = Math.min(dStart ?? Infinity, dEnd ?? Infinity);
+      const within = dMin <= parsed.radiusKm;
+      return op==="!=" ? !within : within;
     }
     let fv=flightFieldValue(f, field);
 
@@ -2635,6 +2689,7 @@ const SEARCH_FIELDS = [
   { id: "endlat",    label: "Landung Lat",    type: "number" },
   { id: "endlon",    label: "Landung Lon",    type: "number" },
   { id: "rating",    label: "Bewertung",      type: "number" },
+  { id: "naehe",     label: "In der Nähe (Standort)", type: "geo" },
   { id: "igc",       label: "IGC-Track",      type: "bool" },
   { id: "training",  label: "Training",       type: "bool" },
 ];
@@ -2644,6 +2699,7 @@ const BOOL_OPTIONS = [
 ];
 const ADV_OPS_NUM = [">=", "<=", "!=", ">", "<", "=", "between"];
 const ADV_OPS_TEXT = [":", "=", "!=", ">", "<", ">=", "<="];
+const ADV_OPS_GEO = [":", "!="]; // ":" = innerhalb Radius, "!=" = ausserhalb
 
 // All fields a data tile in the flight detail view can be set to show,
 // plus the default 9-tile layout (matches what used to be hardcoded).
@@ -2753,6 +2809,55 @@ function parseQueryToRows(query) {
 // rows, combined either all-UND or all-ODER — which is translated live into
 // the same query string the plain text box uses, so results stay identical
 // either way.
+// Wert-Editor für eine naehe-Zeile im Row-Builder: Radius (km) plus 📍-Button,
+// der per Browser-Geolocation den aktuellen Standort holt und ihn zusammen
+// mit dem Radius im Wert ablegt (siehe parseNearbyValue). Der Radius lässt
+// sich unabhängig vom Standort schon vorher tippen/anpassen.
+function NearbyValueEditor({ value, defaultRadiusKm, onChange }) {
+  const parsed = parseNearbyValue(value);
+  const radiusStr = parsed ? String(parsed.radiusKm) : (value || "");
+  const hasCoords = !!(parsed && parsed.lat != null && parsed.lon != null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const setRadius = (newRadiusStr) => {
+    onChange(hasCoords ? `${newRadiusStr}@${parsed.lat},${parsed.lon}` : newRadiusStr);
+  };
+
+  const useCurrentLocation = async () => {
+    setBusy(true); setError("");
+    try {
+      const pt = await requestGeoPosition();
+      const radius = (parsed && parsed.radiusKm) || parseFloat(String(radiusStr).replace(",", ".")) || defaultRadiusKm;
+      onChange(`${radius}@${pt.lat.toFixed(5)},${pt.lon.toFixed(5)}`);
+    } catch (e) {
+      setError(e.message || "Standort nicht verfügbar.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:2,flex:1,minWidth:0}}>
+      <div style={{display:"flex",gap:4,alignItems:"center"}}>
+        <input value={radiusStr} onChange={e=>setRadius(e.target.value)} inputMode="decimal"
+          placeholder={String(defaultRadiusKm)}
+          style={{width:48,flexShrink:0,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"5px 6px",color:"#e8f4fd",fontSize:12}} />
+        <span style={{fontSize:11,color:"rgba(232,244,253,0.5)",flexShrink:0}}>km</span>
+        <button type="button" onClick={useCurrentLocation} disabled={busy} title="Aktuellen Standort verwenden"
+          style={{flexShrink:0,background:hasCoords?"rgba(74,222,128,0.15)":"rgba(125,211,252,0.15)",border:`1px solid ${hasCoords?"rgba(74,222,128,0.3)":"rgba(125,211,252,0.3)"}`,borderRadius:8,padding:"5px 8px",color:hasCoords?"#4ade80":"#7dd3fc",fontSize:12,cursor:busy?"default":"pointer"}}>
+          {busy ? "…" : (hasCoords ? "📍✓" : "📍")}
+        </button>
+      </div>
+      {error ? (
+        <div style={{fontSize:10,color:"#f87171"}}>{error}</div>
+      ) : !hasCoords && (
+        <div style={{fontSize:10,color:"rgba(232,244,253,0.4)"}}>Standort noch nicht erfasst — 📍 tippen</div>
+      )}
+    </div>
+  );
+}
+
 function SearchBar({ filterText, setFilterText, knownGliders }) {
   // Opens on focus/tap into the search field itself (no separate button
   // needed) and stays independent state from then on — it does NOT close
@@ -2761,6 +2866,19 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
   // via the explicit ✓ button below.
   const [advOpen, setAdvOpen] = useState(false);
   const [rows, setRows] = useState(() => parseQueryToRows(filterText));
+
+  // Standardradius für die "In der Nähe"-Suche — unter Service →
+  // "Umkreissuche (aktueller Standort)" hinterlegbar, sonst 5 km.
+  const [defaultNearbyRadiusKm, setDefaultNearbyRadiusKm] = useState(5);
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("settings:nearbyRadiusKm");
+        const n = r && r.value ? parseFloat(r.value) : NaN;
+        if (isFinite(n) && n > 0) setDefaultNearbyRadiusKm(n);
+      } catch {}
+    })();
+  }, []);
 
   const applyRows = (nextRows) => {
     setRows(nextRows);
@@ -2772,16 +2890,32 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
     const next = rows.filter((_,i)=>i!==idx);
     applyRows(next.length ? next : [newSearchRow()]);
   };
+  // Öffnet den Zeilen-Editor und legt (falls noch keine vorhanden) eine
+  // "In der Nähe"-Zeile mit dem Standardradius an — Standort wird dort per
+  // 📍-Button erfasst, nicht schon hier, damit ein Klick auf diesen Button
+  // nie ungefragt eine Geolocation-Berechtigungsabfrage auslöst.
+  const showNearbySearch = () => {
+    setAdvOpen(true);
+    if (rows.some(r => r.field === "naehe")) return;
+    const nextRows = (rows.length === 1 && rows[0].value === "")
+      ? [{ ...rows[0], field: "naehe", op: ":", value: String(defaultNearbyRadiusKm) }]
+      : [...rows, { field: "naehe", op: ":", value: String(defaultNearbyRadiusKm), connector: "AND" }];
+    applyRows(nextRows);
+  };
 
   return (
     <div style={{position:"relative"}}>
       <div style={{position:"relative"}}>
         <input value={filterText} onChange={e=>setFilterText(e.target.value)} onFocus={()=>setAdvOpen(true)} placeholder="🔍 Suchen…"
-          style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,padding:"8px 34px 8px 12px",color:"#e8f4fd",fontSize:13,boxSizing:"border-box"}} />
-        {filterText && (
-          <button onClick={()=>setFilterText("")}
-            style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",background:"none",border:"none",color:"rgba(232,244,253,0.4)",cursor:"pointer",fontSize:14}}>✕</button>
-        )}
+          style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,padding:"8px 58px 8px 12px",color:"#e8f4fd",fontSize:13,boxSizing:"border-box"}} />
+        <div style={{position:"absolute",right:8,top:"50%",transform:"translateY(-50%)",display:"flex",alignItems:"center",gap:6}}>
+          <button onClick={showNearbySearch} title="Flüge in der Nähe des aktuellen Standorts suchen"
+            style={{background:"none",border:"none",color:"rgba(232,244,253,0.45)",cursor:"pointer",fontSize:14,padding:0}}>📍</button>
+          {filterText && (
+            <button onClick={()=>setFilterText("")}
+              style={{background:"none",border:"none",color:"rgba(232,244,253,0.4)",cursor:"pointer",fontSize:14,padding:0}}>✕</button>
+          )}
+        </div>
       </div>
 
       {advOpen && (
@@ -2805,7 +2939,8 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
                       const nf = SEARCH_FIELDS.find(f=>f.id===e.target.value);
                       const isNum = nf?.type==="number"||nf?.type==="date"||nf?.type==="time";
                       const isBool = nf?.type==="bool";
-                      updateRow(idx, { field: e.target.value, op: isNum ? "=" : ":", value2: undefined, value: isBool ? "ja" : "" });
+                      const isGeo = nf?.type==="geo";
+                      updateRow(idx, { field: e.target.value, op: isNum ? "=" : ":", value2: undefined, value: isBool ? "ja" : (isGeo ? String(defaultNearbyRadiusKm) : "") });
                     }}
                     style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"5px 4px",color:"#e8f4fd",fontSize:12,minWidth:0}}>
                     {SEARCH_FIELDS.map(f=><option key={f.id} value={f.id} style={{background:"#0a1628"}}>{f.label}</option>)}
@@ -2813,7 +2948,8 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
                   {(() => {
                     if (fieldDef?.type === "bool") return null;
                     const isNumeric = fieldDef?.type === "number" || fieldDef?.type === "date" || fieldDef?.type === "time";
-                    const ops = isNumeric ? ADV_OPS_NUM : ADV_OPS_TEXT;
+                    const isGeo = fieldDef?.type === "geo";
+                    const ops = isGeo ? ADV_OPS_GEO : (isNumeric ? ADV_OPS_NUM : ADV_OPS_TEXT);
                     return (
                       <select value={row.op || (isNumeric ? "=" : ":")} onChange={e=>updateRow(idx,{op:e.target.value})}
                         style={{background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"5px 2px",color:"#e8f4fd",fontSize:12,width:isNumeric?68:44,flexShrink:0}}>
@@ -2826,6 +2962,9 @@ function SearchBar({ filterText, setFilterText, knownGliders }) {
                       style={{flex:1,minWidth:0,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:8,padding:"5px 8px",color:"#e8f4fd",fontSize:12}}>
                       {BOOL_OPTIONS.map(o=><option key={o.value} value={o.value} style={{background:"#0a1628"}}>{o.label}</option>)}
                     </select>
+                  ) : fieldDef?.type === "geo" ? (
+                    <NearbyValueEditor value={row.value} defaultRadiusKm={defaultNearbyRadiusKm}
+                      onChange={v=>updateRow(idx,{value:v})} />
                   ) : (
                   <input value={row.value==="*"?"":row.value} onChange={e=>updateRow(idx,{value:e.target.value})}
                     placeholder={row.op==="between" ? "von…" : "Wert…"}
