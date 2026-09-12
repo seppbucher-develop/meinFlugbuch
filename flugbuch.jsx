@@ -643,6 +643,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   const fullMapRef = useRef(null);
   const fullRefMarkerRef = useRef(null);
   const fullReadyRef = useRef(false);
+  // Nummerierte Wendepunkt-Marker der Distanz-Linie (siehe applyDistanceRoute
+  // unten) — eigene Ref-Arrays statt einzelner Refs, da es bis zu 3 davon
+  // gleichzeitig geben kann.
+  const previewDistanceMarkersRef = useRef([]);
+  const fullDistanceMarkersRef = useRef([]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   // Which glider marker to use — chosen in Settings > Schirme, shared
   // across the whole app via storage. Re-read on focus so a change made in
@@ -690,11 +695,10 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // — lebt als Ref statt als State, weil er pro Wiedergabe-Frame gelesen
   // und geschrieben wird und kein eigenes Re-Render auslösen soll.
   const circlingStateRef = useRef(false);
-  // "Distanz"-Button: blendet die für den Flug hinterlegte Distanz (dieselbe
-  // Zahl wie im Stats-Kachel/InlineField "Distanz", siehe getDisplayDistance)
-  // als Badge über der Karte ein — rein informativ, keine eigene Neuberechnung
-  // (die IGC-eigene Distanzschätzung gilt im Rest der App bewusst als nicht
-  // vertrauenswürdig genug, siehe analyzeIGC weiter oben).
+  // "Distanz"-Button: zeichnet die berechnete Distanz als Linie mit bis zu
+  // 5 Punkten (Start, bis zu 3 Wendepunkte, Landung — siehe
+  // computeDistanceRoute weiter unten in dieser Datei) über der Karte ein,
+  // plus ein Badge mit der resultierenden Gesamtstrecke.
   const [showDistance, setShowDistance] = useState(false);
 
   const togglePlay = () => setIsPlaying(p => !p);
@@ -702,7 +706,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   const track = flight?.track || [];
   const sP = flight?.startPt, eP = flight?.endPt;
   const hasMap = track.length > 0 || (sP && eP);
-  const distanceKm = getDisplayDistance(flight);
 
   // Same GPS-glitch rejection as before: a single wild fix shouldn't blow
   // out the bounding box used for fitBounds.
@@ -713,6 +716,18 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     const filtered = track.filter(p => Math.abs(p.lat-medLat)<=0.5 && Math.abs(p.lon-medLon)<=0.5);
     return filtered.length ? filtered : track;
   }, [track]);
+
+  // Für den "Distanz"-Button: bis zu 5 Punkte (Start, bis zu 3 Wendepunkte,
+  // Landung), die die größtmögliche Gesamtstrecke ergeben — siehe
+  // computeDistanceRoute weiter unten in dieser Datei. Ohne vollen Track
+  // (z.B. reine PDF-Importe ohne IGC) bleibt es bei der direkten
+  // Luftlinie Start–Landung, falls beide Punkte vorhanden sind.
+  const distanceRoute = useMemo(() => {
+    const trace = cleanTrack.length ? cleanTrack : track;
+    if (trace.length > 1) return computeDistanceRoute(trace);
+    if (sP && eP) return { points: [sP, eP], km: +((haversineDistKm(sP, eP) || 0).toFixed(1)) };
+    return null;
+  }, [cleanTrack, track, sP, eP]);
 
   // Cumulative flown distance up to each track point (same basis
   // FlightProfile's own "distances" array uses) — lets playback report its
@@ -866,8 +881,23 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
         addMarker(sP, "#22c55e", "S");
         addMarker(eP, "#ef4444", "L");
       }
+      // Distanz-Linie (siehe computeDistanceRoute/applyDistanceRoute) —
+      // Quelle/Layer schon hier anlegen, aber standardmässig ausgeblendet
+      // ("visibility":"none"); der "Distanz"-Button schaltet sie danach nur
+      // per setLayoutProperty sichtbar, ohne die ganze Karte (und damit den
+      // WebGL-Kontext) neu aufzubauen.
+      if (distanceRoute && distanceRoute.points.length > 1) {
+        map.addSource("distance-route", {
+          type: "geojson",
+          data: { type: "Feature", geometry: { type: "LineString", coordinates: distanceRoute.points.map(p=>[p.lon,p.lat]) } },
+        });
+        map.addLayer({ id: "distance-line", type: "line", source: "distance-route",
+          layout: { "line-join": "round", "line-cap": "round", visibility: "none" },
+          paint: { "line-color": "#f59e0b", "line-width": 3, "line-dasharray": [2, 1.6] } });
+      }
       readyRef.current = true;
       applyHighlight(map, mapRefObj===previewMapRef ? previewRefMarkerRef : fullRefMarkerRef);
+      applyDistanceRoute(map, mapRefObj===previewMapRef ? previewDistanceMarkersRef : fullDistanceMarkersRef);
       removeStrayMapTilerWarnings();
     });
   };
@@ -930,6 +960,39 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     else if (track.length) fitToPoints(cleanTrack.length ? cleanTrack : track);
     else if (sP && eP) fitToPoints([sP, eP]);
   };
+
+  // Schaltet die in buildMap bereits angelegte (aber standardmässig
+  // versteckte) Distanz-Linie sichtbar/unsichtbar und verwaltet die
+  // nummerierten Wendepunkt-Marker dazu (Start/Landung sind schon durch die
+  // immer sichtbaren S/L-Marker markiert, siehe addMarker in buildMap) —
+  // reine Sichtbarkeits-Änderung, kein Neuaufbau der Karte.
+  const applyDistanceRoute = (map, markersRefObj) => {
+    if (!map) return;
+    markersRefObj.current.forEach(m => m.remove());
+    markersRefObj.current = [];
+    const show = showDistance && distanceRoute && distanceRoute.points.length > 1;
+    if (map.getLayer && map.getLayer("distance-line")) {
+      map.setLayoutProperty("distance-line", "visibility", show ? "visible" : "none");
+    }
+    if (!show) return;
+    const sdk = window.maptilersdk;
+    const pts = distanceRoute.points;
+    pts.forEach((pt, idx) => {
+      if (idx === 0 || idx === pts.length-1) return; // Start/Landung: schon die S/L-Marker
+      const el = document.createElement("div");
+      el.style.cssText = `width:20px;height:20px;border-radius:50%;background:#f59e0b;border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;color:#1a1200;font:800 11px system-ui;`;
+      el.textContent = String(idx);
+      markersRefObj.current.push(new sdk.Marker({ element: el }).setLngLat([pt.lon, pt.lat]).addTo(map));
+    });
+  };
+
+  // Schaltet die Distanz-Linie um, sobald showDistance sich ändert (Button)
+  // oder die Route selbst neu berechnet wurde — unabhängig vom Kartenaufbau
+  // oben, analog zu applyHighlight bei Profil-Pan/Zoom.
+  useEffect(() => {
+    if (previewReadyRef.current) applyDistanceRoute(previewMapRef.current, previewDistanceMarkersRef);
+    if (isFullscreen && fullReadyRef.current) applyDistanceRoute(fullMapRef.current, fullDistanceMarkersRef);
+  }, [showDistance, distanceRoute, isFullscreen]);
 
   useEffect(() => {
     if (isFullscreen) {
@@ -1119,9 +1182,9 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     <>
       <div style={{position:"relative"}} onClick={()=>{ if (hasMap) setIsFullscreen(true); }}>
         <div ref={previewDivRef} style={{width:"100%",aspectRatio:"3/2",background:"#040e20",borderRadius:10,overflow:"hidden",cursor:hasMap?"pointer":"default"}} />
-        {showDistance && distanceKm && (
-          <div style={{position:"absolute",top:8,left:8,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,padding:"4px 9px",color:"#7dd3fc",fontSize:12,fontWeight:700,pointerEvents:"none"}}>
-            📏 {distanceKm} km
+        {showDistance && distanceRoute && (
+          <div style={{position:"absolute",top:8,left:8,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:8,padding:"4px 9px",color:"#f59e0b",fontSize:12,fontWeight:700,pointerEvents:"none"}}>
+            📏 {distanceRoute.km} km
           </div>
         )}
         {hasMap && !mapTilerKey && (
@@ -1171,10 +1234,10 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
               )}
             </>
           )}
-          {distanceKm && (
+          {distanceRoute && (
             <button onClick={()=>setShowDistance(s=>!s)}
               title={showDistance?"Distanz ausblenden":"Distanz anzeigen"}
-              style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showDistance?"rgba(125,211,252,0.25)":"rgba(125,211,252,0.1)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,color:"#7dd3fc",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showDistance?"rgba(245,158,11,0.25)":"rgba(245,158,11,0.1)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,color:"#f59e0b",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
               📏 Distanz
             </button>
           )}
@@ -1186,9 +1249,9 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           style={{position:"fixed",inset:0,background:"#000",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",overflow:"hidden"}}
         >
           <div ref={fullDivRef} style={{width:"100%",height:"70vh"}} />
-          {showDistance && distanceKm && (
-            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:20,padding:"7px 14px",color:"#7dd3fc",fontSize:13,fontWeight:700,pointerEvents:"none",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
-              📏 {distanceKm} km
+          {showDistance && distanceRoute && (
+            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,pointerEvents:"none",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+              📏 {distanceRoute.km} km
             </div>
           )}
           {flight?.track?.length > 1 && (
@@ -2217,6 +2280,72 @@ function computeOpenDistanceKm(track) {
     }
   }
   return +overallBest.toFixed(1);
+}
+// ── DISTANZ-LINIE für den "Distanz"-Button in FlightMap ─────────────────
+// Fast dieselbe DP wie computeOpenDistanceKm oben, aber mit FESTEN
+// Endpunkten (Start = tatsächlicher erster Trackpunkt, Ziel = tatsächlich
+// letzter) statt frei wählbaren — computeOpenDistanceKm optimiert bewusst
+// "irgendwo im Track" (analog XContest freier Streckenflug), aber für die
+// Kartendarstellung soll die Linie immer bei Start/Landung beginnen/enden
+// (siehe S/L-Marker auf der Karte) und dazwischen bis zu 3 Wendepunkte
+// nehmen, die die Gesamtstrecke maximieren — macht insgesamt bis zu 5
+// Punkte. Rein für die Visualisierung; beeinflusst nicht den gespeicherten
+// Distanz-Wert (totalDist/scoreDistanceKm).
+function computeDistanceRoute(track) {
+  if (!track || track.length < 2) return null;
+  let epsilon = 0.05; // km
+  let candidates = simplifyTrackDP(track, epsilon);
+  let tries = 0;
+  while (candidates.length > 400 && tries < 8) {
+    epsilon *= 1.8;
+    candidates = simplifyTrackDP(track, epsilon);
+    tries++;
+  }
+  if (candidates.length > 600) {
+    const stride = Math.ceil(candidates.length / 600);
+    candidates = candidates.filter((_, i) => i % stride === 0 || i === candidates.length-1);
+  }
+  const k = candidates.length;
+  if (k < 2) return null;
+  const dist = (i, j) => haversineDistKm(candidates[i], candidates[j]) || 0;
+
+  const MAX_LEGS = 4; // bis zu 3 Wendepunkte = bis zu 4 Teilstrecken
+  // best[L][i] = beste Gesamtdistanz eines bei Kandidat 0 (Start) begonnenen
+  // Pfads mit genau L Teilstrecken, endend bei Kandidat i — im Unterschied
+  // zu computeOpenDistanceKm hier NICHT frei wählbar (best[0][i] ist nur
+  // für i=0 gültig, nicht für jedes i).
+  const best = Array.from({ length: MAX_LEGS+1 }, () => new Float64Array(k).fill(-Infinity));
+  const parent = Array.from({ length: MAX_LEGS+1 }, () => new Int32Array(k).fill(-1));
+  best[0][0] = 0;
+  for (let L = 1; L <= MAX_LEGS; L++) {
+    for (let i = 0; i < k; i++) {
+      let localBest = -Infinity, localJ = -1;
+      for (let j = 0; j < i; j++) {
+        if (best[L-1][j] === -Infinity) continue;
+        const cand = best[L-1][j] + dist(j, i);
+        if (cand > localBest) { localBest = cand; localJ = j; }
+      }
+      best[L][i] = localBest;
+      parent[L][i] = localJ;
+    }
+  }
+  const last = k - 1; // tatsächlicher Landepunkt
+  let bestL = -1, bestKm = -Infinity;
+  for (let L = 1; L <= MAX_LEGS; L++) {
+    if (best[L][last] > bestKm) { bestKm = best[L][last]; bestL = L; }
+  }
+  if (bestL === -1) return null; // sollte bei k>=2 nie vorkommen
+  const chain = [];
+  let L = bestL, i = last;
+  while (L >= 0) {
+    chain.push(i);
+    if (L === 0) break;
+    const j = parent[L][i];
+    if (j === -1) return null; // sollte nicht vorkommen
+    L -= 1; i = j;
+  }
+  chain.reverse();
+  return { points: chain.map(idx => candidates[idx]), km: +bestKm.toFixed(1) };
 }
 // Entscheidet, was (falls überhaupt) bei Distanz/Ø Speed nachgetragen
 // werden soll — überschreibt nie bereits vorhandene Werte. Wird sowohl
