@@ -696,9 +696,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // und geschrieben wird und kein eigenes Re-Render auslösen soll.
   const circlingStateRef = useRef(false);
   // "Distanz"-Button: zeichnet die berechnete Distanz als Linie mit bis zu
-  // 5 Punkten (Start, bis zu 3 Wendepunkte, Landung — siehe
-  // computeDistanceRoute weiter unten in dieser Datei) über der Karte ein,
-  // plus ein Badge mit der resultierenden Gesamtstrecke.
+  // 5 frei im Track liegenden Punkten (bis zu 3 Wendepunkte dazwischen —
+  // Anfang und Ende dieser Linie müssen NICHT mit Start-/Landeplatz
+  // übereinstimmen, siehe computeDistanceRoute/computeOpenDistancePath
+  // weiter unten in dieser Datei) über der Karte ein, plus ein Badge mit der
+  // resultierenden Gesamtstrecke.
   const [showDistance, setShowDistance] = useState(false);
 
   const togglePlay = () => setIsPlaying(p => !p);
@@ -717,9 +719,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     return filtered.length ? filtered : track;
   }, [track]);
 
-  // Für den "Distanz"-Button: bis zu 5 Punkte (Start, bis zu 3 Wendepunkte,
-  // Landung), die die größtmögliche Gesamtstrecke ergeben — siehe
-  // computeDistanceRoute weiter unten in dieser Datei. Ohne vollen Track
+  // Für den "Distanz"-Button: bis zu 5 frei wählbare Punkte im Track (bis zu
+  // 3 Wendepunkte dazwischen), die die größtmögliche Gesamtstrecke ergeben —
+  // siehe computeDistanceRoute weiter unten in dieser Datei. Anfang/Ende
+  // dieser Punktkette müssen nicht mit dem tatsächlichen Start-/Landeplatz
+  // übereinstimmen (analog XContest freier Streckenflug). Ohne vollen Track
   // (z.B. reine PDF-Importe ohne IGC) bleibt es bei der direkten
   // Luftlinie Start–Landung, falls beide Punkte vorhanden sind.
   const distanceRoute = useMemo(() => {
@@ -977,11 +981,22 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (!show) return;
     const sdk = window.maptilersdk;
     const pts = distanceRoute.points;
+    // Das Streckenende muss (seit computeOpenDistancePath, siehe dort) nicht
+    // mehr mit dem tatsächlichen Start-/Landepunkt zusammenfallen — daher
+    // hier nur noch die Endpunkte auslassen, die WIRKLICH mit sP/eP
+    // übereinstimmen (dafür gibt es schon die immer sichtbaren S/L-Marker,
+    // siehe addMarker in buildMap); ein Endpunkt, der sich als eigener
+    // Wendepunkt irgendwo im Track herausstellt, bekommt ganz normal seine
+    // nummerierte Markierung.
+    const isRealStart = pt => sP && pt.lat === sP.lat && pt.lon === sP.lon;
+    const isRealEnd = pt => eP && pt.lat === eP.lat && pt.lon === eP.lon;
+    let label = 0; // fortlaufende Nummerierung nur der tatsächlich gezeichneten Marker
     pts.forEach((pt, idx) => {
-      if (idx === 0 || idx === pts.length-1) return; // Start/Landung: schon die S/L-Marker
+      if ((idx === 0 && isRealStart(pt)) || (idx === pts.length-1 && isRealEnd(pt))) return;
+      label++;
       const el = document.createElement("div");
       el.style.cssText = `width:20px;height:20px;border-radius:50%;background:#f59e0b;border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;color:#1a1200;font:800 11px system-ui;`;
-      el.textContent = String(idx);
+      el.textContent = String(label);
       markersRefObj.current.push(new sdk.Marker({ element: el }).setLngLat([pt.lon, pt.lat]).addTo(map));
     });
   };
@@ -2194,6 +2209,13 @@ function getDisplayDistance(fl) {
 // praxistaugliche Annäherung — gut genug, um Distanz/Ø Speed automatisch
 // zu befüllen, wenn noch kein manuell erfasster XContest-Wert vorliegt.
 //
+// Wichtig (siehe computeOpenDistancePath weiter unten): "Start" und "Ziel"
+// dieser Wertung sind bewusst FREI wählbare Punkte irgendwo im Track, nicht
+// zwingend der tatsächliche erste/letzte Trackpunkt (= Start-/Landeplatz).
+// Genau das macht XContest bei der freien Streckenwertung ebenfalls so —
+// der beste Streckenzug darf irgendwo zwischen Start und Landung beginnen
+// und enden, wenn das eine grössere Gesamtstrecke ergibt.
+//
 // Jede der 5^n möglichen Punktkombinationen auf einem mehrtausend-Punkte-
 // Track durchzuprobieren ist praktisch unmöglich (O(n^5)) — stattdessen
 // wird der Track zunächst vereinfacht (Douglas-Peucker) auf eine deutlich
@@ -2239,7 +2261,19 @@ function simplifyTrackDP(track, epsilonKm) {
   }
   return track.filter((_, i) => keep[i]);
 }
-function computeOpenDistanceKm(track) {
+// Gemeinsame Grundlage für computeOpenDistanceKm (Distanz-Feld) UND
+// computeDistanceRoute (Distanz-Linie auf der Karte) — beide müssen exakt
+// denselben Streckenzug finden, sonst zeigen Feld und Karte unterschiedliche
+// Werte für denselben Flug an. Findet den Pfad mit bis zu 4 Teilstrecken
+// (= bis zu 5 Punkten, bis zu 3 Wendepunkte), der die Summe der Luftlinien-
+// Distanzen zwischen chronologisch geordneten Trackpunkten maximiert — Start
+// UND Ziel dieses Pfads sind dabei FREI wählbar (nicht auf den tatsächlichen
+// ersten/letzten Trackpunkt fixiert), analog zu XContest's freier
+// Streckenwertung. Gibt sowohl die Gesamtstrecke als auch die Punktkette
+// selbst zurück, damit computeDistanceRoute daraus die Kartenlinie zeichnen
+// kann, ohne die Optimierung ein zweites Mal (mit potenziell abweichendem
+// Ergebnis) durchzuführen.
+function computeOpenDistancePath(track) {
   if (!track || track.length < 2) return null;
   // epsilon schrittweise vergröbern, bis die Kandidatenmenge für das O(k²)
   // DP unten handlich bleibt — bei sehr langen/verwinkelten Tracks selten
@@ -2263,60 +2297,12 @@ function computeOpenDistanceKm(track) {
   const MAX_LEGS = 4; // bis zu 3 Wendepunkte = bis zu 4 Teilstrecken
   // best[L][i] = beste Gesamtdistanz eines Pfads mit genau L Teilstrecken,
   // endend bei Kandidat i (Punkte müssen in chronologischer Reihenfolge
-  // verwendet werden — DP läuft daher nur über j<i).
-  const best = Array.from({ length: MAX_LEGS+1 }, () => new Float64Array(k).fill(-Infinity));
-  for (let i = 0; i < k; i++) best[0][i] = 0; // 0 Teilstrecken: nur der Startpunkt selbst
-  let overallBest = 0;
-  for (let L = 1; L <= MAX_LEGS; L++) {
-    for (let i = 0; i < k; i++) {
-      let localBest = -Infinity;
-      for (let j = 0; j < i; j++) {
-        if (best[L-1][j] === -Infinity) continue;
-        const cand = best[L-1][j] + dist(j, i);
-        if (cand > localBest) localBest = cand;
-      }
-      best[L][i] = localBest;
-      if (localBest > overallBest) overallBest = localBest;
-    }
-  }
-  return +overallBest.toFixed(1);
-}
-// ── DISTANZ-LINIE für den "Distanz"-Button in FlightMap ─────────────────
-// Fast dieselbe DP wie computeOpenDistanceKm oben, aber mit FESTEN
-// Endpunkten (Start = tatsächlicher erster Trackpunkt, Ziel = tatsächlich
-// letzter) statt frei wählbaren — computeOpenDistanceKm optimiert bewusst
-// "irgendwo im Track" (analog XContest freier Streckenflug), aber für die
-// Kartendarstellung soll die Linie immer bei Start/Landung beginnen/enden
-// (siehe S/L-Marker auf der Karte) und dazwischen bis zu 3 Wendepunkte
-// nehmen, die die Gesamtstrecke maximieren — macht insgesamt bis zu 5
-// Punkte. Rein für die Visualisierung; beeinflusst nicht den gespeicherten
-// Distanz-Wert (totalDist/scoreDistanceKm).
-function computeDistanceRoute(track) {
-  if (!track || track.length < 2) return null;
-  let epsilon = 0.05; // km
-  let candidates = simplifyTrackDP(track, epsilon);
-  let tries = 0;
-  while (candidates.length > 400 && tries < 8) {
-    epsilon *= 1.8;
-    candidates = simplifyTrackDP(track, epsilon);
-    tries++;
-  }
-  if (candidates.length > 600) {
-    const stride = Math.ceil(candidates.length / 600);
-    candidates = candidates.filter((_, i) => i % stride === 0 || i === candidates.length-1);
-  }
-  const k = candidates.length;
-  if (k < 2) return null;
-  const dist = (i, j) => haversineDistKm(candidates[i], candidates[j]) || 0;
-
-  const MAX_LEGS = 4; // bis zu 3 Wendepunkte = bis zu 4 Teilstrecken
-  // best[L][i] = beste Gesamtdistanz eines bei Kandidat 0 (Start) begonnenen
-  // Pfads mit genau L Teilstrecken, endend bei Kandidat i — im Unterschied
-  // zu computeOpenDistanceKm hier NICHT frei wählbar (best[0][i] ist nur
-  // für i=0 gültig, nicht für jedes i).
+  // verwendet werden — DP läuft daher nur über j<i). best[0][i]=0 für JEDES
+  // i (nicht nur i=0): jeder Kandidat ist ein gültiger freier Startpunkt.
   const best = Array.from({ length: MAX_LEGS+1 }, () => new Float64Array(k).fill(-Infinity));
   const parent = Array.from({ length: MAX_LEGS+1 }, () => new Int32Array(k).fill(-1));
-  best[0][0] = 0;
+  for (let i = 0; i < k; i++) best[0][i] = 0;
+  let overallBest = 0, overallL = 0, overallI = 0;
   for (let L = 1; L <= MAX_LEGS; L++) {
     for (let i = 0; i < k; i++) {
       let localBest = -Infinity, localJ = -1;
@@ -2327,25 +2313,40 @@ function computeDistanceRoute(track) {
       }
       best[L][i] = localBest;
       parent[L][i] = localJ;
+      if (localBest > overallBest) { overallBest = localBest; overallL = L; overallI = i; }
     }
   }
-  const last = k - 1; // tatsächlicher Landepunkt
-  let bestL = -1, bestKm = -Infinity;
-  for (let L = 1; L <= MAX_LEGS; L++) {
-    if (best[L][last] > bestKm) { bestKm = best[L][last]; bestL = L; }
-  }
-  if (bestL === -1) return null; // sollte bei k>=2 nie vorkommen
+  if (overallL === 0) return { points: [candidates[0]], km: 0 }; // entartet: kein Punktepaar mit Distanz > 0
   const chain = [];
-  let L = bestL, i = last;
+  let L = overallL, i = overallI;
   while (L >= 0) {
     chain.push(i);
     if (L === 0) break;
     const j = parent[L][i];
-    if (j === -1) return null; // sollte nicht vorkommen
+    if (j === -1) break; // sollte nicht vorkommen
     L -= 1; i = j;
   }
   chain.reverse();
-  return { points: chain.map(idx => candidates[idx]), km: +bestKm.toFixed(1) };
+  return { points: chain.map(idx => candidates[idx]), km: +overallBest.toFixed(1) };
+}
+function computeOpenDistanceKm(track) {
+  const r = computeOpenDistancePath(track);
+  return r ? r.km : null;
+}
+// ── DISTANZ-LINIE für den "Distanz"-Button in FlightMap ─────────────────
+// Nutzt exakt dieselbe freie Optimierung wie computeOpenDistanceKm (siehe
+// computeOpenDistancePath oben) — Start und Ziel der gezeichneten Linie
+// sind also, wie bei XContest, NICHT auf den tatsächlichen Start-/Landeplatz
+// fixiert. Bis zur Einführung dieser gemeinsamen Grundlage zeichnete die
+// Karte eine eigene, künstlich auf den ersten/letzten Trackpunkt fixierte
+// Linie — das konnte eine andere (meist kürzere) Strecke als die im
+// Distanz-Feld gespeicherte ergeben. applyDistanceRoute (siehe FlightMap
+// weiter unten) markiert deshalb nur noch die Wendepunkte gesondert, deren
+// Lage vom tatsächlichen S/L-Punkt abweicht — die schon vorhandenen S/L-
+// Marker decken den Fall ab, dass ein Streckenende zufällig doch mit
+// Start/Landung zusammenfällt.
+function computeDistanceRoute(track) {
+  return computeOpenDistancePath(track);
 }
 // Entscheidet, was (falls überhaupt) bei Distanz/Ø Speed nachgetragen
 // werden soll — überschreibt nie bereits vorhandene Werte. Wird sowohl
@@ -4616,6 +4617,10 @@ function FlugbuchApp() {
   // siehe unten) — {scanned, speed, steigen, sinken} oder {running:true}
   // während sie läuft.
   const [recomputeResult, setRecomputeResult] = useState(null);
+  // Ergebnis-Banner der einmaligen Korrekturfunktion für die Distanz (siehe
+  // recomputeDistances weiter unten) — {scanned, scannedTrack, changed}
+  // oder {running:true} während sie läuft.
+  const [distanceRecomputeResult, setDistanceRecomputeResult] = useState(null);
   // Ergebnis-Banner der einmaligen Funktion, die für bereits bestehende
   // Flüge nachträglich die Original-IGC-Datei zuordnet (siehe
   // backfillRawIgcFiles weiter unten) — {updated, ambiguous, matchless, total}
@@ -4951,6 +4956,51 @@ function FlugbuchApp() {
     setRecomputeResult({
       scanned: flights.length, scannedTrack: trackedFlights.length,
       speed: speedCount, steigen: steigenCount, steigen20: steigen20Count, sinken: sinkenCount, dauer: durCount,
+    });
+  }, [flights, saveFlight, selected]);
+
+  // Einmalige Korrekturfunktion: Distanz (und die daraus abgeleitete
+  // Ø Speed) für ALLE Flüge mit GPS-Track direkt aus dem Track neu
+  // berechnen und bestehende Werte überschreiben. Nötig, weil die
+  // Kartenlinie (computeDistanceRoute) bis zur Einführung von
+  // computeOpenDistancePath Start/Ziel künstlich auf den tatsächlichen
+  // ersten/letzten Trackpunkt (Start/Landung) fixiert hat — bei XContest
+  // müssen die Endpunkte der besten Strecke damit aber nicht übereinstimmen
+  // (siehe computeOpenDistanceKm oben). Flüge, deren Distanz-Feld schon
+  // korrekt über die freie Optimierung befüllt wurde, ändern sich hier
+  // nicht; betroffen sind vor allem ältere Importe. Wie recomputeTrackStats
+  // ein Einmal-Batch über alle Flüge, überschreibt bewusst auch bereits
+  // gespeicherte Werte (keine reine Leerfeld-Ergänzung wie beim regulären
+  // Import, siehe computeDistanceSpeedBackfill).
+  const recomputeDistances = useCallback(async () => {
+    setDistanceRecomputeResult({ running: true });
+    const trackedFlights = flights.filter(f => f.track && f.track.length > 1);
+    let changedCount = 0;
+    const updated = [];
+    for (const f of trackedFlights) {
+      const newDist = computeOpenDistanceKm(f.track);
+      if (newDist == null || newDist <= 0) continue;
+      const oldDist = f.totalDist || parseFloat(f.customFields?.distKm) || 0;
+      if (Math.abs(newDist - oldDist) < 0.05) continue; // schon aktuell (Rundungstoleranz)
+      const cf = { ...(f.customFields||{}), distKm: String(newDist) };
+      if (f.durationSec > 0) cf.kmh = String(+(newDist / (f.durationSec/3600)).toFixed(1));
+      const upd = { ...f, totalDist: newDist, customFields: cf };
+      await saveFlight(upd);
+      updated.push(upd);
+      changedCount++;
+    }
+    if (updated.length) {
+      setFlights(prev => prev.map(f => {
+        const u = updated.find(x => x.id === f.id);
+        return u || f;
+      }));
+      if (selected) {
+        const u = updated.find(x => x.id === selected.id);
+        if (u) setSelected(u);
+      }
+    }
+    setDistanceRecomputeResult({
+      scanned: flights.length, scannedTrack: trackedFlights.length, changed: changedCount,
     });
   }, [flights, saveFlight, selected]);
 
@@ -5778,6 +5828,34 @@ function FlugbuchApp() {
               : `✅ ${recomputeResult.scanned} Flüge geprüft — überall bereits aktuell, nichts zu ändern.`}
           </span>
           <button onClick={()=>setRecomputeResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
+        </div>
+      )}
+
+      {/* Einmalige Korrekturfunktion für die Distanz bereits importierter
+          Flüge (siehe recomputeDistances) — die Kartenlinie ("Distanz"-Knopf
+          in FlightMap) hat Start/Ziel früher künstlich auf den tatsächlichen
+          Start-/Landepunkt fixiert, statt wie das Distanz-Feld selbst
+          (computeOpenDistanceKm) frei im Track zu optimieren. Rechnet die
+          Distanz (und daraus Ø Speed) für alle Flüge mit Track neu und
+          überschreibt dabei auch schon gespeicherte Werte. */}
+      {showImportMenu && (
+        <div style={{margin:"6px 16px 0"}}>
+          <button onClick={recomputeDistances} disabled={distanceRecomputeResult?.running}
+            title="Für alle Flüge mit GPS-Track: Distanz (freie Streckenoptimierung mit bis zu 3 Wendepunkten, analog XContest — Anfang/Ende müssen nicht mit Start/Landung übereinstimmen) direkt aus dem gespeicherten Track neu berechnen und Ø Speed entsprechend anpassen — korrigiert auch bereits gespeicherte Werte."
+            style={{width:"100%",background:"rgba(245,158,11,0.08)",border:"1px solid rgba(245,158,11,0.2)",borderRadius:8,padding:"7px 10px",color:"#f59e0b",fontSize:11,fontWeight:600,cursor:distanceRecomputeResult?.running?"default":"pointer"}}>
+            {distanceRecomputeResult?.running ? "⏳ Berechne…" : "📏 Distanz für bestehende Flüge korrigieren (freie Streckenoptimierung)"}
+          </button>
+        </div>
+      )}
+
+      {distanceRecomputeResult && !distanceRecomputeResult.running && (
+        <div style={{margin:"8px 16px 0",background:"rgba(245,158,11,0.08)",border:"1px solid rgba(245,158,11,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+          <span style={{fontSize:12,color:"#f59e0b"}}>
+            {distanceRecomputeResult.changed
+              ? `✅ ${distanceRecomputeResult.scanned} Flüge geprüft (${distanceRecomputeResult.scannedTrack} mit Track) — ${distanceRecomputeResult.changed}× Distanz (und Ø Speed) korrigiert.`
+              : `✅ ${distanceRecomputeResult.scanned} Flüge geprüft — überall bereits aktuell, nichts zu ändern.`}
+          </span>
+          <button onClick={()=>setDistanceRecomputeResult(null)} style={{background:"none",border:"none",color:"rgba(245,158,11,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
         </div>
       )}
 
