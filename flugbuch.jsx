@@ -690,12 +690,19 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // — lebt als Ref statt als State, weil er pro Wiedergabe-Frame gelesen
   // und geschrieben wird und kein eigenes Re-Render auslösen soll.
   const circlingStateRef = useRef(false);
+  // "Distanz"-Button: blendet die für den Flug hinterlegte Distanz (dieselbe
+  // Zahl wie im Stats-Kachel/InlineField "Distanz", siehe getDisplayDistance)
+  // als Badge über der Karte ein — rein informativ, keine eigene Neuberechnung
+  // (die IGC-eigene Distanzschätzung gilt im Rest der App bewusst als nicht
+  // vertrauenswürdig genug, siehe analyzeIGC weiter oben).
+  const [showDistance, setShowDistance] = useState(false);
 
   const togglePlay = () => setIsPlaying(p => !p);
 
   const track = flight?.track || [];
   const sP = flight?.startPt, eP = flight?.endPt;
   const hasMap = track.length > 0 || (sP && eP);
+  const distanceKm = getDisplayDistance(flight);
 
   // Same GPS-glitch rejection as before: a single wild fix shouldn't blow
   // out the bounding box used for fitBounds.
@@ -1100,6 +1107,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   useEffect(() => {
     setIsPlaying(false);
     setPlayElapsedSec(0);
+    setShowDistance(false);
     if (playMarkerRef.current) { playMarkerRef.current.remove(); playMarkerRef.current = null; }
     if (previewPlayMarkerRef.current) { previewPlayMarkerRef.current.remove(); previewPlayMarkerRef.current = null; }
     if (onPlaybackPositionChange) onPlaybackPositionChange(null);
@@ -1111,6 +1119,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     <>
       <div style={{position:"relative"}} onClick={()=>{ if (hasMap) setIsFullscreen(true); }}>
         <div ref={previewDivRef} style={{width:"100%",aspectRatio:"3/2",background:"#040e20",borderRadius:10,overflow:"hidden",cursor:hasMap?"pointer":"default"}} />
+        {showDistance && distanceKm && (
+          <div style={{position:"absolute",top:8,left:8,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,padding:"4px 9px",color:"#7dd3fc",fontSize:12,fontWeight:700,pointerEvents:"none"}}>
+            📏 {distanceKm} km
+          </div>
+        )}
         {hasMap && !mapTilerKey && (
           <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:6,background:"rgba(4,14,32,0.92)",color:"rgba(232,244,253,0.6)",fontSize:12,textAlign:"center",padding:16}}>
             <div style={{fontSize:22}}>🗺️</div>
@@ -1158,6 +1171,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
               )}
             </>
           )}
+          {distanceKm && (
+            <button onClick={()=>setShowDistance(s=>!s)}
+              title={showDistance?"Distanz ausblenden":"Distanz anzeigen"}
+              style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showDistance?"rgba(125,211,252,0.25)":"rgba(125,211,252,0.1)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,color:"#7dd3fc",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              📏 Distanz
+            </button>
+          )}
         </>,
         controlsSlot
       )}
@@ -1166,6 +1186,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           style={{position:"fixed",inset:0,background:"#000",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",overflow:"hidden"}}
         >
           <div ref={fullDivRef} style={{width:"100%",height:"70vh"}} />
+          {showDistance && distanceKm && (
+            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:20,padding:"7px 14px",color:"#7dd3fc",fontSize:13,fontWeight:700,pointerEvents:"none",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+              📏 {distanceKm} km
+            </div>
+          )}
           {flight?.track?.length > 1 && (
             <div style={{position:"absolute",bottom:"calc(15vh + 10px)",right:14,display:"flex",gap:6,alignItems:"center"}}>
               <button onClick={togglePlay}
