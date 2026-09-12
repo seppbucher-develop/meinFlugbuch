@@ -1,10 +1,8 @@
 // Service Worker fürs Flugbuch — ermöglicht Offline-Nutzung ab dem zweiten
-// Online-Start. Strategie: "network-first" — bei bestehender Internet-
-// verbindung wird IMMER die aktuelle Version vom Server geholt (wichtig,
-// weil .jsx-Dateien sich per `git push` ändern und wir keine veralteten
-// Programm-Versionen offline "einfrieren" wollen). Nur wenn das Netzwerk
-// nicht erreichbar ist, wird auf die zuletzt erfolgreich geladene Version
-// aus dem Cache zurückgegriffen.
+// Online-Start. Cache-Strategie für die eigenen Dateien ist per
+// SAME_ORIGIN_STRATEGY weiter unten umschaltbar (Details dort) — Standard
+// ist "stale-while-revalidate": sofort aus dem Cache antworten, Netzwerk-
+// Update läuft im Hintergrund für den nächsten Aufruf.
 //
 // WICHTIG bei Änderungen an dieser Liste (z.B. neue Seite hinzugefügt):
 // CACHE_VERSION hochzählen, sonst wird die Änderung nicht ausgerollt, da
@@ -12,6 +10,29 @@
 // unverändert weiterverwenden.
 const CACHE_VERSION = "v4";
 const CACHE_NAME = "flugbuch-cache-" + CACHE_VERSION;
+
+// Strategie für die eigenen Dateien (index.html, flugbuch.html, .jsx, ...):
+//
+// "network-first" (ursprünglich): Bei bestehender Verbindung wird IMMER
+//   zuerst das Netzwerk versucht, erst wenn DAS scheitert, kommt der Cache
+//   zum Zug. Garantiert nach jedem `git push` sofort die neueste Version,
+//   hat aber einen Haken: bei schwachem/instabilem Empfang (z.B. Handy mit
+//   wenig Netz am Lande-/Startplatz — technisch "online", aber Requests
+//   hängen) wartet man erst den vollen Netzwerk-Timeout ab, bevor der
+//   eigentlich sofort verfügbare Cache greift. Fühlt sich dann an wie
+//   "offline ist langsam".
+//
+// "stale-while-revalidate": Antwortet SOFORT aus dem Cache (falls
+//   vorhanden) und stößt parallel im Hintergrund einen Netzwerk-Request an,
+//   der den Cache fürs NÄCHSTE Mal aktualisiert — kein Warten auf einen
+//   Netzwerk-Timeout mehr, egal ob offline oder nur langsam. Preis dafür:
+//   nach einem `git push` sieht man die neue Version idR erst beim
+//   übernächsten statt beim nächsten Laden.
+//
+// Zum Zurückstellen auf die alte Strategie einfach wieder auf
+// "network-first" ändern — beide Code-Pfade bleiben unten vollständig
+// erhalten, es wird nur zwischen ihnen umgeschaltet.
+const SAME_ORIGIN_STRATEGY = "stale-while-revalidate";
 
 // React/Babel/MapTiler etc. werden bisher direkt von externen CDNs geladen
 // und NIE offline verfügbar gemacht (der fetch-Handler reicht Cross-Origin-
@@ -130,17 +151,46 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  // "Basisname" ohne Query-String als Cache-Key — auch für Cache-Buster-
+  // URLs wie "flugbuch.jsx?v=169..." bleibt die Basis-Datei im Cache unter
+  // ihrem eigentlichen Pfad erreichbar (in beiden Strategien unten gleich
+  // verwendet).
+  const cacheKey = url.pathname.split("/").pop() || "./";
+
+  if (SAME_ORIGIN_STRATEGY === "stale-while-revalidate") {
+    event.respondWith(
+      caches.match(cacheKey).then((cached) => {
+        const networkUpdate = fetch(req)
+          .then((networkResponse) => {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
+            return networkResponse;
+          })
+          .catch(() => null);
+
+        if (cached) {
+          // Auf das Netzwerk-Ergebnis NICHT warten — der Cache-Eintrag wird
+          // im Hintergrund fürs nächste Mal aktualisiert. event.waitUntil
+          // hält den Service Worker am Leben, bis das fertig ist, auch wenn
+          // die Antwort selbst längst zurückgegeben wurde.
+          event.waitUntil(networkUpdate);
+          return cached;
+        }
+        // Nichts im Cache (z.B. beim allerersten Aufruf überhaupt) — hier
+        // bleibt nur, auf das Netzwerk zu warten; schlägt auch das fehl,
+        // wie in der network-first-Strategie auf index.html zurückfallen.
+        return networkUpdate.then((networkResponse) => networkResponse || caches.match("index.html"));
+      })
+    );
+    return;
+  }
+
+  // network-first (ursprüngliche Strategie, siehe SAME_ORIGIN_STRATEGY oben)
   event.respondWith(
     fetch(req)
       .then((networkResponse) => {
-        // Erfolgreiche Antwort im Cache aktualisieren (auch für
-        // Cache-Buster-URLs wie "flugbuch.jsx?v=169..." — die Basis-Datei
-        // im Cache bleibt unter ihrem eigentlichen Pfad erreichbar).
         const clone = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => {
-          const cacheKey = url.pathname.split("/").pop() || "./";
-          cache.put(cacheKey, clone);
-        });
+        caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
         return networkResponse;
       })
       .catch(() =>
@@ -148,8 +198,7 @@ self.addEventListener("fetch", (event) => {
           if (cached) return cached;
           // Fallback für Cache-Buster-URLs (z.B. "flugbuch.jsx?v=...") auf
           // die zuletzt gecachte Basisversion ohne Query-String.
-          const baseName = url.pathname.split("/").pop();
-          return caches.match(baseName) || caches.match("index.html");
+          return caches.match(cacheKey) || caches.match("index.html");
         })
       )
   );
