@@ -160,11 +160,10 @@ function estimateTzOffset(firstPt, dateStr) {
   return Math.round((firstPt.lon || 0) / 15);
 }
 
-// Max.Steigen / Max.Sinken / Max.Steigen 20s — herausgelöst aus analyzeIGC,
-// damit dieselbe Berechnung auch für die einmalige Nachrechnen-Funktion
-// (recomputeTrackStats, siehe FlugbuchApp) genutzt werden kann, ohne den
-// ganzen (u.a. die Distanz-Optimierung enthaltenden) analyzeIGC-Durchlauf
-// erneut anzustossen.
+// Max.Steigen / Max.Sinken / Max.Steigen 20s — als eigene Funktion aus
+// analyzeIGC herausgelöst, damit sie unabhängig von dessen restlichem
+// (u.a. die Distanz-Optimierung enthaltenden) Durchlauf getestet/genutzt
+// werden kann.
 const CLIMB_WINDOW_SEC = 3;
 const CLIMB_WINDOW_SEC_20 = 20;
 // Reine Sicherheitsmarge gegen einen einzelnen GPS-Höhenausreisser
@@ -4613,24 +4612,6 @@ function FlugbuchApp() {
   const [importProgress, setImportProgress] = useState(null);
   const [igcResult, setIgcResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
-  // Ergebnis-Banner der einmaligen Nachrechnen-Funktion (recomputeTrackStats,
-  // siehe unten) — {scanned, speed, steigen, sinken} oder {running:true}
-  // während sie läuft.
-  const [recomputeResult, setRecomputeResult] = useState(null);
-  // Ergebnis-Banner der einmaligen Korrekturfunktion für die Distanz (siehe
-  // recomputeDistances weiter unten) — {scanned, scannedTrack, changed}
-  // oder {running:true} während sie läuft.
-  const [distanceRecomputeResult, setDistanceRecomputeResult] = useState(null);
-  // Ergebnis-Banner der einmaligen Funktion, die für bereits bestehende
-  // Flüge nachträglich die Original-IGC-Datei zuordnet (siehe
-  // backfillRawIgcFiles weiter unten) — {updated, ambiguous, matchless, total}
-  // oder {running:true} während sie läuft.
-  const [rawBackfillResult, setRawBackfillResult] = useState(null);
-  const rawBackfillFileRef = useRef(null);
-  // true während der eigentliche Ordner-Scan läuft (vor backfillRawIgcFiles
-  // selbst, siehe runIgcDirBackfill) — analog igcDirScanning beim regulären
-  // Ordner-Import.
-  const [rawBackfillScanning, setRawBackfillScanning] = useState(false);
   // Cache der Schirme-Liste (schirme:list) für die Dauer eines IGC-Imports
   // — vermeidet, bei jeder einzelnen Datei erneut zu laden/zu speichern,
   // und stellt sicher, dass zwei Dateien mit demselben (neuen) Schirm im
@@ -4886,124 +4867,6 @@ function FlugbuchApp() {
     }
   }, []);
 
-  // Einmalige Nachrechnen-Funktion für bereits importierte Flüge: läuft über
-  // alle Flüge mit echtem GPS-Track und berechnet Max Speed, Max.Steigen,
-  // Max.Steigen 20s und Max.Sinken direkt aus genau diesem Track neu (kein
-  // erneuter IGC-Import nötig) — alle vier Felder werden dabei IMMER neu
-  // berechnet und ein bereits vorhandener Wert bei Bedarf überschrieben,
-  // nicht nur leere Felder aufgefüllt. Das ist bewusst so gewählt (statt der
-  // "nur auffüllen"-Regel des normalen Imports): eine manuelle Korrektur
-  // ausgerechnet dieser vier Track-Werte ist unwahrscheinlich, während ein
-  // erneuter Lauf hier gezielt auch bereits gespeicherte Fehlwerte aus einer
-  // älteren, ungenaueren Version des jeweiligen Algorithmus korrigieren
-  // können muss (siehe Max Speed: ein einzelner schlechter GPS-Fix, z.B.
-  // kurz vor der Landung, konnte in der ersten Version fälschlich als
-  // Rekordgeschwindigkeit übernommen werden).
-  //
-  // Läuft ausserdem über ALLE Flüge (nicht nur getrackte) und normalisiert
-  // die Dauer-Anzeige auf "Xh MMm" — betrifft vor allem ältere CSV-Importe,
-  // die das rohe Dauer-Format aus der Exceldatei (z.B. "0:57") unverändert
-  // übernommen hatten, statt es wie IGC-Flüge zu formatieren (siehe
-  // formatDurationHM). Rein kosmetisch (die zugrunde liegende durationSec
-  // bleibt unverändert), daher immer sicher zu überschreiben — "Dauer" ist
-  // in der Detailansicht ohnehin nur ein reines Anzeigefeld (StaticField),
-  // eine manuelle Korrektur ist über die UI gar nicht möglich.
-  const recomputeTrackStats = useCallback(async () => {
-    setRecomputeResult({ running: true });
-    const trackedFlights = flights.filter(f => f.track && f.track.length > 1);
-    let speedCount = 0, steigenCount = 0, steigen20Count = 0, sinkenCount = 0, durCount = 0;
-    const updated = [];
-    for (const f of flights) {
-      const patch = {};
-      const hasTrack = f.track && f.track.length > 1;
-      if (hasTrack) {
-        const cf = { ...(f.customFields||{}) };
-        let cfChanged = false;
-        const v = computeMaxStraightSpeedKmh(f.track);
-        if (v && v !== f.maxSpeedKmh) { patch.maxSpeedKmh = v; speedCount++; }
-        const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
-        if (parseFloat(cf.maxSteigen) !== maxClimb) { cf.maxSteigen = String(maxClimb); steigenCount++; cfChanged = true; }
-        if (parseFloat(cf.maxSteigen20) !== maxClimb20) { cf.maxSteigen20 = String(maxClimb20); steigen20Count++; cfChanged = true; }
-        if (parseFloat(cf.maxSinken) !== maxSinkRate) { cf.maxSinken = String(maxSinkRate); sinkenCount++; cfChanged = true; }
-        if (cfChanged) patch.customFields = cf;
-      }
-      // Dauer-Darstellung vereinheitlichen ("Xh MMm") — betrifft vor allem
-      // ältere CSV-Importe, die das rohe Dauer-Format aus der Exceldatei
-      // (z.B. "0:57") direkt übernommen hatten, statt es wie IGC-Flüge auf
-      // "2h 27m" zu normalisieren. Läuft über ALLE Flüge, nicht nur
-      // getrackte, da genau die betroffenen CSV-Importe meist keinen Track
-      // haben.
-      if (f.durationSec > 0) {
-        const normalized = formatDurationHM(f.durationSec);
-        if (f.durationStr !== normalized) { patch.durationStr = normalized; durCount++; }
-      }
-      if (Object.keys(patch).length) {
-        const upd = { ...f, ...patch };
-        await saveFlight(upd);
-        updated.push(upd);
-      }
-    }
-    if (updated.length) {
-      setFlights(prev => prev.map(f => {
-        const u = updated.find(x => x.id === f.id);
-        return u || f;
-      }));
-      if (selected) {
-        const u = updated.find(x => x.id === selected.id);
-        if (u) setSelected(u);
-      }
-    }
-    setRecomputeResult({
-      scanned: flights.length, scannedTrack: trackedFlights.length,
-      speed: speedCount, steigen: steigenCount, steigen20: steigen20Count, sinken: sinkenCount, dauer: durCount,
-    });
-  }, [flights, saveFlight, selected]);
-
-  // Einmalige Korrekturfunktion: Distanz (und die daraus abgeleitete
-  // Ø Speed) für ALLE Flüge mit GPS-Track direkt aus dem Track neu
-  // berechnen und bestehende Werte überschreiben. Nötig, weil die
-  // Kartenlinie (computeDistanceRoute) bis zur Einführung von
-  // computeOpenDistancePath Start/Ziel künstlich auf den tatsächlichen
-  // ersten/letzten Trackpunkt (Start/Landung) fixiert hat — bei XContest
-  // müssen die Endpunkte der besten Strecke damit aber nicht übereinstimmen
-  // (siehe computeOpenDistanceKm oben). Flüge, deren Distanz-Feld schon
-  // korrekt über die freie Optimierung befüllt wurde, ändern sich hier
-  // nicht; betroffen sind vor allem ältere Importe. Wie recomputeTrackStats
-  // ein Einmal-Batch über alle Flüge, überschreibt bewusst auch bereits
-  // gespeicherte Werte (keine reine Leerfeld-Ergänzung wie beim regulären
-  // Import, siehe computeDistanceSpeedBackfill).
-  const recomputeDistances = useCallback(async () => {
-    setDistanceRecomputeResult({ running: true });
-    const trackedFlights = flights.filter(f => f.track && f.track.length > 1);
-    let changedCount = 0;
-    const updated = [];
-    for (const f of trackedFlights) {
-      const newDist = computeOpenDistanceKm(f.track);
-      if (newDist == null || newDist <= 0) continue;
-      const oldDist = f.totalDist || parseFloat(f.customFields?.distKm) || 0;
-      if (Math.abs(newDist - oldDist) < 0.05) continue; // schon aktuell (Rundungstoleranz)
-      const cf = { ...(f.customFields||{}), distKm: String(newDist) };
-      if (f.durationSec > 0) cf.kmh = String(+(newDist / (f.durationSec/3600)).toFixed(1));
-      const upd = { ...f, totalDist: newDist, customFields: cf };
-      await saveFlight(upd);
-      updated.push(upd);
-      changedCount++;
-    }
-    if (updated.length) {
-      setFlights(prev => prev.map(f => {
-        const u = updated.find(x => x.id === f.id);
-        return u || f;
-      }));
-      if (selected) {
-        const u = updated.find(x => x.id === selected.id);
-        if (u) setSelected(u);
-      }
-    }
-    setDistanceRecomputeResult({
-      scanned: flights.length, scannedTrack: trackedFlights.length, changed: changedCount,
-    });
-  }, [flights, saveFlight, selected]);
-
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
     const maxNr = flights.reduce((m,f)=>{
@@ -5152,8 +5015,7 @@ function FlugbuchApp() {
   }, []);
 
   // Applies parsed IGC data onto an existing flight (shared by the
-  // filename-match and date-match import paths AND by the one-time
-  // backfillRawIgcFiles further below, so all three stay in sync).
+  // filename-match and date-match import paths, so both stay in sync).
   const attachIgcToFlight = useCallback(async (existing, file, track, date, pilot, glider, igcData, igcFilename, overrideMap) => {
     const cf = { ...(existing.customFields||{}) };
     // Gleiche Regel wie der Typ-Auto-Effekt in FlightDetail: nur setzen,
@@ -5173,8 +5035,7 @@ function FlugbuchApp() {
     // überschrieben werden dürfen. Eine manuelle Korrektur ausgerechnet
     // dieser drei rein Track-berechneten Werte ist unwahrscheinlich, und ein
     // erneuter Import desselben oder eines korrigierten Files soll auch
-    // hier veraltete/fehlerhafte gespeicherte Werte korrigieren können
-    // (analog zur Nachrechnen-Funktion, siehe recomputeTrackStats).
+    // hier veraltete/fehlerhafte gespeicherte Werte korrigieren können.
     cf.maxSteigen = String(igcData.maxClimb);
     cf.maxSteigen20 = String(igcData.maxClimb20);
     cf.maxSinken = String(igcData.maxSinkRate);
@@ -5240,73 +5101,6 @@ function FlugbuchApp() {
     setFlights(prev=>prev.map(f=>f.id===updated.id?updated:f));
     if (selected?.id===updated.id) setSelected(updated);
   }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
-
-  // ── Einmalfunktion: Original-IGC-Dateien für bestehende Flüge nachsichern
-  // ──────────────────────────────────────────────────────────────────────
-  // Vor storeRawIgcFile wurden importierte IGC-Dateien nur geparst, nie als
-  // solche gespeichert (siehe Kommentar dort). Für Flüge, die schon vor
-  // dieser Änderung importiert wurden, lässt sich die Originaldatei hiermit
-  // nachträglich zuordnen — über genau denselben Weg wie ein regulärer
-  // Re-Import (attachIgcToFlight), NICHT nur ein reines Ablegen der rohen
-  // Bytes: Track, Karte, Höhenprofil und alle daraus berechneten Werte
-  // (Distanz, Dauer, Steigen/Sinken, Max Speed, …) sollen exakt der
-  // Originaldatei entsprechen, sobald eine vorliegt — nicht einem davon
-  // möglicherweise abweichenden, älteren gespeicherten Track. Bereits
-  // manuell gepflegte Felder (Startplatz, XContest-Distanz, Kommentar,
-  // Bewertung, …) bleiben dabei unangetastet, exakt wie bei jedem anderen
-  // IGC-Re-Import (siehe attachIgcToFlight). "Passend" heisst hier strikt
-  // exaktes Datum UND exakte Startzeit (wie im Feld gespeichert) — bei
-  // mehreren oder keinem Treffer wird die Datei übersprungen, statt zu raten.
-  const backfillRawIgcFiles = useCallback(async (files) => {
-    const igcFiles = files.filter(f => /\.igc$/i.test(f.name));
-    if (!igcFiles.length) return;
-    setRawBackfillResult({ running: true });
-    let updated = 0, ambiguous = 0, matchless = 0;
-    for (const file of igcFiles) {
-      try {
-        const text = await file.text();
-        const { track, date, pilot, glider, tzOffsetHours } = parseIGC(text);
-        if (!track.length) { matchless++; continue; }
-        const igcData = analyzeIGC(track, tzOffsetHours, date);
-        const candidates = flights.filter(f => f.date === date && f.startTime === igcData.startTime);
-        if (candidates.length === 1) {
-          const baseName = file.name.replace(/\.igc$/i, "");
-          await attachIgcToFlight(candidates[0], file, track, date, pilot, glider, igcData, baseName);
-          updated++;
-        } else if (candidates.length > 1) {
-          ambiguous++;
-        } else {
-          matchless++;
-        }
-      } catch (e) {
-        console.error("IGC-Datei beim Nachsichern übersprungen:", file.name, e);
-        matchless++;
-      }
-    }
-    setRawBackfillResult({ updated, ambiguous, matchless, total: igcFiles.length });
-  }, [flights, attachIgcToFlight]);
-
-  // Nutzt denselben rekursiven Ordner-Scan wie der reguläre IGC-Ordner-
-  // Import (scanIgcDirRecursive) — bewusst OHNE dessen "schon bekannter
-  // Dateiname"-Filter (runIgcDirImport): die Einmalfunktion soll ja gerade
-  // Dateien nochmals prüfen, die zu einem bereits bestehenden Flug gehören,
-  // nicht nur wirklich neue. Läuft also über wirklich jede .igc-Datei im
-  // Ordner — backfillRawIgcFiles selbst überspringt ohnehin alles ohne
-  // eindeutigen Datum+Startzeit-Treffer.
-  const runIgcDirBackfill = useCallback(async () => {
-    if (!igcDirHandle) return;
-    setRawBackfillScanning(true);
-    try {
-      const allFiles = await scanIgcDirRecursive(igcDirHandle);
-      setRawBackfillScanning(false);
-      if (!allFiles.length) { setRawBackfillResult({ updated: 0, ambiguous: 0, matchless: 0, total: 0 }); return; }
-      await backfillRawIgcFiles(allFiles);
-    } catch (e) {
-      console.error("IGC-Ordner-Scan für Nachsichern fehlgeschlagen:", e);
-      setRawBackfillScanning(false);
-      setRawBackfillResult({ error: e.message || String(e) });
-    }
-  }, [igcDirHandle, backfillRawIgcFiles]);
 
   // Zweiter Teil des Imports (nach einer evtl. NewSchirmDialog-Bestätigung)
   // — arbeitet auf bereits geparsten Dateien, damit ein pausierter Import
@@ -5801,109 +5595,6 @@ function FlugbuchApp() {
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing ? "⏳ Importiere…" : igcDirScanning ? "⏳ Suche…" : "IGC"}
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Einmalige Nachrechnen-Funktion für bereits importierte Flüge (siehe
-          recomputeTrackStats) — Max Speed, Max.Steigen, Max.Steigen 20s und
-          Max.Sinken werden IMMER neu aus dem bereits gespeicherten Track
-          berechnet (auch zur Korrektur bereits gespeicherter Fehlwerte),
-          kein erneuter IGC-Import nötig. Normalisiert ausserdem die Dauer-
-          Anzeige ("Xh MMm") über ALLE Flüge, nicht nur getrackte. */}
-      {showImportMenu && (
-        <div style={{margin:"6px 16px 0"}}>
-          <button onClick={recomputeTrackStats} disabled={recomputeResult?.running}
-            title="Für alle Flüge mit GPS-Track: Max Speed, Max.Steigen, Max.Steigen 20s und Max.Sinken direkt aus dem gespeicherten Track neu berechnen — korrigiert auch bereits gespeicherte Werte (z.B. aus einer älteren, ungenaueren Version des Algorithmus). Vereinheitlicht ausserdem bei allen Flügen die Dauer-Anzeige auf 'Xh MMm'."
-            style={{width:"100%",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.2)",borderRadius:8,padding:"7px 10px",color:"#7dd3fc",fontSize:11,fontWeight:600,cursor:recomputeResult?.running?"default":"pointer"}}>
-            {recomputeResult?.running ? "⏳ Berechne…" : "🔁 Max Speed/Steigen/Sinken/Dauer für bestehende Flüge nachrechnen"}
-          </button>
-        </div>
-      )}
-
-      {recomputeResult && !recomputeResult.running && (
-        <div style={{margin:"8px 16px 0",background:"rgba(125,211,252,0.08)",border:"1px solid rgba(125,211,252,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-          <span style={{fontSize:12,color:"#7dd3fc"}}>
-            {recomputeResult.speed || recomputeResult.steigen || recomputeResult.steigen20 || recomputeResult.sinken || recomputeResult.dauer
-              ? `✅ ${recomputeResult.scanned} Flüge geprüft (${recomputeResult.scannedTrack} mit Track) — neu berechnet: ${recomputeResult.speed}× Max Speed, ${recomputeResult.steigen}× Max.Steigen, ${recomputeResult.steigen20}× Max.Steigen 20s, ${recomputeResult.sinken}× Max.Sinken, ${recomputeResult.dauer}× Dauer-Format.`
-              : `✅ ${recomputeResult.scanned} Flüge geprüft — überall bereits aktuell, nichts zu ändern.`}
-          </span>
-          <button onClick={()=>setRecomputeResult(null)} style={{background:"none",border:"none",color:"rgba(125,211,252,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
-        </div>
-      )}
-
-      {/* Einmalige Korrekturfunktion für die Distanz bereits importierter
-          Flüge (siehe recomputeDistances) — die Kartenlinie ("Distanz"-Knopf
-          in FlightMap) hat Start/Ziel früher künstlich auf den tatsächlichen
-          Start-/Landepunkt fixiert, statt wie das Distanz-Feld selbst
-          (computeOpenDistanceKm) frei im Track zu optimieren. Rechnet die
-          Distanz (und daraus Ø Speed) für alle Flüge mit Track neu und
-          überschreibt dabei auch schon gespeicherte Werte. */}
-      {showImportMenu && (
-        <div style={{margin:"6px 16px 0"}}>
-          <button onClick={recomputeDistances} disabled={distanceRecomputeResult?.running}
-            title="Für alle Flüge mit GPS-Track: Distanz (freie Streckenoptimierung mit bis zu 3 Wendepunkten, analog XContest — Anfang/Ende müssen nicht mit Start/Landung übereinstimmen) direkt aus dem gespeicherten Track neu berechnen und Ø Speed entsprechend anpassen — korrigiert auch bereits gespeicherte Werte."
-            style={{width:"100%",background:"rgba(245,158,11,0.08)",border:"1px solid rgba(245,158,11,0.2)",borderRadius:8,padding:"7px 10px",color:"#f59e0b",fontSize:11,fontWeight:600,cursor:distanceRecomputeResult?.running?"default":"pointer"}}>
-            {distanceRecomputeResult?.running ? "⏳ Berechne…" : "📏 Distanz für bestehende Flüge korrigieren (freie Streckenoptimierung)"}
-          </button>
-        </div>
-      )}
-
-      {distanceRecomputeResult && !distanceRecomputeResult.running && (
-        <div style={{margin:"8px 16px 0",background:"rgba(245,158,11,0.08)",border:"1px solid rgba(245,158,11,0.25)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-          <span style={{fontSize:12,color:"#f59e0b"}}>
-            {distanceRecomputeResult.changed
-              ? `✅ ${distanceRecomputeResult.scanned} Flüge geprüft (${distanceRecomputeResult.scannedTrack} mit Track) — ${distanceRecomputeResult.changed}× Distanz (und Ø Speed) korrigiert.`
-              : `✅ ${distanceRecomputeResult.scanned} Flüge geprüft — überall bereits aktuell, nichts zu ändern.`}
-          </span>
-          <button onClick={()=>setDistanceRecomputeResult(null)} style={{background:"none",border:"none",color:"rgba(245,158,11,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
-        </div>
-      )}
-
-      {/* Einmalige Nachsicher-Funktion für bereits bestehende Flüge (siehe
-          backfillRawIgcFiles) — für Flüge, die noch vor Einführung der
-          Original-IGC-Speicherung importiert wurden. Ordnet die exakt
-          passende Original-IGC-Datei nachträglich zu (Zuordnung strikt über
-          Datum+Startzeit) und aktualisiert dabei Track/Karte/Höhenprofil und
-          alle daraus berechneten Werte wie bei einem regulären Re-Import.
-          Nutzt, genau wie der reguläre Import oben, den bereits gewählten
-          IGC-Ordner samt rekursivem Scan, falls einer konfiguriert ist —
-          eine kleine "📄"-Schaltfläche erlaubt trotzdem die manuelle
-          Dateiauswahl, wie beim Import-Kachel-Muster oben. */}
-      {showImportMenu && (
-        <div style={{margin:"6px 16px 0",position:"relative"}}>
-          <input ref={rawBackfillFileRef} type="file" accept=".igc" multiple style={{display:"none"}}
-            onChange={e=>{ backfillRawIgcFiles(Array.from(e.target.files)); e.target.value=""; }} />
-          <button onClick={()=>{
-              if (igcDirFsapiSupported && igcDirHandle) runIgcDirBackfill();
-              else rawBackfillFileRef.current?.click();
-            }}
-            disabled={rawBackfillResult?.running || rawBackfillScanning}
-            title={igcDirFsapiSupported && igcDirHandle
-              ? `Ordner „${igcDirName}" komplett durchsuchen (rekursiv, auch bereits bekannte Dateien) — jede gefundene .igc-Datei wird dem bestehenden Flug mit exakt gleichem Datum UND gleicher Startzeit zugeordnet, dort als Original-Datei gespeichert und wie bei einem regulären Re-Import eingelesen (Track, Karte, Höhenprofil, Distanz, Dauer, Steigen/Sinken, Max Speed usw. entsprechen danach exakt der Originaldatei). Bereits manuell gepflegte Felder bleiben unangetastet. Für Flüge ohne eindeutigen Treffer passiert nichts.`
-              : "Bereits vorhandene .igc-Dateien (z.B. vom Vario-Laufwerk) auswählen — jede Datei wird ausschliesslich dem bestehenden Flug mit exakt gleichem Datum UND gleicher Startzeit zugeordnet, dort als Original-Datei nachträglich gespeichert und wie bei einem regulären Re-Import eingelesen (Track, Karte, Höhenprofil, Distanz, Dauer, Steigen/Sinken, Max Speed usw. entsprechen danach exakt der Originaldatei). Bereits manuell gepflegte Felder bleiben unangetastet. Für Flüge ohne eindeutigen Treffer passiert nichts."}
-            style={{width:"100%",boxSizing:"border-box",background:"rgba(167,139,250,0.08)",border:"1px solid rgba(167,139,250,0.2)",borderRadius:8,padding:"7px 34px 7px 10px",color:"#a78bfa",fontSize:11,fontWeight:600,cursor:(rawBackfillResult?.running||rawBackfillScanning)?"default":"pointer"}}>
-            {rawBackfillScanning ? "⏳ Durchsuche Ordner…" : rawBackfillResult?.running ? "⏳ Aktualisiere…" : `🗄️ Original-IGC-Dateien für bestehende Flüge nachsichern (Einmalfunktion)${igcDirHandle ? ` — Ordner „${igcDirName}"` : ""}`}
-          </button>
-          {igcDirFsapiSupported && igcDirHandle && (
-            <button
-              onClick={()=>rawBackfillFileRef.current?.click()}
-              disabled={rawBackfillResult?.running || rawBackfillScanning}
-              title="Statt den ganzen Ordner zu durchsuchen: einzelne .igc-Dateien direkt über die Dateiauswahl wählen"
-              style={{position:"absolute",top:"50%",right:6,transform:"translateY(-50%)",width:20,height:20,padding:0,display:"flex",alignItems:"center",justifyContent:"center",background:"rgba(167,139,250,0.15)",border:"1px solid rgba(167,139,250,0.3)",borderRadius:6,color:"#a78bfa",fontSize:10,cursor:(rawBackfillResult?.running||rawBackfillScanning)?"default":"pointer"}}>
-              📄
-            </button>
-          )}
-        </div>
-      )}
-
-      {rawBackfillResult && !rawBackfillResult.running && (
-        <div style={{margin:"8px 16px 0",background:rawBackfillResult.error?"rgba(239,68,68,0.08)":"rgba(167,139,250,0.08)",border:`1px solid ${rawBackfillResult.error?"rgba(239,68,68,0.3)":"rgba(167,139,250,0.25)"}`,borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-          <span style={{fontSize:12,color:rawBackfillResult.error?"#f87171":"#a78bfa"}}>
-            {rawBackfillResult.error
-              ? "❌ "+rawBackfillResult.error
-              : `✅ ${rawBackfillResult.total} Dateien geprüft — ${rawBackfillResult.updated}× Flug aktualisiert (inkl. Original-Datei), ${rawBackfillResult.ambiguous}× mehrdeutig (übersprungen), ${rawBackfillResult.matchless}× kein passender Flug gefunden.`}
-          </span>
-          <button onClick={()=>setRawBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(167,139,250,0.6)",cursor:"pointer",fontSize:16,flexShrink:0}}>✕</button>
         </div>
       )}
 
