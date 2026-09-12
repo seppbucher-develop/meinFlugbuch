@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<title>Hilfe — Flugbuch</title>
+
+<meta name="theme-color" content="#ffffff" />
+
+<link rel="icon" href="favicon.ico?v=2" sizes="any" />
+<link rel="icon" type="image/png" sizes="32x32" href="icons/icon-32.png?v=2" />
+<link rel="icon" type="image/png" sizes="96x96" href="icons/icon-96.png?v=2" />
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=2" />
+<link rel="manifest" href="manifest.json?v=2" />
+
+<style>
+  html, body {
+    margin: 0; padding: 0; background: #040e20;
+    -webkit-tap-highlight-color: transparent;
+    font-family: system-ui, sans-serif;
+    color: #e8f4fd;
+    min-height: 100vh;
+  }
+  * { box-sizing: border-box; }
+
+  .top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 16px 10px;
+  }
+  .top button {
+    background: none; border: none; color: #7dd3fc; font-size: 22px;
+    cursor: pointer; padding: 0; line-height: 1;
+  }
+  .top h1 { font-size: 18px; font-weight: 800; margin: 0; }
+
+  main {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 4px 16px calc(40px + env(safe-area-inset-bottom, 0px));
+  }
+
+  section {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 14px;
+    padding: 16px 18px;
+    margin-bottom: 14px;
+  }
+  section h2 {
+    font-size: 15px;
+    margin: 0 0 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  section h3 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: rgba(232,244,253,0.5);
+    margin: 14px 0 6px;
+  }
+  section p, section li {
+    font-size: 13px;
+    line-height: 1.6;
+    color: rgba(232,244,253,0.85);
+    margin: 0 0 8px;
+  }
+  section ul { margin: 0 0 8px; padding-left: 20px; }
+  code {
+    background: rgba(125,211,252,0.12);
+    border: 1px solid rgba(125,211,252,0.25);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 12px;
+    color: #7dd3fc;
+  }
+  .hint {
+    font-size: 12px;
+    color: rgba(232,244,253,0.5);
+    margin-top: -2px;
+  }
+</style>
+</head>
+<body>
+  <div class="top">
+    <button onclick="history.length > 1 ? history.back() : (window.location.href='index.html')" title="Zurück">←</button>
+    <h1>❔ Hilfe</h1>
+  </div>
+
+  <main>
+
+    <section>
+      <h2>📖 Flugbuch</h2>
+      <p>Jeder Flug ist ein eigener Eintrag mit Datum, Startplatz, Schirm, Dauer, Distanz und weiteren Feldern. Tippe auf einen Flug in der Liste, um ihn zu öffnen und zu bearbeiten.</p>
+
+      <h3>Flüge erfassen</h3>
+      <ul>
+        <li><b>IGC-Import:</b> Eine oder mehrere <code>.igc</code>-Dateien direkt auf die Liste ziehen (oder über die Dateiauswahl wählen). Das Vario-Aufzeichnungsgerät kann auch als Ordner verknüpft werden — der Ordner wird dann automatisch (rekursiv) nach neuen, noch nicht importierten Dateien durchsucht. Aus dem GPS-Track werden Datum, Zeiten, Dauer, Höhen, Max. Speed, Max. Steigen/Sinken sowie die Flug-Distanz automatisch berechnet.</li>
+        <li><b>Zeilen einfügen:</b> Eine oder mehrere Zeilen aus Numbers/Excel/CSV (gleiche Spalten wie beim CSV-Export, siehe Service) direkt einfügen, z.B. für Flüge ohne IGC-Datei.</li>
+        <li><b>Manuell:</b> Über „+ Flug" einen leeren Eintrag anlegen und die Felder von Hand ausfüllen.</li>
+      </ul>
+
+      <h3>Suchen &amp; Filtern</h3>
+      <p>Freitext durchsucht Ort, Schirm, Pilot, Landeplatz, Reise und Kommentar. Für gezielte Suchen gilt folgende Syntax:</p>
+      <ul>
+        <li><b>UND</b> / <b>ODER</b> verknüpft mehrere Begriffe, z.B. <code>Fiesch ODER Rigi</code></li>
+        <li><b>+wort</b> muss vorkommen, <b>-wort</b> darf nicht vorkommen, z.B. <code>2026 -tandem</code></li>
+        <li><b>feld:wert</b> sucht in einem bestimmten Feld, z.B. <code>site:Fiesch</code>, <code>schirm:Wisp</code>, <code>pilot:…</code></li>
+        <li><b>feld&gt;wert</b>, <b>&lt;</b>, <b>&gt;=</b>, <b>&lt;=</b> vergleicht Zahlen/Werte, z.B. <code>dauer&gt;2</code> (Stunden), <code>dist&gt;30</code> (km), <code>höhe&gt;3000</code> (m), <code>rating&gt;=4</code>, <code>jahr&gt;2020</code></li>
+        <li>Kombinierbar: <code>site:Fiesch UND dauer&gt;2 -tandem</code></li>
+      </ul>
+      <p class="hint">Die gleiche Kurzübersicht erscheint auch direkt in der Flugliste über das <b>?</b> neben dem Filterfeld.</p>
+      <p>Häufig genutzte Filter/Sortierungen lassen sich als <b>Ansicht</b> speichern und später mit einem Tipp wieder anwenden, neu anordnen oder löschen.</p>
+
+      <h3>Karte &amp; Höhenprofil</h3>
+      <p>Bei Flügen mit GPS-Track zeigt die Detailansicht den Flugweg auf der Karte sowie ein Höhenprofil. Über „Wiedergabe" lässt sich der Flug Punkt für Punkt nachverfolgen. Der <b>Distanz</b>-Button legt eine Streckenlinie mit bis zu 5 Punkten auf die Karte, angelehnt an die XContest-Wertung „Freier Streckenflug" — das ist eine Annäherung an die XContest-Berechnung, keine exakte Nachbildung.</p>
+
+      <h3>Flüge in der Nähe</h3>
+      <p>Über das 📍-Symbol beim Suchfeld lässt sich nach früheren Flügen in der Nähe des aktuellen Standorts filtern. Beim IGC-Import werden Startplatz, Landeplatz und Land für einen neuen Flug ausserdem automatisch von einem bereits erfassten Flug in der Nähe übernommen, sofern diese Felder noch leer sind.</p>
+    </section>
+
+    <section>
+      <h2>📊 Statistik</h2>
+      <p>Jahres-Übersicht aller Flüge (Anzahl, Dauer) mit Mehrfach-Filtern nach Flugtyp, Reise, Schirm, Landeplatz, Land und Training — analog zur „Übersicht"-Pivot-Tabelle der ursprünglichen Excel-Datei. Rein lesend, hier wird nichts bearbeitet.</p>
+    </section>
+
+    <section>
+      <h2>🎒 Material</h2>
+      <p>Übersicht aller erfassten Ausrüstungsgegenstände (Anschaffung, Service, Kosten). Für die vier Kategorien <b>Schirm</b>, <b>Sitz</b>, <b>Gerät</b> (z.B. Rettungsgerät) und <b>Div</b> gibt es je eine eigene Stammdaten-Liste mit eigener Seite — ein Material-Eintrag dieser Art wird automatisch mit dem passenden Stammdaten-Eintrag verknüpft (über den Namen im Feld „Typ"). Diese Stammdaten-Listen zeigen auch an, welche Flüge mit welchem Schirm geflogen wurden.</p>
+    </section>
+
+    <section>
+      <h2>🛠️ Service</h2>
+      <ul>
+        <li><b>Backup sichern / wiederherstellen:</b> Sichert alle Daten (Flugbuch, Statistik-Voreinstellungen, Material) in eine Datei. Eine wiederhergestellte Sicherung ersetzt nur Einträge mit derselben ID, alles andere bleibt unangetastet. Ein Ordner lässt sich einmalig festlegen (z.B. ein Synology-Drive-Sync-Ordner) — künftige Backups landen dann automatisch dort, ohne Dialog.</li>
+        <li><b>CSV/IGC-Export:</b> Erzeugt je eine CSV-Datei pro Bereich (Flugbuch, Material, Schirme, Sitze, Geräte, Div) sowie eine ZIP-Datei mit allen IGC-Dateien.</li>
+      </ul>
+      <p class="hint">Ein roter Punkt auf der Service-Karte im Hauptmenü zeigt an, dass seit dem letzten Backup Daten geändert wurden.</p>
+    </section>
+
+    <section>
+      <h2>📴 Offline-Nutzung</h2>
+      <p>Die App funktioniert nach dem ersten Online-Start auch ohne Internetverbindung — ein Banner unten zeigt an, wenn gerade offline gearbeitet wird. Über „Zum Home-Bildschirm hinzufügen" (iOS) bzw. „App installieren" (Android/Desktop) lässt sich die Seite wie eine eigenständige App einrichten.</p>
+    </section>
+
+  </main>
+
+<script>
+  // Service Worker: ermöglicht Offline-Nutzung ab dem zweiten Online-Start.
+  // Siehe sw.js für die Cache-Strategie (network-first, cache-fallback).
+  window.addEventListener("load", function() {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.js").catch(function(e) {
+        console.error("Service-Worker-Registrierung fehlgeschlagen:", e);
+      });
+    }
+  });
+</script>
+
+<div id="offline-banner" style="display:none;position:fixed;bottom:calc(10px + env(safe-area-inset-bottom, 0px));left:10px;right:10px;background:rgba(245,158,11,0.8);color:#1a1200;font-weight:700;text-align:center;padding:7px 16px;border-radius:10px;z-index:9999;font-family:system-ui,sans-serif;font-size:14px;">
+  📴 Offline — zuletzt gespeicherter Stand
+</div>
+<script>
+  function updateOfflineBanner() {
+    var el = document.getElementById("offline-banner");
+    if (el) el.style.display = navigator.onLine ? "none" : "block";
+  }
+  window.addEventListener("online", updateOfflineBanner);
+  window.addEventListener("offline", updateOfflineBanner);
+  updateOfflineBanner();
+</script>
+</body>
+</html>

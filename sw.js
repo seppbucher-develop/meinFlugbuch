@@ -10,7 +10,7 @@
 // CACHE_VERSION hochzählen, sonst wird die Änderung nicht ausgerollt, da
 // alte Service-Worker-Installationen sonst ihren alten Cache "STATIC_CACHE"
 // unverändert weiterverwenden.
-const CACHE_VERSION = "v2";
+const CACHE_VERSION = "v3";
 const CACHE_NAME = "flugbuch-cache-" + CACHE_VERSION;
 
 const CORE_ASSETS = [
@@ -24,8 +24,15 @@ const CORE_ASSETS = [
   "material.jsx",
   "schirme.html",
   "schirme.jsx",
+  "sitze.html",
+  "sitze.jsx",
+  "geraete.html",
+  "geraete.jsx",
+  "div.html",
+  "div.jsx",
   "service.html",
   "service.jsx",
+  "hilfe.html",
   "manifest.json",
   "version.json",
   "favicon.ico",
@@ -36,6 +43,7 @@ const CORE_ASSETS = [
   "icons/icon-512.png",
   "icons/icon-maskable-192.png",
   "icons/icon-maskable-512.png",
+  "icons/icon-header-128.png",
 ];
 
 self.addEventListener("install", (event) => {

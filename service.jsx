@@ -95,26 +95,20 @@ function buildCsv(records, flattenKeys = []) {
   return "\uFEFF" + lines.join("\r\n");
 }
 
-// Liest die tatsächlich importierte Original-IGC-Datei eines Flugs zurück
-// (gespeichert von storeRawIgcFile in flugbuch.jsx, siehe dort) — oder null,
-// wenn (noch) keine gespeichert ist, z.B. ein Flug von vor dieser Änderung,
-// der noch nicht per Einmalfunktion nachgesichert wurde. Erkennt Gzip
-// anhand der Magic Bytes 1f 8b statt eines eigenen Markers.
-function arrayBufferToBase64(buf) {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
-}
 function base64ToArrayBuffer(b64) {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
 }
+
+// Liest die tatsächlich importierte Original-IGC-Datei eines Flugs zurück
+// (gespeichert von storeRawIgcFile in flugbuch.jsx, siehe dort) — oder null,
+// wenn keine gespeichert ist, z.B. bei einem Flug von vor Einführung dieser
+// Speicherung (dafür gab es eine einmalige Nachsicherungs-Funktion, die nach
+// getaner Migration wieder entfernt wurde — betroffene Flüge bleiben ohne
+// Original-Datei, siehe Fallback in flugbuch.jsx). Erkennt Gzip anhand der
+// Magic Bytes 1f 8b statt eines eigenen Markers.
 async function loadRawIgcFile(flightId) {
   try {
     const r = await window.storage.get(`igcfile:${flightId}`);

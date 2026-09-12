@@ -1856,12 +1856,6 @@ function lv03ToWgs84(e, n) {
   let lat = 16.9023892 + 3.238272*x - 0.270978*y*y - 0.002528*x*x - 0.0447*y*y*x - 0.0140*x*x*x;
   return { lat: lat*100/36, lon: lon*100/36 };
 }
-function wgs84ToLv03(lat, lon) {
-  const latP = (lat*3600 - 169028.66)/10000, lonP = (lon*3600 - 26782.5)/10000;
-  const e = 600072.37 + 211455.93*lonP - 10938.51*lonP*latP - 0.36*lonP*latP*latP - 44.54*lonP*lonP*lonP;
-  const n = 200147.07 + 308807.95*latP + 3745.25*lonP*lonP + 76.63*latP*latP - 194.56*lonP*lonP*latP + 119.79*latP*latP*latP;
-  return { e: Math.round(e), n: Math.round(n) };
-}
 // Builds one 53-column CSV/TSV row (same layout as the original bulk-import
 // CSV) from a flight object — the inverse of parseSingleRow/createFlightFromPDF.
 // Used for the "copy flights" feature so pasted output matches Numbers' columns.
@@ -1909,7 +1903,6 @@ const CSV_COLUMN_DEFS = [
   { key: "datum2", label: "Datum2", getter: null },
   { key: "bemerkung", label: "Bemerkung", getter: "bemerkung" },
 ];
-const CSV_COLUMN_DEFAULT_ORDER = CSV_COLUMN_DEFS.map(c => c.key);
 
 function flightToCsvValues(f) {
   const cf = f.customFields || {};
@@ -1957,39 +1950,6 @@ function buildCsvRow(f, columnKeys) {
     if (!def) return "";
     return def.getter ? (values[def.getter] || "") : FORMULA_PLACEHOLDER;
   }).join("\t");
-}
-
-function flightToCsvRow(f) {
-  return buildCsvRow(f, CSV_COLUMN_DEFAULT_ORDER);
-}
-
-// Header row matching flightToCsvRow's 25 columns exactly, so a re-exported
-// file opens in Numbers with the same column layout the person is used to
-// from the original import sheet.
-const CSV_HEADER = [
-  "Nr", "Flugreise", "Datum", "Startzeit", "Start", "Landezeit", "Landung",
-  "S-L Entf.", "Dauer", "Rang", "%", "Distanz", "km/h", "H.Diff.",
-  "müM S", "müM L", "H.Max", "SÜ", "H.Gew.", "Sinken", "Steigen",
-  "Gerät", "Passagier", "Datum2", "Bemerkung",
-].join("\t");
-
-// Builds a downloadable CSV/TSV file from one or more flights, using the
-// exact same column structure as flightToCsvRow (and therefore as the
-// original import format), so it can be re-opened in Numbers/Excel with
-// matching columns. Tab-separated rather than comma-separated since the
-// data itself may contain commas (e.g. place names) and this already
-// matches what the app uses elsewhere for spreadsheet compatibility.
-function exportFlightsAsCsv(flightList, filenameBase) {
-  const rows = [CSV_HEADER, ...flightList.map(flightToCsvRow)].join("\r\n");
-  const blob = new Blob([rows], { type: "text/tab-separated-values;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `${filenameBase}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function coordsToWgs84(a, b) {
@@ -3806,11 +3766,11 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
               <button onClick={async ()=>{
                 // Bevorzugt die tatsächlich importierte Originaldatei
                 // exportieren (seit dieser Speicherung, siehe
-                // storeRawIgcFile) — nur wenn dafür (noch) keine gespeichert
-                // ist (z.B. ein Flug von vor dieser Änderung, noch nicht per
-                // Einmalfunktion nachgesichert), wird wie bisher aus dem
-                // gespeicherten Track eine minimale, aber gültige IGC-Datei
-                // rekonstruiert.
+                // storeRawIgcFile) — nur wenn dafür keine gespeichert ist
+                // (z.B. ein Flug von vor Einführung dieser Speicherung, für
+                // den nachträglich keine Original-Datei mehr zugeordnet
+                // werden kann), wird wie bisher aus dem gespeicherten Track
+                // eine minimale, aber gültige IGC-Datei rekonstruiert.
                 const raw = await loadRawIgcFile(fl.id);
                 let blob;
                 if (raw) {
