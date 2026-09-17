@@ -33,3 +33,10 @@ Der Workflow braucht Schreibrechte für den `GITHUB_TOKEN` (Repo-Einstellung
 **Settings → Actions → General → Workflow permissions → "Read and write
 permissions"**) sowie einen `master`, der direkte Pushes von GitHub Actions
 zulässt (keine Branch-Protection-Regel, die das verhindert).
+
+## Deployment-Benachrichtigung
+
+Der Workflow `.github/workflows/deployment-reset-notify.yml` läuft nach
+jedem erfolgreichen Deployment (z.B. GitHub Pages) und erstellt ein Issue,
+falls der neu deployte Commit kein Nachfolger des zuvor deployten Commits
+ist — also der Deploymentzeitpunkt effektiv zurückgesetzt wurde.
