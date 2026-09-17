@@ -1339,14 +1339,14 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
             <button onClick={()=>setShowDistance(s=>!s)}
               title={showDistance?"Distanz ausblenden":"Distanz anzeigen"}
               style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showDistance?"rgba(245,158,11,0.25)":"rgba(245,158,11,0.1)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,color:"#f59e0b",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-              📏 Distanz
+              📏 km
             </button>
           )}
           {climbSinkPoints && (
             <button onClick={()=>setShowClimbSink(s=>!s)}
               title={showClimbSink?"Steigen/Sinken ausblenden":"Steigen/Sinken anzeigen"}
-              style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showClimbSink?"rgba(34,197,94,0.25)":"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,color:"#4ade80",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
-              ↕ Steigen/Sinken
+              style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showClimbSink?"rgba(34,197,94,0.25)":"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,color:"#4ade80",fontSize:14,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              ↑↓
             </button>
           )}
         </>,
