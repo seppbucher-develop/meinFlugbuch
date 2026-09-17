@@ -216,14 +216,46 @@ function computeClimbSinkStats(track) {
   return { maxClimb, maxClimb20, maxSinkRate };
 }
 
+// Aufsummierte Kursänderung zwischen zwei Trackpunkt-Indizes — Grundlage
+// der Spiralen-/Wingover-Erkennung in computeClimbSinkPoints unten. Analog
+// zu circlingTurnSumDeg weiter unten in dieser Datei (das dort für die
+// Kreisen-Erkennung während der Wiedergabe über ein festes Zeitfenster um
+// einen Punkt läuft), aber hier für einen konkret vorgegebenen Indexbereich
+// [lo,hi] statt für ein zeitbasiertes Fenster um einen Mittelpunkt.
+function turnSumDegBetween(track, lo, hi) {
+  let totalTurn = 0, prevHeading = null;
+  for (let k = lo; k < hi; k++) {
+    // Extrem kurze Schritte (GPS-Jitter im Stand) liefern keine verlässliche
+    // Peilung — überspringen statt Rauschen aufzusummieren.
+    if ((haversineDistKm(track[k], track[k+1]) || 0) < 0.0005) continue;
+    const heading = bearingDeg(track[k], track[k+1]);
+    if (prevHeading != null) {
+      const d = ((heading - prevHeading + 180) % 360 + 360) % 360 - 180;
+      totalTurn += Math.abs(d);
+    }
+    prevHeading = heading;
+  }
+  return totalTurn;
+}
+// Schwelle für die Steigen/Sinken-Marker: eine deutlich schnellere
+// Kursänderung als normales, gemächliches Thermikkreisen (dort typischerweise
+// 360° in 15-25s, also ~15-24°/s) — eine Steilspirale oder ein Wingover
+// dreht/schwingt spürbar schneller. Bewusst NICHT wie isWindowStraight bei
+// Max Speed jede Kursänderung ausschliessen: normales Thermikkreisen IST der
+// Normalfall für echtes Steigen und darf hier nicht mit ausgefiltert werden.
+const MANEUVER_TURN_RATE_DEG_S = 40;
+
 // Wie windowedClimbSinkExtremes oben, aber zusätzlich mit dem Kartenpunkt zum
 // jeweiligen Extremwert — für die Steigen/Sinken-Marker auf der Flugkarte
 // (FlightMap, "Steigen/Sinken"-Button, analog zur Distanz-Linie dort).
 // Punkt = Mitte des gefundenen Zeitfensters, damit der Marker auf der
-// tatsächlichen Steig-/Sinkflanke liegt statt an deren Rand.
+// tatsächlichen Steig-/Sinkflanke liegt statt an deren Rand. Liefert ALLE
+// Fundstellen, an denen der Extremwert (gerundet auf die angezeigte
+// Nachkommastelle) erreicht wird, nicht nur die erste — mehrere Thermiken/
+// Sinkphasen im selben Flug können denselben Spitzenwert erreichen, siehe
+// auch die Cluster-Zusammenfassung in pickExtremePoints unten.
 function computeClimbSinkPoints(track, windowSec) {
-  let best = { rate: -Infinity, idx: -1 };
-  let worst = { rate: Infinity, idx: -1 };
+  const candidates = [];
   let j = 0;
   for (let i=0; i<track.length; i++) {
     const t0 = track[i].timeSec;
@@ -234,15 +266,41 @@ function computeClimbSinkPoints(track, windowSec) {
     const dt = track[j].timeSec - t0;
     if (dt <= 0) continue;
     const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
-    if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue;
+    if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
+    if (turnSumDegBetween(track, i, j) / dt > MANEUVER_TURN_RATE_DEG_S) continue; // Steilspirale/Wingover, ignorieren
     const mid = Math.round((i+j)/2);
-    if (rate > best.rate) best = { rate, idx: mid };
-    if (rate < worst.rate) worst = { rate, idx: mid };
+    candidates.push({ idx: mid, rate, timeSec: track[mid].timeSec });
   }
-  if (best.idx < 0 || worst.idx < 0) return null;
+  if (!candidates.length) return null;
+  const round1 = v => +v.toFixed(1);
+  const maxRateRounded = round1(Math.max(...candidates.map(c=>c.rate)));
+  const minRateRounded = round1(Math.min(...candidates.map(c=>c.rate)));
+  // Alle Fundstellen mit (gerundet) demselben Extremwert sammeln. Direkt
+  // aufeinanderfolgende Fundstellen sind meist dieselbe anhaltende Spitze,
+  // die das gleitende Fenster mehrfach nacheinander trifft (z.B. ein
+  // 10 Sekunden lang konstant starker Bart) — diese werden zu einem
+  // einzigen Marker zusammengefasst (Cluster-Abstand: 20s, deutlich mehr als
+  // ein einzelner Thermikkreis dauert), statt eine Reihe fast
+  // deckungsgleicher Marker nebeneinander zu zeigen. Zeitlich klar getrennte
+  // Fundstellen (z.B. zwei verschiedene Thermiken mit demselben Spitzenwert)
+  // bleiben dagegen eigene Marker.
+  const CLUSTER_GAP_SEC = 20;
+  const pickExtremePoints = (roundedTarget) => {
+    const matches = candidates.filter(c => round1(c.rate) === roundedTarget).sort((a,b)=>a.idx-b.idx);
+    const clusters = [];
+    for (const m of matches) {
+      const last = clusters[clusters.length-1];
+      if (last && (m.timeSec - last[last.length-1].timeSec) <= CLUSTER_GAP_SEC) last.push(m);
+      else clusters.push([m]);
+    }
+    return clusters.map(cluster => {
+      const best = cluster.reduce((a,b) => Math.abs(b.rate-roundedTarget) < Math.abs(a.rate-roundedTarget) ? b : a);
+      return { pt: track[best.idx], rate: +best.rate.toFixed(1) };
+    });
+  };
   return {
-    climb: { pt: track[best.idx], rate: +best.rate.toFixed(1) },
-    sink: { pt: track[worst.idx], rate: +worst.rate.toFixed(1) },
+    climbs: pickExtremePoints(maxRateRounded),
+    sinks: pickExtremePoints(minRateRounded),
   };
 }
 
@@ -1070,8 +1128,15 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       marker.setPopup(new sdk.Popup({ offset: 15 }).setText(`${label}: ${rate>0?"+":""}${rate.toFixed(1)} m/s`));
       markersRefObj.current.push(marker);
     };
-    addPt(climbSinkPoints.climb.pt, "#22c55e", "↑", climbSinkPoints.climb.rate, "Max. Steigen");
-    addPt(climbSinkPoints.sink.pt, "#ef4444", "↓", climbSinkPoints.sink.rate, "Max. Sinken");
+    // Mehrere Fundstellen desselben Extremwerts (siehe computeClimbSinkPoints)
+    // bekommen jeweils einen eigenen Marker, nummeriert falls es mehr als
+    // einen gibt, damit sie als zusammengehörig erkennbar bleiben.
+    const addAll = (points, color, symbol, label) => points.forEach((p, i) => {
+      const text = points.length > 1 ? `${label} (${i+1}/${points.length})` : label;
+      addPt(p.pt, color, symbol, p.rate, text);
+    });
+    addAll(climbSinkPoints.climbs, "#22c55e", "↑", "Max. Steigen");
+    addAll(climbSinkPoints.sinks, "#ef4444", "↓", "Max. Sinken");
   };
 
   // Schaltet die Distanz-Linie um, sobald showDistance sich ändert (Button)
@@ -1284,8 +1349,8 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
         )}
         {showClimbSink && climbSinkPoints && (
           <div style={{position:"absolute",top:8,right:8,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:8,padding:"4px 9px",fontSize:12,fontWeight:700,pointerEvents:"none",display:"flex",flexDirection:"column",gap:2,alignItems:"flex-end"}}>
-            <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climb.rate.toFixed(1)} m/s</span>
-            <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sink.rate.toFixed(1)} m/s</span>
+            <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
+            <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
           </div>
         )}
         {hasMap && !mapTilerKey && (
@@ -1364,8 +1429,8 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           )}
           {showClimbSink && climbSinkPoints && (
             <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",right:54,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,pointerEvents:"none",boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
-              <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climb.rate.toFixed(1)} m/s</span>
-              <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sink.rate.toFixed(1)} m/s</span>
+              <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
+              <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
             </div>
           )}
           {flight?.track?.length > 1 && (
