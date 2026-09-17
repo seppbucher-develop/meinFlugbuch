@@ -36,7 +36,9 @@ zulässt (keine Branch-Protection-Regel, die das verhindert).
 
 ## Deployment-Benachrichtigung
 
-Der Workflow `.github/workflows/deployment-reset-notify.yml` läuft nach
-jedem erfolgreichen Deployment (z.B. GitHub Pages) und erstellt ein Issue,
-falls der neu deployte Commit kein Nachfolger des zuvor deployten Commits
-ist — also der Deploymentzeitpunkt effektiv zurückgesetzt wurde.
+Nach einem Merge auf `master` dauert es ein paar Minuten, bis GitHub Pages
+den neuen Stand tatsächlich deployed hat. Der Workflow
+`.github/workflows/deployment-notify.yml` läuft bei jedem erfolgreichen
+Deployment und erstellt ein dem Repo-Owner zugewiesenes Issue — dadurch löst
+GitHub die übliche Benachrichtigung genau in dem Moment aus, in dem der neue
+Stand live ist.

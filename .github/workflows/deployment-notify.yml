@@ -1,0 +1,38 @@
+name: Benachrichtigung bei fertigem Deployment
+
+# Nach einem Merge auf master dauert es ein paar Minuten, bis GitHub Pages
+# den neuen Stand tatsächlich deployed hat ("Last deployed ... ago" auf der
+# Pages-Einstellungsseite aktualisiert sich erst dann). Dieser Workflow läuft
+# bei jedem erfolgreichen Deployment und erstellt ein Issue, das dem
+# Repo-Owner zugewiesen wird -- dadurch löst GitHub die übliche
+# Benachrichtigung (Web/E-Mail) genau in dem Moment aus, in dem der neue
+# Stand live ist.
+on:
+  deployment_status:
+
+permissions:
+  issues: write
+
+jobs:
+  notify:
+    if: github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Issue erstellen, um GitHub-Benachrichtigung auszulösen
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const env = context.payload.deployment.environment;
+            const sha = context.payload.deployment.sha;
+            const url = context.payload.deployment_status.environment_url || context.payload.deployment.payload?.web_url;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `✅ Deployment fertig (${env})`,
+              assignees: [context.repo.owner],
+              body: [
+                `Das Environment **${env}** wurde soeben erfolgreich mit Commit \`${sha}\` deployed.`,
+                url ? `\nURL: ${url}` : "",
+              ].join("\n"),
+            });
