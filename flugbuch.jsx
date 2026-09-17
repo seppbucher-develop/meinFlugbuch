@@ -172,13 +172,46 @@ const CLIMB_WINDOW_SEC_20 = 20;
 // extremsten Manöver keine höheren Vertikalraten.
 const PLAUSIBLE_MAX_VARIO_MS = 25;
 
+// Aufsummierte Kursänderung zwischen zwei Trackpunkt-Indizes — Grundlage der
+// Spiralen-/Wingover-Erkennung in windowedClimbSinkExtremes und
+// computeClimbSinkPoints unten. Analog zu circlingTurnSumDeg weiter unten in
+// dieser Datei (das dort für die Kreisen-Erkennung während der Wiedergabe
+// über ein festes Zeitfenster um einen Punkt läuft), aber hier für einen
+// konkret vorgegebenen Indexbereich [lo,hi] statt für ein zeitbasiertes
+// Fenster um einen Mittelpunkt.
+function turnSumDegBetween(track, lo, hi) {
+  let totalTurn = 0, prevHeading = null;
+  for (let k = lo; k < hi; k++) {
+    // Extrem kurze Schritte (GPS-Jitter im Stand) liefern keine verlässliche
+    // Peilung — überspringen statt Rauschen aufzusummieren.
+    if ((haversineDistKm(track[k], track[k+1]) || 0) < 0.0005) continue;
+    const heading = bearingDeg(track[k], track[k+1]);
+    if (prevHeading != null) {
+      const d = ((heading - prevHeading + 180) % 360 + 360) % 360 - 180;
+      totalTurn += Math.abs(d);
+    }
+    prevHeading = heading;
+  }
+  return totalTurn;
+}
+// Schwelle für Max.Steigen/Max.Sinken (windowedClimbSinkExtremes) und die
+// Steigen/Sinken-Marker (computeClimbSinkPoints): eine deutlich schnellere
+// Kursänderung als normales, gemächliches Thermikkreisen (dort typischerweise
+// 360° in 15-25s, also ~15-24°/s) — eine Steilspirale oder ein Wingover
+// dreht/schwingt spürbar schneller. Bewusst NICHT wie isWindowStraight bei
+// Max Speed jede Kursänderung ausschliessen: normales Thermikkreisen IST der
+// Normalfall für echtes Steigen und darf hier nicht mit ausgefiltert werden.
+const MANEUVER_TURN_RATE_DEG_S = 40;
+
 // Höchste/tiefste Steig-/Sinkrate über ein gleitendes Zeitfenster von
 // mindestens windowSec Sekunden (Zwei-Zeiger-Technik: j läuft nur vorwärts,
 // daher ein einziger Durchlauf über den Track). Kandidaten jenseits von
 // ±PLAUSIBLE_MAX_VARIO_MS werden komplett verworfen statt auf die Grenze
 // gekappt, damit der gemeldete Wert immer ein tatsächlich im Fenster
 // gemessener, plausibler Wert bleibt (und nicht künstlich exakt bei 25.0
-// landet).
+// landet). Steilspiralen/Wingover (siehe MANEUVER_TURN_RATE_DEG_S oben)
+// werden ebenfalls verworfen, da ihre Vertikalrate eine Manöver- statt eine
+// Thermik-/Sinkflug-Rate ist — normales Thermikkreisen bleibt bewusst drin.
 function windowedClimbSinkExtremes(track, windowSec) {
   let maxRate = -Infinity, minRate = Infinity;
   let j = 0;
@@ -192,6 +225,7 @@ function windowedClimbSinkExtremes(track, windowSec) {
     if (dt <= 0) continue;
     const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
+    if (turnSumDegBetween(track, i, j) / dt > MANEUVER_TURN_RATE_DEG_S) continue; // Steilspirale/Wingover, ignorieren
     if (rate > maxRate) maxRate = rate;
     if (rate < minRate) minRate = rate;
   }
@@ -215,35 +249,6 @@ function computeClimbSinkStats(track) {
   const maxClimb20 = isFinite(maxClimb20Raw) ? +maxClimb20Raw.toFixed(1) : 0;
   return { maxClimb, maxClimb20, maxSinkRate };
 }
-
-// Aufsummierte Kursänderung zwischen zwei Trackpunkt-Indizes — Grundlage
-// der Spiralen-/Wingover-Erkennung in computeClimbSinkPoints unten. Analog
-// zu circlingTurnSumDeg weiter unten in dieser Datei (das dort für die
-// Kreisen-Erkennung während der Wiedergabe über ein festes Zeitfenster um
-// einen Punkt läuft), aber hier für einen konkret vorgegebenen Indexbereich
-// [lo,hi] statt für ein zeitbasiertes Fenster um einen Mittelpunkt.
-function turnSumDegBetween(track, lo, hi) {
-  let totalTurn = 0, prevHeading = null;
-  for (let k = lo; k < hi; k++) {
-    // Extrem kurze Schritte (GPS-Jitter im Stand) liefern keine verlässliche
-    // Peilung — überspringen statt Rauschen aufzusummieren.
-    if ((haversineDistKm(track[k], track[k+1]) || 0) < 0.0005) continue;
-    const heading = bearingDeg(track[k], track[k+1]);
-    if (prevHeading != null) {
-      const d = ((heading - prevHeading + 180) % 360 + 360) % 360 - 180;
-      totalTurn += Math.abs(d);
-    }
-    prevHeading = heading;
-  }
-  return totalTurn;
-}
-// Schwelle für die Steigen/Sinken-Marker: eine deutlich schnellere
-// Kursänderung als normales, gemächliches Thermikkreisen (dort typischerweise
-// 360° in 15-25s, also ~15-24°/s) — eine Steilspirale oder ein Wingover
-// dreht/schwingt spürbar schneller. Bewusst NICHT wie isWindowStraight bei
-// Max Speed jede Kursänderung ausschliessen: normales Thermikkreisen IST der
-// Normalfall für echtes Steigen und darf hier nicht mit ausgefiltert werden.
-const MANEUVER_TURN_RATE_DEG_S = 40;
 
 // Wie windowedClimbSinkExtremes oben, aber zusätzlich mit dem Kartenpunkt zum
 // jeweiligen Extremwert — für die Steigen/Sinken-Marker auf der Flugkarte
