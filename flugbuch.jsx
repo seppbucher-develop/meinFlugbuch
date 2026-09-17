@@ -4997,6 +4997,39 @@ function FlugbuchApp() {
     }
   }, []);
 
+  // ── TEMPORÄR ─────────────────────────────────────────────────────────
+  // Einmalige Neuberechnung von Max.Steigen/Max.Steigen 20s/Max.Sinken für
+  // alle bestehenden Flüge mit Track: die neue Steilspiralen-/Wingover-
+  // Ausklammerung in windowedClimbSinkExtremes greift sonst nur bei einem
+  // künftigen (Re-)Import, siehe deren Kommentar oben in dieser Datei.
+  // Button dazu im Import-Menü unten. Nach einmaligem Ausführen (durch den
+  // Nutzer) diesen Block plus den Button und recalcResult-State wieder
+  // entfernen — analog zur früheren einmaligen IGC-Nachsicherungsfunktion,
+  // siehe deren Erwähnung im loadRawIgcFile-Kommentar in service.jsx.
+  const [recalcResult, setRecalcResult] = useState(null);
+  const recalcClimbSinkStats = useCallback(async () => {
+    if (!window.confirm(`Max.Steigen/Max.Sinken für alle ${flights.length} Flüge mit Track neu berechnen (Steilspiralen/Wingover werden jetzt ausgeklammert)?`)) return;
+    let changed = 0, checked = 0;
+    const updated = [];
+    for (const f of flights) {
+      if (!f.track || f.track.length < 2) continue;
+      checked++;
+      const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
+      const cf = f.customFields || {};
+      const same = cf.maxSteigen === String(maxClimb) && cf.maxSteigen20 === String(maxClimb20) && cf.maxSinken === String(maxSinkRate);
+      if (same) continue;
+      const nf = { ...f, customFields: { ...cf, maxSteigen: String(maxClimb), maxSteigen20: String(maxClimb20), maxSinken: String(maxSinkRate) } };
+      await saveFlight(nf);
+      updated.push(nf);
+      changed++;
+    }
+    if (updated.length) {
+      const byId = new Map(updated.map(f => [f.id, f]));
+      setFlights(prev => prev.map(f => byId.get(f.id) || f));
+    }
+    setRecalcResult(`${changed} von ${checked} Flügen mit Track aktualisiert.`);
+  }, [flights, saveFlight]);
+
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
     const maxNr = flights.reduce((m,f)=>{
@@ -5725,6 +5758,25 @@ function FlugbuchApp() {
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing ? "⏳ Importiere…" : igcDirScanning ? "⏳ Suche…" : "IGC"}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* TEMPORÄR: siehe recalcClimbSinkStats oben — nach einmaliger
+          Ausführung diesen Button plus die Ergebnis-Anzeige unten wieder
+          entfernen. */}
+      {showImportMenu && (
+        <div style={{margin:"6px 16px 0"}}>
+          <button onClick={recalcClimbSinkStats}
+            title="TEMPORÄR: Max.Steigen/Max.Steigen 20s/Max.Sinken für alle Flüge mit Track neu berechnen (Steilspiralen/Wingover werden jetzt ausgeklammert)"
+            style={{width:"100%",padding:"7px 0",borderRadius:8,fontSize:11,fontWeight:700,cursor:"pointer",background:"rgba(167,139,250,0.12)",border:"1px solid rgba(167,139,250,0.35)",color:"#a78bfa"}}>
+            🔁 Max.Steigen/Sinken neu berechnen (temporär)
+          </button>
+        </div>
+      )}
+      {recalcResult && (
+        <div style={{margin:"8px 16px 0",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.3)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:12,color:"#a78bfa"}}>✅ {recalcResult}</span>
+          <button onClick={()=>setRecalcResult(null)} style={{background:"none",border:"none",color:"rgba(167,139,250,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
 
