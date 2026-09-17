@@ -41,4 +41,5 @@ den neuen Stand tatsächlich deployed hat. Der Workflow
 `.github/workflows/deployment-notify.yml` läuft bei jedem erfolgreichen
 Deployment und erstellt ein dem Repo-Owner zugewiesenes Issue — dadurch löst
 GitHub die übliche Benachrichtigung genau in dem Moment aus, in dem der neue
-Stand live ist.
+Stand live ist (z.B. eine Zuweisungs-E-Mail, falls in den GitHub-Notification-
+Einstellungen aktiviert).
