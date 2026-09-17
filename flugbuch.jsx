@@ -1347,15 +1347,23 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     <>
       <div style={{position:"relative"}} onClick={()=>{ if (hasMap) setIsFullscreen(true); }}>
         <div ref={previewDivRef} style={{width:"100%",aspectRatio:"3/2",background:"#040e20",borderRadius:10,overflow:"hidden",cursor:hasMap?"pointer":"default"}} />
-        {showDistance && distanceRoute && (
-          <div style={{position:"absolute",top:8,left:8,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:8,padding:"4px 9px",color:"#f59e0b",fontSize:12,fontWeight:700,pointerEvents:"none"}}>
-            📏 {distanceRoute.km} km
-          </div>
-        )}
-        {showClimbSink && climbSinkPoints && (
-          <div style={{position:"absolute",top:8,right:8,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:8,padding:"4px 9px",fontSize:12,fontWeight:700,pointerEvents:"none",display:"flex",flexDirection:"column",gap:2,alignItems:"flex-end"}}>
-            <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
-            <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
+        {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints)) && (
+          // Beide Badges links oben statt eines davon rechts oben: die
+          // eingebauten Zoom-+/--Buttons der Karte sitzen rechts oben und
+          // überlagerten dort das Steigen/Sinken-Badge. Sind beide Badges
+          // aktiv, steht Steigen/Sinken als zweite Zeile unter der Distanz.
+          <div style={{position:"absolute",top:8,left:8,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:6,pointerEvents:"none"}}>
+            {showDistance && distanceRoute && (
+              <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:8,padding:"4px 9px",color:"#f59e0b",fontSize:12,fontWeight:700}}>
+                📏 {distanceRoute.km} km
+              </div>
+            )}
+            {showClimbSink && climbSinkPoints && (
+              <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:8,padding:"4px 9px",fontSize:12,fontWeight:700,display:"flex",flexDirection:"column",gap:2}}>
+                <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
+                <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
+              </div>
+            )}
           </div>
         )}
         {hasMap && !mapTilerKey && (
@@ -1427,15 +1435,23 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           style={{position:"fixed",inset:0,background:"#000",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",overflow:"hidden"}}
         >
           <div ref={fullDivRef} style={{width:"100%",height:"70vh"}} />
-          {showDistance && distanceRoute && (
-            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,pointerEvents:"none",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
-              📏 {distanceRoute.km} km
-            </div>
-          )}
-          {showClimbSink && climbSinkPoints && (
-            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",right:54,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,pointerEvents:"none",boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
-              <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
-              <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
+          {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints)) && (
+            // Beide Badges links statt eines davon rechts: die eingebauten
+            // Zoom-+/--Buttons der Karte sitzen rechts oben und überlagerten
+            // dort das Steigen/Sinken-Badge. Sind beide Badges aktiv, steht
+            // Steigen/Sinken als zweite Zeile unter der Distanz.
+            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:8,pointerEvents:"none"}}>
+              {showDistance && distanceRoute && (
+                <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+                  📏 {distanceRoute.km} km
+                </div>
+              )}
+              {showClimbSink && climbSinkPoints && (
+                <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
+                  <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
+                  <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
+                </div>
+              )}
             </div>
           )}
           {flight?.track?.length > 1 && (
