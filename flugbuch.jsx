@@ -216,6 +216,36 @@ function computeClimbSinkStats(track) {
   return { maxClimb, maxClimb20, maxSinkRate };
 }
 
+// Wie windowedClimbSinkExtremes oben, aber zusätzlich mit dem Kartenpunkt zum
+// jeweiligen Extremwert — für die Steigen/Sinken-Marker auf der Flugkarte
+// (FlightMap, "Steigen/Sinken"-Button, analog zur Distanz-Linie dort).
+// Punkt = Mitte des gefundenen Zeitfensters, damit der Marker auf der
+// tatsächlichen Steig-/Sinkflanke liegt statt an deren Rand.
+function computeClimbSinkPoints(track, windowSec) {
+  let best = { rate: -Infinity, idx: -1 };
+  let worst = { rate: Infinity, idx: -1 };
+  let j = 0;
+  for (let i=0; i<track.length; i++) {
+    const t0 = track[i].timeSec;
+    const target = t0 + windowSec;
+    while (j < track.length && track[j].timeSec < target) j++;
+    if (j >= track.length) break;
+    if (j === i) continue;
+    const dt = track[j].timeSec - t0;
+    if (dt <= 0) continue;
+    const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
+    if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue;
+    const mid = Math.round((i+j)/2);
+    if (rate > best.rate) best = { rate, idx: mid };
+    if (rate < worst.rate) worst = { rate, idx: mid };
+  }
+  if (best.idx < 0 || worst.idx < 0) return null;
+  return {
+    climb: { pt: track[best.idx], rate: +best.rate.toFixed(1) },
+    sink: { pt: track[worst.idx], rate: +worst.rate.toFixed(1) },
+  };
+}
+
 // Steig-/Sinkwerte immer mit genau einer Nachkommastelle anzeigen (z.B.
 // "3.0" statt "3"). Die berechneten Rohwerte sind zwar schon auf eine
 // Nachkommastelle gerundet (toFixed(1) in computeClimbSinkStats), aber
@@ -647,6 +677,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // gleichzeitig geben kann.
   const previewDistanceMarkersRef = useRef([]);
   const fullDistanceMarkersRef = useRef([]);
+  // Marker der Steigen/Sinken-Punkte (siehe computeClimbSinkPoints) — analog
+  // zu den Distanz-Wendepunkt-Markern oben, aber nur je ein Marker für den
+  // stärksten Steig- und den stärksten Sinkpunkt im Track.
+  const previewClimbSinkMarkersRef = useRef([]);
+  const fullClimbSinkMarkersRef = useRef([]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   // Which glider marker to use — chosen in Settings > Schirme, shared
   // across the whole app via storage. Re-read on focus so a change made in
@@ -701,6 +736,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // weiter unten in dieser Datei) über der Karte ein, plus ein Badge mit der
   // resultierenden Gesamtstrecke.
   const [showDistance, setShowDistance] = useState(false);
+  // "Steigen/Sinken"-Button: markiert die Punkte im Track mit dem stärksten
+  // gemessenen Steigen bzw. Sinken (3s-Fenster, siehe computeClimbSinkPoints
+  // weiter oben in dieser Datei) — EIN Button schaltet beide Marker
+  // zusammen sichtbar/unsichtbar, analog zum "Distanz"-Button oben.
+  const [showClimbSink, setShowClimbSink] = useState(false);
 
   const togglePlay = () => setIsPlaying(p => !p);
 
@@ -731,6 +771,17 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (sP && eP) return { points: [sP, eP], km: +((haversineDistKm(sP, eP) || 0).toFixed(1)) };
     return null;
   }, [cleanTrack, track, sP, eP]);
+
+  // Für den "Steigen/Sinken"-Button: die Punkte mit dem stärksten Steigen
+  // bzw. Sinken im Track (siehe computeClimbSinkPoints) — braucht anders als
+  // die Distanz-Linie einen vollen IGC-Track (kein Fallback auf reine
+  // Start-/Landepunkte, da sich Steig-/Sinkraten ohne Zwischenpunkte nicht
+  // sinnvoll bestimmen lassen).
+  const climbSinkPoints = useMemo(() => {
+    const trace = cleanTrack.length ? cleanTrack : track;
+    if (trace.length < 2) return null;
+    return computeClimbSinkPoints(trace, CLIMB_WINDOW_SEC);
+  }, [cleanTrack, track]);
 
   // Cumulative flown distance up to each track point (same basis
   // FlightProfile's own "distances" array uses) — lets playback report its
@@ -901,6 +952,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       readyRef.current = true;
       applyHighlight(map, mapRefObj===previewMapRef ? previewRefMarkerRef : fullRefMarkerRef);
       applyDistanceRoute(map, mapRefObj===previewMapRef ? previewDistanceMarkersRef : fullDistanceMarkersRef);
+      applyClimbSinkMarkers(map, mapRefObj===previewMapRef ? previewClimbSinkMarkersRef : fullClimbSinkMarkersRef);
       removeStrayMapTilerWarnings();
     });
   };
@@ -1000,6 +1052,28 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     });
   };
 
+  // Baut/entfernt die beiden Steigen/Sinken-Marker — reiner Marker-Auf-/
+  // Abbau ohne eigene Source/Layer (nur zwei Einzelpunkte, anders als die
+  // Distanz-Linie oben), daher analog zu applyDistanceRoute aber ohne
+  // setLayoutProperty-Umweg.
+  const applyClimbSinkMarkers = (map, markersRefObj) => {
+    if (!map) return;
+    markersRefObj.current.forEach(m => m.remove());
+    markersRefObj.current = [];
+    if (!showClimbSink || !climbSinkPoints) return;
+    const sdk = window.maptilersdk;
+    const addPt = (pt, color, symbol, rate, label) => {
+      const el = document.createElement("div");
+      el.style.cssText = `width:26px;height:26px;border-radius:50%;background:${color};border:2px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;color:#fff;font:800 13px system-ui;`;
+      el.textContent = symbol;
+      const marker = new sdk.Marker({ element: el }).setLngLat([pt.lon, pt.lat]).addTo(map);
+      marker.setPopup(new sdk.Popup({ offset: 15 }).setText(`${label}: ${rate>0?"+":""}${rate.toFixed(1)} m/s`));
+      markersRefObj.current.push(marker);
+    };
+    addPt(climbSinkPoints.climb.pt, "#22c55e", "↑", climbSinkPoints.climb.rate, "Max. Steigen");
+    addPt(climbSinkPoints.sink.pt, "#ef4444", "↓", climbSinkPoints.sink.rate, "Max. Sinken");
+  };
+
   // Schaltet die Distanz-Linie um, sobald showDistance sich ändert (Button)
   // oder die Route selbst neu berechnet wurde — unabhängig vom Kartenaufbau
   // oben, analog zu applyHighlight bei Profil-Pan/Zoom.
@@ -1007,6 +1081,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (previewReadyRef.current) applyDistanceRoute(previewMapRef.current, previewDistanceMarkersRef);
     if (isFullscreen && fullReadyRef.current) applyDistanceRoute(fullMapRef.current, fullDistanceMarkersRef);
   }, [showDistance, distanceRoute, isFullscreen]);
+
+  // Schaltet die Steigen/Sinken-Marker um, sobald showClimbSink sich ändert
+  // (Button) oder die Punkte selbst neu berechnet wurden.
+  useEffect(() => {
+    if (previewReadyRef.current) applyClimbSinkMarkers(previewMapRef.current, previewClimbSinkMarkersRef);
+    if (isFullscreen && fullReadyRef.current) applyClimbSinkMarkers(fullMapRef.current, fullClimbSinkMarkersRef);
+  }, [showClimbSink, climbSinkPoints, isFullscreen]);
 
   useEffect(() => {
     if (isFullscreen) {
@@ -1201,6 +1282,12 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
             📏 {distanceRoute.km} km
           </div>
         )}
+        {showClimbSink && climbSinkPoints && (
+          <div style={{position:"absolute",top:8,right:8,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:8,padding:"4px 9px",fontSize:12,fontWeight:700,pointerEvents:"none",display:"flex",flexDirection:"column",gap:2,alignItems:"flex-end"}}>
+            <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climb.rate.toFixed(1)} m/s</span>
+            <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sink.rate.toFixed(1)} m/s</span>
+          </div>
+        )}
         {hasMap && !mapTilerKey && (
           <div style={{position:"absolute",inset:0,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:6,background:"rgba(4,14,32,0.92)",color:"rgba(232,244,253,0.6)",fontSize:12,textAlign:"center",padding:16}}>
             <div style={{fontSize:22}}>🗺️</div>
@@ -1255,6 +1342,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
               📏 Distanz
             </button>
           )}
+          {climbSinkPoints && (
+            <button onClick={()=>setShowClimbSink(s=>!s)}
+              title={showClimbSink?"Steigen/Sinken ausblenden":"Steigen/Sinken anzeigen"}
+              style={{flex:"1 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showClimbSink?"rgba(34,197,94,0.25)":"rgba(34,197,94,0.1)",border:"1px solid rgba(34,197,94,0.4)",borderRadius:8,color:"#4ade80",fontSize:12,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+              ↕ Steigen/Sinken
+            </button>
+          )}
         </>,
         controlsSlot
       )}
@@ -1266,6 +1360,12 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           {showDistance && distanceRoute && (
             <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,pointerEvents:"none",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
               📏 {distanceRoute.km} km
+            </div>
+          )}
+          {showClimbSink && climbSinkPoints && (
+            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",right:54,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,pointerEvents:"none",boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
+              <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climb.rate.toFixed(1)} m/s</span>
+              <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sink.rate.toFixed(1)} m/s</span>
             </div>
           )}
           {flight?.track?.length > 1 && (
