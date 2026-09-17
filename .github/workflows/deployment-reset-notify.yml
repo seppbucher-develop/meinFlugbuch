@@ -1,0 +1,93 @@
+name: Benachrichtigung bei zurückgesetztem Deployment
+
+# Läuft nach jedem erfolgreichen Deployment (z.B. GitHub Pages) und prüft, ob
+# der neu deployte Commit ein Nachfolger des zuvor deployten Commits ist.
+# Ist das nicht der Fall (z.B. weil ein älterer Commit erneut deployed wurde
+# oder ein Rollback stattfand), wurde der Deploymentzeitpunkt effektiv
+# zurückgesetzt -- in diesem Fall wird ein Issue erstellt und dem Repo-Owner
+# zugewiesen, wodurch GitHub die übliche Benachrichtigung auslöst.
+on:
+  deployment_status:
+
+permissions:
+  contents: read
+  deployments: read
+  issues: write
+
+jobs:
+  check-rollback:
+    if: github.event.deployment_status.state == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code auschecken
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Vorheriges Deployment im selben Environment ermitteln
+        id: check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const env = context.payload.deployment.environment;
+            const currentId = context.payload.deployment.id;
+            const currentSha = context.payload.deployment.sha;
+
+            const deployments = await github.paginate(github.rest.repos.listDeployments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              environment: env,
+              per_page: 100,
+            });
+
+            // Neuestes zuerst
+            deployments.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+            const previous = deployments.find((d) => d.id !== currentId);
+            if (!previous) {
+              core.info("Kein vorheriges Deployment gefunden -- nichts zu vergleichen.");
+              return;
+            }
+
+            core.setOutput("previous_sha", previous.sha);
+            core.setOutput("current_sha", currentSha);
+            core.setOutput("environment", env);
+
+      - name: Prüfen, ob der aktuelle Commit ein Nachfolger des vorherigen ist
+        id: ancestry
+        if: steps.check.outputs.previous_sha
+        run: |
+          set -euo pipefail
+          PREV="${{ steps.check.outputs.previous_sha }}"
+          CUR="${{ steps.check.outputs.current_sha }}"
+          if git merge-base --is-ancestor "$PREV" "$CUR" 2>/dev/null; then
+            echo "rollback=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rollback=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Issue erstellen, um GitHub-Benachrichtigung auszulösen
+        if: steps.ancestry.outputs.rollback == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const previous = "${{ steps.check.outputs.previous_sha }}";
+            const current = "${{ steps.check.outputs.current_sha }}";
+            const env = "${{ steps.check.outputs.environment }}";
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `⚠️ Deploymentzeitpunkt zurückgesetzt (${env})`,
+              assignees: [context.repo.owner],
+              body: [
+                `Das Environment **${env}** wurde soeben mit Commit \`${current}\` deployed,`,
+                `dieser Commit ist jedoch **kein** Nachfolger des zuvor deployten Commits \`${previous}\`.`,
+                "",
+                "Das deutet darauf hin, dass der Deploymentzeitpunkt zurückgesetzt wurde",
+                "(z.B. durch das erneute Deployen eines älteren Commits oder einen Rollback).",
+                "",
+                `Vorheriger Commit: ${previous}`,
+                `Aktueller Commit: ${current}`,
+              ].join("\n"),
+            });
