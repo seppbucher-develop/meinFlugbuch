@@ -5096,11 +5096,6 @@ function FlugbuchApp() {
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
   const [igcResult, setIgcResult] = useState(null);
-  // TEMPORÄR: siehe runSpiralWingoverBackfill weiter unten — Zustand für
-  // den einmaligen Nachtrag-Button, kann zusammen mit diesem entfernt
-  // werden, sobald alle bestehenden Flüge einmal durchgelaufen sind.
-  const [spiralBackfillRunning, setSpiralBackfillRunning] = useState(false);
-  const [spiralBackfillResult, setSpiralBackfillResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   // Cache der Schirme-Liste (schirme:list) für die Dauer eines IGC-Imports
   // — vermeidet, bei jeder einzelnen Datei erneut zu laden/zu speichern,
@@ -5708,56 +5703,6 @@ function FlugbuchApp() {
     setImporting(false); setImportProgress(null);
   }, [flights, saveFlight, attachIgcToFlight, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
 
-  // ── TEMPORÄR: Einmaliger Nachtrag Spirale/Wingover + Max.Steigen/-20s/
-  // Max.Sinken für bereits importierte Flüge ──────────────────────────────
-  // Ab jetzt liefert jeder frische IGC-Import diese Felder automatisch mit
-  // (siehe attachIgcToFlight oben und die Neuanlage-Zweige in
-  // runImportLoop/DateAmbiguousResolver). Für Flüge, die VOR dieser
-  // Änderung bzw. vor den beiden nachträglichen Abgrenzungs-Fixes
-  // (Manöver-Rand und einzelner GPS-Höhenausreisser wurden bis dahin noch
-  // als "normales Sinken" mitgezählt) importiert wurden, stehen aber noch
-  // die alten, zu hohen Werte in den gespeicherten Feldern — ein erneuter
-  // Import wird ja nur bei einer neuen/geänderten IGC-Datei ausgelöst,
-  // nicht von selbst. Dieser Button rechnet deshalb sowohl die acht
-  // Spirale-/Wingover-Felder als auch Max.Steigen/Max.Steigen 20s/
-  // Max.Sinken einmalig aus dem bereits gespeicherten Track jedes Flugs
-  // neu (exakt dieselbe Regel wie bei einem echten Reimport: diese Felder
-  // werden immer überschrieben, nicht nur wenn sie noch leer sind), ohne
-  // sonst etwas am Flug zu verändern — Button und Funktion können wieder
-  // entfernt werden, sobald alle bestehenden Flüge einmal durchgelaufen
-  // sind.
-  const runSpiralWingoverBackfill = useCallback(async () => {
-    const candidates = flights.filter(f => f.track && f.track.length > 1);
-    setSpiralBackfillRunning(true);
-    setSpiralBackfillResult(null);
-    const updates = new Map();
-    for (const f of candidates) {
-      const { spirale, wingover } = analyzeSpiralWingover(f.track);
-      const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(f.track);
-      const cf = { ...(f.customFields||{}) };
-      cf.spiraleMaxSinken = spirale ? String(spirale.maxSink) : "";
-      cf.spiraleSinkenSchnitt = spirale ? String(spirale.avgSink) : "";
-      cf.spiraleAnzahlKreise = spirale ? String(spirale.count) : "";
-      cf.spiraleHoehenabbau = spirale ? String(spirale.hoehenabbau) : "";
-      cf.wingoverMaxSinken = wingover ? String(wingover.maxSink) : "";
-      cf.wingoverSinkenSchnitt = wingover ? String(wingover.avgSink) : "";
-      cf.wingoverAnzahl = wingover ? String(wingover.count) : "";
-      cf.wingoverHoehenabbau = wingover ? String(wingover.hoehenabbau) : "";
-      cf.maxSteigen = String(maxClimb);
-      cf.maxSteigen20 = String(maxClimb20);
-      cf.maxSinken = String(maxSinkRate);
-      const updated = { ...f, customFields: cf };
-      updates.set(f.id, updated);
-      await saveFlight(updated);
-    }
-    if (updates.size) {
-      setFlights(prev => prev.map(f => updates.get(f.id) || f));
-      if (selected && updates.has(selected.id)) setSelected(updates.get(selected.id));
-    }
-    setSpiralBackfillRunning(false);
-    setSpiralBackfillResult({ total: candidates.length });
-  }, [flights, saveFlight, selected]);
-
   // Dritter (letzter) Erkennungsschritt vor dem eigentlichen Anlegen von
   // Flügen/Schirmen — separat, damit er sowohl direkt nach dem Parsen als
   // auch nach einer Datums-Dubletten-Entscheidung (überspringen/trotzdem
@@ -6155,25 +6100,6 @@ function FlugbuchApp() {
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing ? "⏳ Importiere…" : igcDirScanning ? "⏳ Suche…" : "IGC"}
             </div>
           </div>
-        </div>
-      )}
-
-      {/* TEMPORÄR: siehe runSpiralWingoverBackfill oben — Button + Ergebnis-
-          Anzeige können zusammen mit der Funktion wieder entfernt werden,
-          sobald alle bestehenden Flüge einmal durchgelaufen sind. */}
-      {showImportMenu && (
-        <div style={{margin:"6px 16px 0"}}>
-          <button onClick={runSpiralWingoverBackfill} disabled={spiralBackfillRunning}
-            title="Einmalig: Spirale/Wingover sowie Max.Steigen/Max.Steigen 20s/Max.Sinken für alle bereits importierten Flüge mit vorhandenem Track aus den gespeicherten Trackdaten neu berechnen (temporäre Funktion)."
-            style={{width:"100%",background:"rgba(167,139,250,0.1)",color:"#c4b5fd",border:"1px solid rgba(167,139,250,0.25)",borderRadius:8,padding:"7px 10px",fontSize:11,fontWeight:600,cursor:spiralBackfillRunning?"default":"pointer",opacity:spiralBackfillRunning?0.6:1}}>
-            {spiralBackfillRunning ? "⏳ Berechne Spirale/Wingover/Steigen/Sinken…" : "🌀 Spirale/Wingover/Steigen/Sinken einmalig nachrechnen"}
-          </button>
-        </div>
-      )}
-      {spiralBackfillResult && (
-        <div style={{margin:"8px 16px 0",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.3)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:12,color:"#a78bfa"}}>✅ {spiralBackfillResult.total} Flüge mit Track aktualisiert</span>
-          <button onClick={()=>setSpiralBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(167,139,250,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
 
