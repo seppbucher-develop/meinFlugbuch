@@ -212,7 +212,18 @@ const MANEUVER_TURN_RATE_DEG_S = 40;
 // landet). Steilspiralen/Wingover (siehe MANEUVER_TURN_RATE_DEG_S oben)
 // werden ebenfalls verworfen, da ihre Vertikalrate eine Manöver- statt eine
 // Thermik-/Sinkflug-Rate ist — normales Thermikkreisen bleibt bewusst drin.
-function windowedClimbSinkExtremes(track, windowSec) {
+// maneuverPrefix (siehe buildManeuverPrefix weiter unten in dieser Datei —
+// Funktionsdeklarationen werden gehoisted, daher hier bereits aufrufbar):
+// markiert die ganzen, bereits über Lückentoleranz zusammengefassten
+// Manöver-Abschnitte, statt hier erneut nur die Kursänderung DIESES einen
+// Fensters isoliert zu prüfen. Nur so bleiben auch die Ränder einer
+// Spirale/eines Wingovers zuverlässig ausgeschlossen: mitten in einer
+// Spirale kann ein einzelnes 3-Sekunden-Fenster durchaus knapp unter
+// MANEUVER_TURN_RATE_DEG_S liegen (z.B. durch GPS-Rauschen), gehört aber
+// klar noch zum Manöver — eine rein fensterlokale Prüfung liess solche
+// Ränder früher als "normales Sinken" durchrutschen und meldete dort
+// fälschlich zweistellige Sinkraten als Max.Sinken des ganzen Flugs.
+function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix) {
   let maxRate = -Infinity, minRate = Infinity;
   let j = 0;
   for (let i=0; i<track.length; i++) {
@@ -225,7 +236,7 @@ function windowedClimbSinkExtremes(track, windowSec) {
     if (dt <= 0) continue;
     const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
-    if (turnSumDegBetween(track, i, j) / dt > MANEUVER_TURN_RATE_DEG_S) continue; // Steilspirale/Wingover, ignorieren
+    if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover, ignorieren
     if (rate > maxRate) maxRate = rate;
     if (rate < minRate) minRate = rate;
   }
@@ -233,11 +244,15 @@ function windowedClimbSinkExtremes(track, windowSec) {
 }
 
 function computeClimbSinkStats(track) {
+  // Manöver-Abschnitte einmal für den ganzen Track ermitteln (siehe
+  // buildManeuverPrefix weiter unten) und für beide Fenstergrössen
+  // wiederverwenden, statt sie separat je Fenster neu zu berechnen.
+  const maneuverPrefix = buildManeuverPrefix(track);
   // Max.Steigen / Max.Sinken: nicht mehr der rohe Punkt-zu-Punkt-Sprung
   // (der war schutzlos einem einzelnen GPS-Höhenausreisser ausgesetzt),
   // sondern wie bei Max Speed über ein kurzes gleitendes 3-Sekunden-Fenster
   // plus Plausibilitätsgrenze.
-  const { maxRate: maxClimbRaw, minRate: maxSinkRaw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC);
+  const { maxRate: maxClimbRaw, minRate: maxSinkRaw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC, maneuverPrefix);
   const maxClimb = isFinite(maxClimbRaw) ? +maxClimbRaw.toFixed(1) : 0;
   const maxSinkRate = isFinite(maxSinkRaw) ? +maxSinkRaw.toFixed(1) : 0;
   // "Max.Steigen 20s": gleiches Fensterprinzip, aber mit dem in Wettbewerbs-/
@@ -245,7 +260,7 @@ function computeClimbSinkStats(track) {
   // eigener, separater Wert geführt, da die beiden Fenster unterschiedliche
   // Vergleiche bedienen sollen (Max.Steigen dieser App vs. extern berichtete
   // 20s-Steigwerte).
-  const { maxRate: maxClimb20Raw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC_20);
+  const { maxRate: maxClimb20Raw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC_20, maneuverPrefix);
   const maxClimb20 = isFinite(maxClimb20Raw) ? +maxClimb20Raw.toFixed(1) : 0;
   return { maxClimb, maxClimb20, maxSinkRate };
 }
@@ -261,6 +276,10 @@ function computeClimbSinkStats(track) {
 // auch die Cluster-Zusammenfassung in pickExtremePoints unten.
 function computeClimbSinkPoints(track, windowSec) {
   const candidates = [];
+  // Siehe windowedClimbSinkExtremes oben: Manöver-Ausschluss anhand der
+  // ganzen, lückentoleranten Manöver-Abschnitte statt einer rein
+  // fensterlokalen Kursänderungs-Prüfung.
+  const maneuverPrefix = buildManeuverPrefix(track);
   let j = 0;
   for (let i=0; i<track.length; i++) {
     const t0 = track[i].timeSec;
@@ -272,7 +291,7 @@ function computeClimbSinkPoints(track, windowSec) {
     if (dt <= 0) continue;
     const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
-    if (turnSumDegBetween(track, i, j) / dt > MANEUVER_TURN_RATE_DEG_S) continue; // Steilspirale/Wingover, ignorieren
+    if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover, ignorieren
     const mid = Math.round((i+j)/2);
     candidates.push({ idx: mid, rate, timeSec: track[mid].timeSec });
   }
@@ -426,6 +445,48 @@ function findRawManeuverRuns(track) {
     }
   }
   return runs;
+}
+
+// Direkt an eine schnelle Dreh-Phase (Spirale/Wingover) grenzt praktisch
+// immer noch eine kurze "Nachlauf"-Phase, in der der Schirm die beim
+// Manöver aufgebaute Fahrt/den steilen Sinkflug erst abbaut, OHNE dabei
+// noch schnell zu drehen (Ein-/Ausleiten, kurzes Pendeln beim Ausleiten
+// einer Spirale). Ohne Zeitpuffer wurde genau diese Nachlauf-Sekunde als
+// "normales Sinken" gewertet, weil ihre Kursänderung für sich allein unter
+// MANEUVER_TURN_RATE_DEG_S lag, obwohl die Sinkrate dort (Trägheit aus der
+// Spirale) klar keine normale Gleitflug-Sinkrate mehr war — dadurch meldete
+// Max.Sinken für den ganzen Flug fälschlich zweistellige Werte.
+const MANEUVER_EDGE_PADDING_SEC = 6;
+
+// Präfixsumme über die (bereits lückentolerant zusammengefassten und um
+// MANEUVER_EDGE_PADDING_SEC erweiterten) rohen Manöver-Abschnitte von
+// findRawManeuverRuns: prefix[k] = Anzahl Manöver-Trackpunkte in
+// track[0..k-1]. Damit lässt sich für ein beliebiges Fenster [lo,hi] in
+// O(1) prüfen, ob es irgendeinen Manöver-Punkt (inkl. Nachlauf) enthält
+// (siehe maneuverWindowOverlaps direkt darunter), statt für jedes einzelne
+// Fenster erneut isoliert die Kursänderung nachzurechnen — und genau dieser
+// gemeinsame, bereits zusammengefasste (und gepufferte) Abschnitt statt
+// einer rein fensterlokalen Prüfung verhindert, dass die Ränder einer
+// Spirale/eines Wingovers als "normales Sinken" durchrutschen (siehe
+// windowedClimbSinkExtremes oben).
+function buildManeuverPrefix(track) {
+  const mask = new Uint8Array(track.length);
+  for (const { startIdx, endIdx } of findRawManeuverRuns(track)) {
+    const tStart = track[startIdx].timeSec - MANEUVER_EDGE_PADDING_SEC;
+    const tEnd = track[endIdx].timeSec + MANEUVER_EDGE_PADDING_SEC;
+    let lo = startIdx;
+    while (lo > 0 && track[lo-1].timeSec >= tStart) lo--;
+    let hi = endIdx;
+    while (hi < track.length-1 && track[hi+1].timeSec <= tEnd) hi++;
+    for (let k = lo; k <= hi; k++) mask[k] = 1;
+  }
+  const prefix = new Array(track.length + 1).fill(0);
+  for (let k = 0; k < track.length; k++) prefix[k+1] = prefix[k] + mask[k];
+  return prefix;
+}
+// Enthält das Fenster [lo,hi] (inklusive) mindestens einen Manöver-Punkt?
+function maneuverWindowOverlaps(prefix, lo, hi) {
+  return (prefix[hi+1] - prefix[lo]) > 0;
 }
 
 // Baut aus den rohen Manöver-Abschnitten die klassifizierten Spiralen-/
