@@ -309,6 +309,170 @@ function computeClimbSinkPoints(track, windowSec) {
   };
 }
 
+// ── Spiralen-/Wingover-Erkennung ─────────────────────────────────────────
+// Findet zusammenhängende Manöver-Abschnitte im Track (Kursänderung
+// schneller als MANEUVER_TURN_RATE_DEG_S, siehe oben) und unterscheidet
+// zwei Manövertypen anhand des Verhältnisses von Netto- zu Brutto-
+// Kursänderung über den ganzen Abschnitt:
+//   - Steilspirale: dreht durchgehend in dieselbe Richtung (Netto- ≈
+//     Brutto-Kursänderung, ratio nahe 1) — mehrere volle Kreise.
+//   - Wingover: pendelt abwechselnd links/rechts (Netto-Kursänderung hebt
+//     sich grösstenteils auf, ratio deutlich unter 1) — einzelne Schwünge
+//     statt einer vollen Umdrehung.
+// Kommen in einem Flug mehrere Sequenzen desselben Typs vor, wird gemäss
+// Vorgabe nur die mit dem stärksten Max.Sinken verwendet.
+const MANEUVER_MIN_TURN_DEG = 180; // mind. ein halber Kreis, sonst zu kurz/uneindeutig
+const MANEUVER_MIN_DURATION_SEC = 4;
+const MANEUVER_GAP_MERGE_SEC = 5; // kurze Unterbrechungen (einzelner Punkt knapp unter der Schwelle) überbrücken
+const SPIRAL_NET_RATIO = 0.6; // ab diesem Verhältnis gilt die Drehung als "immer gleiche Richtung" = Spirale
+const SPIRAL_MIN_TURN_DEG = 360; // "Kreisen" braucht mind. einen vollen Kreis, sonst zählt es (noch) nicht als Spirale
+const WINGOVER_MIN_SWING_DEG = 90; // je Richtungswechsel mind. diese Kursänderung, sonst zählt es nicht als eigener Schwung
+// Ohne diese Schwelle wurden auch harmlose enge Kurskorrekturen beim
+// Hangfliegen/Rippenfliegen (schnelle Richtungswechsel ohne nennenswerten
+// Höhenverlust) fälschlich als Wingover gezählt — eine echte Spirale/ein
+// echter Wingover wird ja gerade GEFLOGEN, um schnell Höhe abzubauen, hat
+// also immer ein spürbares Ø-Sinken über die ganze Sequenz.
+const MANEUVER_MIN_AVG_SINK = -1.0;
+
+// Wie turnSumDegBetween oben, aber ohne Betrag — die tatsächliche Netto-
+// Drehrichtung über [lo,hi] statt deren Betrag (Grundlage der Spirale-vs-
+// Wingover-Unterscheidung: bei einer Spirale bleibt die Netto-Drehung nahe
+// der Brutto-Drehung, bei einem pendelnden Wingover hebt sie sich weitgehend
+// wieder auf).
+function turnNetSumDegBetween(track, lo, hi) {
+  let net = 0, prevHeading = null;
+  for (let k = lo; k < hi; k++) {
+    if ((haversineDistKm(track[k], track[k+1]) || 0) < 0.0005) continue;
+    const heading = bearingDeg(track[k], track[k+1]);
+    if (prevHeading != null) {
+      net += ((heading - prevHeading + 180) % 360 + 360) % 360 - 180;
+    }
+    prevHeading = heading;
+  }
+  return net;
+}
+
+// Stärkstes Sinken innerhalb eines vorgegebenen Indexbereichs — wie
+// windowedClimbSinkExtremes oben, aber ohne dessen Manöver-Ausschluss (hier
+// soll ja gerade das Manöver selbst vermessen werden) und auf [lo,hi] statt
+// den ganzen Track beschränkt.
+function maxSinkInRange(track, lo, hi) {
+  let minRate = Infinity, j = lo;
+  for (let i = lo; i <= hi; i++) {
+    const t0 = track[i].timeSec, target = t0 + CLIMB_WINDOW_SEC;
+    if (j < i) j = i;
+    while (j <= hi && track[j].timeSec < target) j++;
+    if (j > hi) break;
+    if (j === i) continue;
+    const dt = track[j].timeSec - t0;
+    if (dt <= 0) continue;
+    const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
+    if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
+    if (rate < minRate) minRate = rate;
+  }
+  return isFinite(minRate) ? minRate : 0;
+}
+
+// Anzahl Schwünge (Richtungswechsel) innerhalb eines Wingover-Abschnitts:
+// jede zusammenhängende Folge von Kursänderungen in dieselbe Richtung, die
+// zusammen mindestens WINGOVER_MIN_SWING_DEG ergibt, zählt als ein Schwung
+// (ein Wingover nach links, gefolgt von einem nach rechts, zählt also als
+// zwei separate Schwünge).
+function countWingoverSwings(track, lo, hi) {
+  let count = 0, sign = 0, sum = 0, prevHeading = null;
+  const flush = () => { if (Math.abs(sum) >= WINGOVER_MIN_SWING_DEG) count++; sum = 0; };
+  for (let k = lo; k < hi; k++) {
+    if ((haversineDistKm(track[k], track[k+1]) || 0) < 0.0005) continue;
+    const heading = bearingDeg(track[k], track[k+1]);
+    if (prevHeading != null) {
+      const d = ((heading - prevHeading + 180) % 360 + 360) % 360 - 180;
+      const s = d > 0 ? 1 : d < 0 ? -1 : 0;
+      if (s !== 0 && sign !== 0 && s !== sign) { flush(); sign = s; }
+      else if (sign === 0 && s !== 0) sign = s;
+      sum += d;
+    }
+    prevHeading = heading;
+  }
+  flush();
+  return count;
+}
+
+// Findet alle Manöver-Abschnitte (Spiralen UND Wingover, hier noch
+// ungetrennt) im Track: erst jeden einzelnen "schnellen" Kursänderungs-
+// Schritt markieren, dann benachbarte (inkl. kurzer Lücken, siehe
+// MANEUVER_GAP_MERGE_SEC) zu einer zusammenhängenden Sequenz zusammenfassen.
+function findRawManeuverRuns(track) {
+  const steps = [];
+  let prevHeading = null, prevIdx = 0;
+  for (let k = 0; k < track.length - 1; k++) {
+    if ((haversineDistKm(track[k], track[k+1]) || 0) < 0.0005) continue;
+    const heading = bearingDeg(track[k], track[k+1]);
+    if (prevHeading != null) {
+      const d = ((heading - prevHeading + 180) % 360 + 360) % 360 - 180;
+      const dt = track[k+1].timeSec - track[prevIdx].timeSec;
+      if (dt > 0) steps.push({ fromIdx: prevIdx, toIdx: k+1, rate: d/dt });
+    }
+    prevHeading = heading;
+    prevIdx = k+1;
+  }
+  const runs = [];
+  for (const s of steps) {
+    if (Math.abs(s.rate) <= MANEUVER_TURN_RATE_DEG_S) continue;
+    const last = runs[runs.length-1];
+    if (last && (track[s.fromIdx].timeSec - track[last.endIdx].timeSec) <= MANEUVER_GAP_MERGE_SEC) {
+      last.endIdx = s.toIdx;
+    } else {
+      runs.push({ startIdx: s.fromIdx, endIdx: s.toIdx });
+    }
+  }
+  return runs;
+}
+
+// Baut aus den rohen Manöver-Abschnitten die klassifizierten Spiralen-/
+// Wingover-Sequenzen inkl. aller gewünschten Kennzahlen (Max.Sinken,
+// durchschnittliches Sinken über die ganze Sequenz, Anzahl Kreise/Schwünge,
+// abgebaute Höhe).
+function classifyManeuverRuns(track) {
+  const spiralen = [], wingovers = [];
+  for (const { startIdx, endIdx } of findRawManeuverRuns(track)) {
+    const durationSec = track[endIdx].timeSec - track[startIdx].timeSec;
+    const totalTurn = turnSumDegBetween(track, startIdx, endIdx);
+    if (durationSec < MANEUVER_MIN_DURATION_SEC || totalTurn < MANEUVER_MIN_TURN_DEG) continue;
+    const avgSink = +((track[endIdx].gpsAlt - track[startIdx].gpsAlt) / durationSec).toFixed(1);
+    if (avgSink > MANEUVER_MIN_AVG_SINK) continue; // kein nennenswerter Höhenverlust -> keine echte Spirale/kein echter Wingover
+    const netTurn = turnNetSumDegBetween(track, startIdx, endIdx);
+    const ratio = totalTurn > 0 ? Math.abs(netTurn) / totalTurn : 0;
+    const maxSink = +maxSinkInRange(track, startIdx, endIdx).toFixed(1);
+    const hoehenabbau = Math.round(Math.max(0, track[startIdx].gpsAlt - track[endIdx].gpsAlt));
+    if (ratio >= SPIRAL_NET_RATIO) {
+      if (totalTurn < SPIRAL_MIN_TURN_DEG) continue; // "Kreisen" braucht mind. einen vollen Kreis, sonst zu kurz/uneindeutig
+      spiralen.push({ maxSink, avgSink, hoehenabbau, count: +(totalTurn/360).toFixed(1) });
+    } else {
+      const swings = countWingoverSwings(track, startIdx, endIdx);
+      if (swings > 0) wingovers.push({ maxSink, avgSink, hoehenabbau, count: swings });
+    }
+  }
+  return { spiralen, wingovers };
+}
+
+// Wählt aus mehreren Sequenzen desselben Typs diejenige mit dem stärksten
+// Max.Sinken aus — Vorgabe: kommen mehrere Sequenzen vor, ist diejenige mit
+// dem höchsten Max.Sinken zu verwenden.
+function pickWorstSink(sequences) {
+  if (!sequences.length) return null;
+  return sequences.reduce((a,b) => b.maxSink < a.maxSink ? b : a);
+}
+
+// Öffentliche Einstiegsfunktion: liefert die "schlimmste" Spiralen- und
+// Wingover-Sequenz eines Flugs (je null, falls im Track keine entsprechende
+// Sequenz gefunden wurde) — verwendet sowohl beim IGC-Import als auch von
+// der temporären Nachrechnen-Funktion für bereits importierte Flüge.
+function analyzeSpiralWingover(track) {
+  if (!track || track.length < 5) return { spirale: null, wingover: null };
+  const { spiralen, wingovers } = classifyManeuverRuns(track);
+  return { spirale: pickWorstSink(spiralen), wingover: pickWorstSink(wingovers) };
+}
+
 // Steig-/Sinkwerte immer mit genau einer Nachkommastelle anzeigen (z.B.
 // "3.0" statt "3"). Die berechneten Rohwerte sind zwar schon auf eine
 // Nachkommastelle gerundet (toFixed(1) in computeClimbSinkStats), aber
@@ -389,8 +553,20 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   // zwar oft die höchste GPS-Geschwindigkeit im ganzen Flug liefern, aber
   // eine Manöver- statt Gleitflug-Geschwindigkeit sind.
   const maxSpeedKmh = computeMaxStraightSpeedKmh(track);
+  // Spirale/Wingover: je die "schlimmste" (stärkstes Max.Sinken) Sequenz
+  // dieses Flugs — siehe analyzeSpiralWingover weiter oben. null, wenn der
+  // Flug keine entsprechende Sequenz enthält.
+  const { spirale, wingover } = analyzeSpiralWingover(track);
   return { maxAlt, minAlt, startAlt, endAlt, startPt, endPt, durationSec, durationStr, startTime, endTime,
-    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm, maxSpeedKmh };
+    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm, maxSpeedKmh,
+    spiraleMaxSinken: spirale ? spirale.maxSink : null,
+    spiraleSinkenSchnitt: spirale ? spirale.avgSink : null,
+    spiraleAnzahlKreise: spirale ? spirale.count : null,
+    spiraleHoehenabbau: spirale ? spirale.hoehenabbau : null,
+    wingoverMaxSinken: wingover ? wingover.maxSink : null,
+    wingoverSinkenSchnitt: wingover ? wingover.avgSink : null,
+    wingoverAnzahl: wingover ? wingover.count : null,
+    wingoverHoehenabbau: wingover ? wingover.hoehenabbau : null };
 }
 
 // Kleinster Winkel zwischen zwei Peilungen (0-180°), unabhängig von der
@@ -2663,6 +2839,14 @@ function flightFieldValue(f, field){
     case "maxsteigen20": return +(cf.maxSteigen20||0)||0;
     case "maxsinken": return +(cf.maxSinken||0)||0;
     case "hgew": return +(cf.hGew||0)||0;
+    case "spiralemaxsinken": return +(cf.spiraleMaxSinken||0)||0;
+    case "spiralesinkenschnitt": return +(cf.spiraleSinkenSchnitt||0)||0;
+    case "spiralekreise": case "spiraleanzahlkreise": return +(cf.spiraleAnzahlKreise||0)||0;
+    case "spiralehoehenabbau": return +(cf.spiraleHoehenabbau||0)||0;
+    case "wingovermaxsinken": return +(cf.wingoverMaxSinken||0)||0;
+    case "wingoversinkenschnitt": return +(cf.wingoverSinkenSchnitt||0)||0;
+    case "wingoveranzahl": case "wingovers": return +(cf.wingoverAnzahl||0)||0;
+    case "wingoverhoehenabbau": return +(cf.wingoverHoehenabbau||0)||0;
     case "entfernungsl": return f.entfernungSL||0;
     case "startlat": return f.startPt?.lat||0;
     case "startlon": return f.startPt?.lon||0;
@@ -2706,6 +2890,8 @@ function evalToken(f, tok){
 
     const numericFields=["name","titel","dauer","duration","distanz","dist","km","maxspeed","höhe","hoehe","maxhöhe","maxhoehe","alt",
       "startalt","endalt","hdiff","maxsteigen","maxsteigen20","maxsinken","hgew","entfernungsl",
+      "spiralemaxsinken","spiralesinkenschnitt","spiralekreise","spiraleanzahlkreise","spiralehoehenabbau",
+      "wingovermaxsinken","wingoversinkenschnitt","wingoveranzahl","wingovers","wingoverhoehenabbau",
       "speed","kmh","rating","bewertung","jahr","year","startlat","startlon","endlat","endlon"];
     const dateFields=["datum","date"];
     const timeFields=["startzeit","starttime","landezeit","endtime"];
@@ -2791,6 +2977,14 @@ const SORT_OPTIONS = [
   { id: "maxSinken", label: "Max.Sinken" },
   { id: "hGew",     label: "H.Gew." },
   { id: "entfernungSL", label: "Entf. S-L" },
+  { id: "spiraleMaxSinken", label: "Spirale Max.Sinken" },
+  { id: "spiraleSinkenSchnitt", label: "Spirale Ø Sinken" },
+  { id: "spiraleAnzahlKreise", label: "Spirale Kreise" },
+  { id: "spiraleHoehenabbau", label: "Spirale Höhenabbau" },
+  { id: "wingoverMaxSinken", label: "Wingover Max.Sinken" },
+  { id: "wingoverSinkenSchnitt", label: "Wingover Ø Sinken" },
+  { id: "wingoverAnzahl", label: "Anzahl Wingover" },
+  { id: "wingoverHoehenabbau", label: "Wingover Höhenabbau" },
   { id: "rating",   label: "Bewertung" },
 ];
 function parseDateToTs(d, timeStr) {
@@ -2828,6 +3022,14 @@ function sortFieldValue(f, sortId) {
     case "maxSinken": return +(cf.maxSinken||0) || 0;
     case "hGew":     return +(cf.hGew||0) || 0;
     case "entfernungSL": return f.entfernungSL || 0;
+    case "spiraleMaxSinken": return +(cf.spiraleMaxSinken||0) || 0;
+    case "spiraleSinkenSchnitt": return +(cf.spiraleSinkenSchnitt||0) || 0;
+    case "spiraleAnzahlKreise": return +(cf.spiraleAnzahlKreise||0) || 0;
+    case "spiraleHoehenabbau": return +(cf.spiraleHoehenabbau||0) || 0;
+    case "wingoverMaxSinken": return +(cf.wingoverMaxSinken||0) || 0;
+    case "wingoverSinkenSchnitt": return +(cf.wingoverSinkenSchnitt||0) || 0;
+    case "wingoverAnzahl": return +(cf.wingoverAnzahl||0) || 0;
+    case "wingoverHoehenabbau": return +(cf.wingoverHoehenabbau||0) || 0;
     case "site":     return (f.site || "").toLowerCase();
     case "landung":  return (cf.landung || "").toLowerCase();
     case "land":     return (cf.land || "").toLowerCase();
@@ -2884,6 +3086,14 @@ function sortFieldDisplay(f, sortId) {
     case "maxSinken": return cf.maxSinken ? fmt1(cf.maxSinken)+" m/s" : null;
     case "hGew": return cf.hGew ? cf.hGew+" m" : null;
     case "entfernungSL": return f.entfernungSL!=null ? f.entfernungSL+" km" : null;
+    case "spiraleMaxSinken": return cf.spiraleMaxSinken ? fmt1(cf.spiraleMaxSinken)+" m/s" : null;
+    case "spiraleSinkenSchnitt": return cf.spiraleSinkenSchnitt ? fmt1(cf.spiraleSinkenSchnitt)+" m/s" : null;
+    case "spiraleAnzahlKreise": return cf.spiraleAnzahlKreise || null;
+    case "spiraleHoehenabbau": return cf.spiraleHoehenabbau ? cf.spiraleHoehenabbau+" m" : null;
+    case "wingoverMaxSinken": return cf.wingoverMaxSinken ? fmt1(cf.wingoverMaxSinken)+" m/s" : null;
+    case "wingoverSinkenSchnitt": return cf.wingoverSinkenSchnitt ? fmt1(cf.wingoverSinkenSchnitt)+" m/s" : null;
+    case "wingoverAnzahl": return cf.wingoverAnzahl || null;
+    case "wingoverHoehenabbau": return cf.wingoverHoehenabbau ? cf.wingoverHoehenabbau+" m" : null;
     default: return null;
   }
 }
@@ -3017,6 +3227,14 @@ const TILE_FIELD_OPTIONS = [
   { key: "speed",     label: "Ø Speed",       icon: "💨", get: fl => fl.customFields?.kmh ? fl.customFields.kmh+" km/h" : "—" },
   { key: "hGew",      label: "Höhengewinn",   icon: "📈", get: fl => fl.customFields?.hGew ? fl.customFields.hGew+" m" : "—" },
   { key: "entfernungSL", label: "Entf. S-L",  icon: "📐", get: fl => fl.entfernungSL!=null ? fl.entfernungSL+" km" : "—" },
+  { key: "spiraleMaxSinken", label: "Spirale Max.Sinken", icon: "🌀", get: fl => fl.customFields?.spiraleMaxSinken ? fmt1(fl.customFields.spiraleMaxSinken)+" m/s" : "—" },
+  { key: "spiraleSinkenSchnitt", label: "Spirale Ø Sinken", icon: "🌀", get: fl => fl.customFields?.spiraleSinkenSchnitt ? fmt1(fl.customFields.spiraleSinkenSchnitt)+" m/s" : "—" },
+  { key: "spiraleAnzahlKreise", label: "Spirale Kreise", icon: "🌀", get: fl => fl.customFields?.spiraleAnzahlKreise || "—" },
+  { key: "spiraleHoehenabbau", label: "Spirale Höhenabbau", icon: "🌀", get: fl => fl.customFields?.spiraleHoehenabbau ? fl.customFields.spiraleHoehenabbau+" m" : "—" },
+  { key: "wingoverMaxSinken", label: "Wingover Max.Sinken", icon: "🪽", get: fl => fl.customFields?.wingoverMaxSinken ? fmt1(fl.customFields.wingoverMaxSinken)+" m/s" : "—" },
+  { key: "wingoverSinkenSchnitt", label: "Wingover Ø Sinken", icon: "🪽", get: fl => fl.customFields?.wingoverSinkenSchnitt ? fmt1(fl.customFields.wingoverSinkenSchnitt)+" m/s" : "—" },
+  { key: "wingoverAnzahl", label: "Anzahl Wingover", icon: "🪽", get: fl => fl.customFields?.wingoverAnzahl || "—" },
+  { key: "wingoverHoehenabbau", label: "Wingover Höhenabbau", icon: "🪽", get: fl => fl.customFields?.wingoverHoehenabbau ? fl.customFields.wingoverHoehenabbau+" m" : "—" },
   { key: "rating",    label: "Bewertung",     icon: "⭐️", get: fl => fl.rating ? "★".repeat(fl.rating) : "—" },
 ];
 const DEFAULT_TILE_KEYS = ["duration","maxAlt","distanz","startAlt","endAlt","hDiff","maxSinken","maxSteigen","speed"];
@@ -4220,6 +4438,14 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
             <InlineField label="Max.Sinken"  value={fmt1(fl.customFields?.maxSinken)}     onSave={v=>saveField({customFields:{maxSinken:v}})} unit="m/s" />
             <InlineField label="H.Gew."      value={fl.customFields?.hGew}          onSave={v=>saveField({customFields:{hGew:v}})} unit="m" />
             <StaticField label="Entf. S-L"   value={fl.entfernungSL!=null?String(fl.entfernungSL):""} unit="km" />
+            <InlineField label="Spirale Max.Sinken" value={fmt1(fl.customFields?.spiraleMaxSinken)} onSave={v=>saveField({customFields:{spiraleMaxSinken:v}})} unit="m/s" />
+            <InlineField label="Spirale Ø Sinken"   value={fmt1(fl.customFields?.spiraleSinkenSchnitt)} onSave={v=>saveField({customFields:{spiraleSinkenSchnitt:v}})} unit="m/s" />
+            <InlineField label="Spirale Kreise"     value={fl.customFields?.spiraleAnzahlKreise||""} onSave={v=>saveField({customFields:{spiraleAnzahlKreise:v}})} />
+            <InlineField label="Spirale Höhenabbau" value={fl.customFields?.spiraleHoehenabbau||""} onSave={v=>saveField({customFields:{spiraleHoehenabbau:v}})} unit="m" />
+            <InlineField label="Wingover Max.Sinken" value={fmt1(fl.customFields?.wingoverMaxSinken)} onSave={v=>saveField({customFields:{wingoverMaxSinken:v}})} unit="m/s" />
+            <InlineField label="Wingover Ø Sinken"   value={fmt1(fl.customFields?.wingoverSinkenSchnitt)} onSave={v=>saveField({customFields:{wingoverSinkenSchnitt:v}})} unit="m/s" />
+            <InlineField label="Anzahl Wingover"     value={fl.customFields?.wingoverAnzahl||""} onSave={v=>saveField({customFields:{wingoverAnzahl:v}})} />
+            <InlineField label="Wingover Höhenabbau" value={fl.customFields?.wingoverHoehenabbau||""} onSave={v=>saveField({customFields:{wingoverHoehenabbau:v}})} unit="m" />
           </div>
 
           {/* Auto fields */}
@@ -4757,6 +4983,11 @@ function FlugbuchApp() {
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
   const [igcResult, setIgcResult] = useState(null);
+  // TEMPORÄR: siehe runSpiralWingoverBackfill weiter unten — Zustand für
+  // den einmaligen Nachtrag-Button, kann zusammen mit diesem entfernt
+  // werden, sobald alle bestehenden Flüge einmal durchgelaufen sind.
+  const [spiralBackfillRunning, setSpiralBackfillRunning] = useState(false);
+  const [spiralBackfillResult, setSpiralBackfillResult] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   // Cache der Schirme-Liste (schirme:list) für die Dauer eines IGC-Imports
   // — vermeidet, bei jeder einzelnen Datei erneut zu laden/zu speichern,
@@ -5185,6 +5416,18 @@ function FlugbuchApp() {
     cf.maxSteigen = String(igcData.maxClimb);
     cf.maxSteigen20 = String(igcData.maxClimb20);
     cf.maxSinken = String(igcData.maxSinkRate);
+    // Spirale/Wingover: gleiche Regel wie Max.Steigen/-20s/Max.Sinken oben
+    // — immer aus dem gerade eingelesenen Track neu gesetzt. Leerer String
+    // (statt "0"), wenn der Flug keine entsprechende Sequenz enthält, damit
+    // die Anzeige "—" statt eines irreführenden "0" zeigt.
+    cf.spiraleMaxSinken = igcData.spiraleMaxSinken != null ? String(igcData.spiraleMaxSinken) : "";
+    cf.spiraleSinkenSchnitt = igcData.spiraleSinkenSchnitt != null ? String(igcData.spiraleSinkenSchnitt) : "";
+    cf.spiraleAnzahlKreise = igcData.spiraleAnzahlKreise != null ? String(igcData.spiraleAnzahlKreise) : "";
+    cf.spiraleHoehenabbau = igcData.spiraleHoehenabbau != null ? String(igcData.spiraleHoehenabbau) : "";
+    cf.wingoverMaxSinken = igcData.wingoverMaxSinken != null ? String(igcData.wingoverMaxSinken) : "";
+    cf.wingoverSinkenSchnitt = igcData.wingoverSinkenSchnitt != null ? String(igcData.wingoverSinkenSchnitt) : "";
+    cf.wingoverAnzahl = igcData.wingoverAnzahl != null ? String(igcData.wingoverAnzahl) : "";
+    cf.wingoverHoehenabbau = igcData.wingoverHoehenabbau != null ? String(igcData.wingoverHoehenabbau) : "";
     // Original IGC filename kept as its own field (shown in the Detail
     // view, not the list) — this is what lets a later re-import of the
     // same corrected file find this exact flight again, now that the
@@ -5327,6 +5570,14 @@ function FlugbuchApp() {
               maxSteigen: igcData.maxClimb ? String(igcData.maxClimb) : "",
               maxSteigen20: igcData.maxClimb20 ? String(igcData.maxClimb20) : "",
               maxSinken: igcData.maxSinkRate ? String(igcData.maxSinkRate) : "",
+              spiraleMaxSinken: igcData.spiraleMaxSinken != null ? String(igcData.spiraleMaxSinken) : "",
+              spiraleSinkenSchnitt: igcData.spiraleSinkenSchnitt != null ? String(igcData.spiraleSinkenSchnitt) : "",
+              spiraleAnzahlKreise: igcData.spiraleAnzahlKreise != null ? String(igcData.spiraleAnzahlKreise) : "",
+              spiraleHoehenabbau: igcData.spiraleHoehenabbau != null ? String(igcData.spiraleHoehenabbau) : "",
+              wingoverMaxSinken: igcData.wingoverMaxSinken != null ? String(igcData.wingoverMaxSinken) : "",
+              wingoverSinkenSchnitt: igcData.wingoverSinkenSchnitt != null ? String(igcData.wingoverSinkenSchnitt) : "",
+              wingoverAnzahl: igcData.wingoverAnzahl != null ? String(igcData.wingoverAnzahl) : "",
+              wingoverHoehenabbau: igcData.wingoverHoehenabbau != null ? String(igcData.wingoverHoehenabbau) : "",
               distKm: backfill.distKm || "", kmh: backfill.kmh || ""},
             ...igcData, startPt:igcData.startPt, endPt:igcData.endPt,
             totalDist: backfill.totalDist || 0 };
@@ -5343,6 +5594,46 @@ function FlugbuchApp() {
     setTimeout(() => setIgcResult(null), 6000);
     setImporting(false); setImportProgress(null);
   }, [flights, saveFlight, attachIgcToFlight, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
+
+  // ── TEMPORÄR: Einmaliger Nachtrag Spirale/Wingover für bereits
+  // importierte Flüge ────────────────────────────────────────────────────
+  // Ab jetzt liefert jeder frische IGC-Import Spirale/Wingover automatisch
+  // mit (siehe attachIgcToFlight oben und die Neuanlage-Zweige in
+  // runImportLoop/DateAmbiguousResolver). Für Flüge, die VOR dieser
+  // Änderung importiert wurden, fehlen diese Felder aber, weil ein
+  // erneuter Import nur bei einer neuen/geänderten IGC-Datei ausgelöst
+  // wird, nicht von selbst. Dieser Button rechnet die acht Spirale-/
+  // Wingover-Felder einmalig aus dem bereits gespeicherten Track jedes
+  // Flugs nach, ohne sonst etwas am Flug zu verändern — Button und
+  // Funktion können wieder entfernt werden, sobald alle bestehenden Flüge
+  // einmal durchgelaufen sind.
+  const runSpiralWingoverBackfill = useCallback(async () => {
+    const candidates = flights.filter(f => f.track && f.track.length > 1);
+    setSpiralBackfillRunning(true);
+    setSpiralBackfillResult(null);
+    const updates = new Map();
+    for (const f of candidates) {
+      const { spirale, wingover } = analyzeSpiralWingover(f.track);
+      const cf = { ...(f.customFields||{}) };
+      cf.spiraleMaxSinken = spirale ? String(spirale.maxSink) : "";
+      cf.spiraleSinkenSchnitt = spirale ? String(spirale.avgSink) : "";
+      cf.spiraleAnzahlKreise = spirale ? String(spirale.count) : "";
+      cf.spiraleHoehenabbau = spirale ? String(spirale.hoehenabbau) : "";
+      cf.wingoverMaxSinken = wingover ? String(wingover.maxSink) : "";
+      cf.wingoverSinkenSchnitt = wingover ? String(wingover.avgSink) : "";
+      cf.wingoverAnzahl = wingover ? String(wingover.count) : "";
+      cf.wingoverHoehenabbau = wingover ? String(wingover.hoehenabbau) : "";
+      const updated = { ...f, customFields: cf };
+      updates.set(f.id, updated);
+      await saveFlight(updated);
+    }
+    if (updates.size) {
+      setFlights(prev => prev.map(f => updates.get(f.id) || f));
+      if (selected && updates.has(selected.id)) setSelected(updates.get(selected.id));
+    }
+    setSpiralBackfillRunning(false);
+    setSpiralBackfillResult({ total: candidates.length });
+  }, [flights, saveFlight, selected]);
 
   // Dritter (letzter) Erkennungsschritt vor dem eigentlichen Anlegen von
   // Flügen/Schirmen — separat, damit er sowohl direkt nach dem Parsen als
@@ -5744,6 +6035,25 @@ function FlugbuchApp() {
         </div>
       )}
 
+      {/* TEMPORÄR: siehe runSpiralWingoverBackfill oben — Button + Ergebnis-
+          Anzeige können zusammen mit der Funktion wieder entfernt werden,
+          sobald alle bestehenden Flüge einmal durchgelaufen sind. */}
+      {showImportMenu && (
+        <div style={{margin:"6px 16px 0"}}>
+          <button onClick={runSpiralWingoverBackfill} disabled={spiralBackfillRunning}
+            title="Einmalig: Spirale/Wingover für alle bereits importierten Flüge mit vorhandenem Track aus den gespeicherten Trackdaten nachrechnen (temporäre Funktion)."
+            style={{width:"100%",background:"rgba(167,139,250,0.1)",color:"#c4b5fd",border:"1px solid rgba(167,139,250,0.25)",borderRadius:8,padding:"7px 10px",fontSize:11,fontWeight:600,cursor:spiralBackfillRunning?"default":"pointer",opacity:spiralBackfillRunning?0.6:1}}>
+            {spiralBackfillRunning ? "⏳ Berechne Spirale/Wingover…" : "🌀 Spirale/Wingover einmalig nachrechnen"}
+          </button>
+        </div>
+      )}
+      {spiralBackfillResult && (
+        <div style={{margin:"8px 16px 0",background:"rgba(167,139,250,0.1)",border:"1px solid rgba(167,139,250,0.3)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:12,color:"#a78bfa"}}>✅ {spiralBackfillResult.total} Flüge mit Track aktualisiert</span>
+          <button onClick={()=>setSpiralBackfillResult(null)} style={{background:"none",border:"none",color:"rgba(167,139,250,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
+        </div>
+      )}
+
       {igcDirResult && (
         <div style={{margin:"8px 16px 0",background:igcDirResult.error?"rgba(239,68,68,0.08)":"rgba(167,139,250,0.1)",border:`1px solid ${igcDirResult.error?"rgba(239,68,68,0.3)":"rgba(167,139,250,0.3)"}`,borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <span style={{fontSize:12,color:igcDirResult.error?"#f87171":"#a78bfa"}}>
@@ -5813,6 +6123,14 @@ function FlugbuchApp() {
                 maxSteigen: item.igcData.maxClimb ? String(item.igcData.maxClimb) : "",
                 maxSteigen20: item.igcData.maxClimb20 ? String(item.igcData.maxClimb20) : "",
                 maxSinken: item.igcData.maxSinkRate ? String(item.igcData.maxSinkRate) : "",
+                spiraleMaxSinken: item.igcData.spiraleMaxSinken != null ? String(item.igcData.spiraleMaxSinken) : "",
+                spiraleSinkenSchnitt: item.igcData.spiraleSinkenSchnitt != null ? String(item.igcData.spiraleSinkenSchnitt) : "",
+                spiraleAnzahlKreise: item.igcData.spiraleAnzahlKreise != null ? String(item.igcData.spiraleAnzahlKreise) : "",
+                spiraleHoehenabbau: item.igcData.spiraleHoehenabbau != null ? String(item.igcData.spiraleHoehenabbau) : "",
+                wingoverMaxSinken: item.igcData.wingoverMaxSinken != null ? String(item.igcData.wingoverMaxSinken) : "",
+                wingoverSinkenSchnitt: item.igcData.wingoverSinkenSchnitt != null ? String(item.igcData.wingoverSinkenSchnitt) : "",
+                wingoverAnzahl: item.igcData.wingoverAnzahl != null ? String(item.igcData.wingoverAnzahl) : "",
+                wingoverHoehenabbau: item.igcData.wingoverHoehenabbau != null ? String(item.igcData.wingoverHoehenabbau) : "",
                 distKm: backfill.distKm || "", kmh: backfill.kmh || ""},
               ...item.igcData, startPt:item.igcData.startPt, endPt:item.igcData.endPt,
               totalDist: backfill.totalDist || 0 };
