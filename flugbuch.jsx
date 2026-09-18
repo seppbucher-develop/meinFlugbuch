@@ -1093,6 +1093,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // weiter oben in dieser Datei) — EIN Button schaltet beide Marker
   // zusammen sichtbar/unsichtbar, analog zum "Distanz"-Button oben.
   const [showClimbSink, setShowClimbSink] = useState(false);
+  // "Monitor"-Button: blendet ein drittes Badge oben links ein/aus, neben
+  // Distanz und Steigen/Sinken — Höhe üM, Geschwindigkeit und Vario an der
+  // aktuell markierten Position (Wiedergabe-Marker während der Kino-
+  // Wiedergabe, sonst derselbe Referenzpunkt wie der stehende Kartenmarker
+  // — siehe refPoint/highlightRange weiter unten, bzw. die Fluglinienmitte
+  // ohne gezoomtes Profil).
+  const [showMonitor, setShowMonitor] = useState(false);
 
   const togglePlay = () => setIsPlaying(p => !p);
 
@@ -1145,6 +1152,45 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     for (let i=1;i<track.length;i++) arr[i] = arr[i-1] + (haversineDistKm(track[i-1], track[i]) || 0);
     return arr;
   }, [track]);
+
+  // Für den "Monitor" (siehe showMonitor oben): der Trackindex, dessen Werte
+  // gerade angezeigt werden sollen — während der Kino-Wiedergabe derselbe
+  // Zeitpunkt wie der bewegte Wiedergabe-Marker (playElapsedSec, siehe
+  // placeOn weiter unten), sonst der Punkt am zoomten Profil-Fenster
+  // (highlightRange.center, vom Höhenprofil gemeldet — derselbe Bezugspunkt
+  // wie der stehende Kartenmarker/refPoint), und ohne gezoomtes Profil die
+  // Mitte der gesamten Flugstrecke.
+  const monitorIndex = useMemo(() => {
+    if (!showMonitor || !track.length || !cumDist.length) return null;
+    if (isPlaying || playElapsedSec > 0) {
+      const targetTime = track[0].timeSec + playElapsedSec;
+      let i = 0;
+      while (i < track.length-2 && track[i+1].timeSec < targetTime) i++;
+      return i;
+    }
+    const targetDist = (highlightRange && highlightRange.center != null) ? highlightRange.center : (cumDist[cumDist.length-1]||0)/2;
+    let bestIdx = 0, bestDiff = Infinity;
+    for (let i=0;i<cumDist.length;i++) { const diff = Math.abs(cumDist[i]-targetDist); if (diff<bestDiff) { bestDiff=diff; bestIdx=i; } }
+    return bestIdx;
+  }, [showMonitor, track, cumDist, isPlaying, playElapsedSec, highlightRange]);
+
+  // Geschwindigkeit/Vario über ein kurzes, um monitorIndex zentriertes
+  // Zeitfenster (gleiches Prinzip wie CLIMB_WINDOW_SEC anderswo) statt des
+  // rohen Punkt-zu-Punkt-Sprungs, damit ein einzelner GPS-/Höhenausreisser
+  // die Anzeige nicht springen lässt.
+  const monitorInfo = useMemo(() => {
+    if (monitorIndex == null) return null;
+    const alt = track[monitorIndex]?.gpsAlt;
+    if (alt == null) return null;
+    const t0 = track[monitorIndex].timeSec;
+    let lo = monitorIndex, hi = monitorIndex;
+    while (lo > 0 && t0 - track[lo-1].timeSec < CLIMB_WINDOW_SEC) lo--;
+    while (hi < track.length-1 && track[hi+1].timeSec - t0 < CLIMB_WINDOW_SEC) hi++;
+    const dt = track[hi].timeSec - track[lo].timeSec;
+    const speedKmh = dt>0 ? (haversineDistKm(track[lo], track[hi]) || 0)/(dt/3600) : 0;
+    const varioMs = dt>0 ? (track[hi].gpsAlt-track[lo].gpsAlt)/dt : 0;
+    return { alt, speedKmh, varioMs };
+  }, [monitorIndex, track]);
 
   // The segment highlightRange refers to (by cumulative flown distance
   // along the *raw* track, same basis FlightProfile itself uses), plus the
@@ -1625,6 +1671,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     setIsPlaying(false);
     setPlayElapsedSec(0);
     setShowDistance(false);
+    setShowMonitor(false);
     if (playMarkerRef.current) { playMarkerRef.current.remove(); playMarkerRef.current = null; }
     if (previewPlayMarkerRef.current) { previewPlayMarkerRef.current.remove(); previewPlayMarkerRef.current = null; }
     if (onPlaybackPositionChange) onPlaybackPositionChange(null);
@@ -1636,11 +1683,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     <>
       <div style={{position:"relative"}} onClick={()=>{ if (hasMap) setIsFullscreen(true); }}>
         <div ref={previewDivRef} style={{width:"100%",aspectRatio:"3/2",background:"#040e20",borderRadius:10,overflow:"hidden",cursor:hasMap?"pointer":"default"}} />
-        {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints)) && (
-          // Beide Badges links oben statt eines davon rechts oben: die
-          // eingebauten Zoom-+/--Buttons der Karte sitzen rechts oben und
-          // überlagerten dort das Steigen/Sinken-Badge. Sind beide Badges
-          // aktiv, steht Steigen/Sinken als zweite Zeile unter der Distanz.
+        {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
+          // Alle Badges links oben statt rechts: die eingebauten Zoom-+/--
+          // Buttons der Karte sitzen rechts oben und überlagerten dort ein
+          // Badge. Sind mehrere Badges aktiv, stehen sie als eigene Zeilen
+          // untereinander (Distanz, Steigen/Sinken, Monitor).
           <div style={{position:"absolute",top:8,left:8,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:6,pointerEvents:"none"}}>
             {showDistance && distanceRoute && (
               <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:8,padding:"4px 9px",color:"#f59e0b",fontSize:12,fontWeight:700}}>
@@ -1651,6 +1698,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
               <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:8,padding:"4px 9px",fontSize:12,fontWeight:700,display:"flex",flexDirection:"column",gap:2}}>
                 <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
                 <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
+              </div>
+            )}
+            {showMonitor && monitorInfo && (
+              <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.5)",borderRadius:8,padding:"4px 9px",fontSize:12,fontWeight:700,display:"flex",flexDirection:"column",gap:2}}>
+                <span style={{color:"#7dd3fc"}}>⬆ {Math.round(monitorInfo.alt)} m</span>
+                <span style={{color:"#e8f4fd"}}>➤ {Math.round(monitorInfo.speedKmh)} km/h</span>
+                <span style={{color:monitorInfo.varioMs>=0?"#4ade80":"#f87171"}}>{monitorInfo.varioMs>=0?"↑":"↓"} {Math.abs(monitorInfo.varioMs).toFixed(1)} m/s</span>
               </div>
             )}
           </div>
@@ -1716,6 +1770,16 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
               ↑↓
             </button>
           )}
+          {/* Schaltet das Monitor-Badge (Höhe/Geschwindigkeit/Vario) oben
+              links auf der Karte ein/aus, neben Distanz und Steigen/Sinken —
+              siehe monitorInfo/showMonitor oben. Icon-only wie ↑↓ und die
+              Zurücksetzen-Buttons, damit die gemeinsame Button-Zeile (bis zu
+              8 Kacheln) nicht zu breit wird. */}
+          <button onClick={()=>setShowMonitor(m=>!m)}
+            title={showMonitor?"Monitor ausblenden":"Monitor anzeigen (Höhe/Geschwindigkeit/Vario)"}
+            style={{flex:"0.85 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showMonitor?"rgba(125,211,252,0.25)":"rgba(125,211,252,0.1)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,color:"#7dd3fc",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+            📊
+          </button>
         </>,
         controlsSlot
       )}
@@ -1724,11 +1788,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           style={{position:"fixed",inset:0,background:"#000",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",overflow:"hidden"}}
         >
           <div ref={fullDivRef} style={{width:"100%",height:"70vh"}} />
-          {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints)) && (
-            // Beide Badges links statt eines davon rechts: die eingebauten
-            // Zoom-+/--Buttons der Karte sitzen rechts oben und überlagerten
-            // dort das Steigen/Sinken-Badge. Sind beide Badges aktiv, steht
-            // Steigen/Sinken als zweite Zeile unter der Distanz.
+          {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
+            // Alle Badges links statt rechts: die eingebauten Zoom-+/--
+            // Buttons der Karte sitzen rechts oben und überlagerten dort ein
+            // Badge. Sind mehrere Badges aktiv, stehen sie als eigene Zeilen
+            // untereinander (Distanz, Steigen/Sinken, Monitor).
             <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:8,pointerEvents:"none"}}>
               {showDistance && distanceRoute && (
                 <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
@@ -1739,6 +1803,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
                 <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
                   <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
                   <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
+                </div>
+              )}
+              {showMonitor && monitorInfo && (
+                <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
+                  <span style={{color:"#7dd3fc"}}>⬆ {Math.round(monitorInfo.alt)} m</span>
+                  <span style={{color:"#e8f4fd"}}>➤ {Math.round(monitorInfo.speedKmh)} km/h</span>
+                  <span style={{color:monitorInfo.varioMs>=0?"#4ade80":"#f87171"}}>{monitorInfo.varioMs>=0?"↑":"↓"} {Math.abs(monitorInfo.varioMs).toFixed(1)} m/s</span>
                 </div>
               )}
             </div>
@@ -1808,12 +1879,6 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
   const [zoomLevel, setZoomLevel] = useState(1);
   const [panPos, setPanPos] = useState(0.5);
   const [zoomPickerOpen, setZoomPickerOpen] = useState(false);
-  // "Monitor"-Button unterhalb des Profils: blendet eine Live-Anzeige oben
-  // links im Profil ein/aus (Höhe üM, Geschwindigkeit, Vario an der aktuell
-  // markierten Position — Wiedergabe-Position während der Kino-Wiedergabe,
-  // sonst die Fenstermitte), analog zum Distanz-/Steigen-Sinken-Badge auf
-  // der Karte oben.
-  const [showMonitor, setShowMonitor] = useState(false);
   const viewScale = zoomLevel;
   // panPos (0-1) is the window's CENTRE position across the whole flight —
   // 0 puts the centre exactly at the start, 1 exactly at landing. This is
@@ -1859,30 +1924,6 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
   // moment, effectively running faster or slower than the map.
   const playbackDistanceScaled = playbackDistanceKm != null ? playbackDistanceKm * scale : null;
 
-  // Werte für den "Monitor" (siehe showMonitor oben): Höhe üM direkt vom
-  // nächstliegenden Trackpunkt, Geschwindigkeit/Vario über ein kurzes, um
-  // diesen Punkt zentriertes Zeitfenster (gleiches Prinzip wie
-  // CLIMB_WINDOW_SEC anderswo) statt des rohen Punkt-zu-Punkt-Sprungs, damit
-  // ein einzelner GPS-/Höhenausreisser die Anzeige nicht springen lässt.
-  const monitorInfo = useMemo(() => {
-    if (!showMonitor || !track.length || !totalDist) return null;
-    const visStart = viewStart * totalDist;
-    const visEnd = visStart + totalDist/viewScale;
-    const centerDist = (isPlaybackActive && playbackDistanceScaled != null) ? playbackDistanceScaled : (visStart+visEnd)/2;
-    let ci = 0, cd = Infinity;
-    for (let i=0;i<distances.length;i++) { const diff = Math.abs(distances[i]-centerDist); if (diff<cd) { cd=diff; ci=i; } }
-    const alt = track[ci]?.gpsAlt;
-    if (alt == null) return null;
-    const t0 = track[ci].timeSec;
-    let lo = ci, hi = ci;
-    while (lo > 0 && t0 - track[lo-1].timeSec < CLIMB_WINDOW_SEC) lo--;
-    while (hi < track.length-1 && track[hi+1].timeSec - t0 < CLIMB_WINDOW_SEC) hi++;
-    const dt = track[hi].timeSec - track[lo].timeSec;
-    const speedKmh = dt>0 ? (haversineDistKm(track[lo], track[hi]) || 0)/(dt/3600) : 0;
-    const varioMs = dt>0 ? (track[hi].gpsAlt-track[lo].gpsAlt)/dt : 0;
-    return { alt, speedKmh, varioMs };
-  }, [showMonitor, track, distances, totalDist, viewStart, viewScale, isPlaybackActive, playbackDistanceScaled]);
-
   // Cine-playback follow: while zoomed in, keep the playback cursor fixed
   // in the centre of the window and let the profile scroll underneath it
   // continuously, every frame — not just jump to a fresh same-size window
@@ -1898,7 +1939,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     setPanPos(Math.max(0, Math.min(1, posFrac)));
   }, [playbackDistanceScaled, isPlaybackActive, playbackPhase, zoomLevel, totalDist]);
 
-  useEffect(() => { setZoomLevel(1); setPanPos(0.5); setShowMonitor(false); }, [flight?.id]);
+  useEffect(() => { setZoomLevel(1); setPanPos(0.5); }, [flight?.id]);
   useEffect(() => {
     profileZoomActive = zoomLevel > 1;
     return () => { profileZoomActive = false; };
@@ -2221,15 +2262,8 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
       <div style={{marginBottom:6}}>
         <div style={{fontSize:10,fontWeight:700,color:"#7dd3fc",letterSpacing:1.5,textTransform:"uppercase"}}>Höhenprofil</div>
       </div>
-      <div style={{position:"relative",borderRadius:14,overflow:"hidden",border:"1px solid rgba(100,180,255,0.12)",background:"#040e20"}}>
+      <div style={{borderRadius:14,overflow:"hidden",border:"1px solid rgba(100,180,255,0.12)",background:"#040e20"}}>
         <canvas ref={canvasRef} style={{width:"100%",height:160,display:"block",touchAction:zoomLevel>1?"none":"auto"}} />
-        {monitorInfo && (
-          <div style={{position:"absolute",top:8,left:8,background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.5)",borderRadius:8,padding:"4px 9px",fontSize:12,fontWeight:700,display:"flex",flexDirection:"column",gap:2,pointerEvents:"none"}}>
-            <span style={{color:"#7dd3fc"}}>⬆ {Math.round(monitorInfo.alt)} m</span>
-            <span style={{color:"#e8f4fd"}}>➤ {Math.round(monitorInfo.speedKmh)} km/h</span>
-            <span style={{color:monitorInfo.varioMs>=0?"#4ade80":"#f87171"}}>{monitorInfo.varioMs>=0?"↑":"↓"} {Math.abs(monitorInfo.varioMs).toFixed(1)} m/s</span>
-          </div>
-        )}
       </div>
       {controlsSlot && ReactDOM.createPortal(
         <>
@@ -2262,16 +2296,6 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
               ↺
             </button>
           )}
-          {/* Schaltet die Höhe/Geschwindigkeit/Vario-Anzeige oben links im
-              Profil (monitorInfo/showMonitor oben) ein/aus — Icon-only wie
-              Steigen/Sinken (↑↓) und die Zurücksetzen-Buttons, um in der
-              gemeinsamen Button-Zeile (jetzt bis zu 8 Kacheln) nicht zu breit
-              zu werden. */}
-          <button onClick={()=>setShowMonitor(m=>!m)}
-            title={showMonitor?"Monitor ausblenden":"Monitor anzeigen (Höhe/Geschwindigkeit/Vario)"}
-            style={{flex:"0.85 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showMonitor?"rgba(125,211,252,0.25)":"rgba(125,211,252,0.1)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,color:"#7dd3fc",fontSize:14,fontWeight:700,cursor:"pointer"}}>
-            📊
-          </button>
         </>,
         controlsSlot
       )}
