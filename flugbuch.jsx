@@ -172,6 +172,39 @@ const CLIMB_WINDOW_SEC_20 = 20;
 // extremsten Manöver keine höheren Vertikalraten.
 const PLAUSIBLE_MAX_VARIO_MS = 25;
 
+// windowedClimbSinkExtremes/computeClimbSinkPoints/maxSinkInRange (alle
+// weiter unten) prüfen PLAUSIBLE_MAX_VARIO_MS bisher nur auf die über das
+// ganze Fenster (3s/20s) GEMITTELTE Rate. Ein einzelner, extrem
+// unplausibler Ausreisser zwischen zwei aufeinanderfolgenden B-Records
+// (z.B. ein einmaliger Mehrwegeffekt: -42 m in 1 Sekunde) rutscht dabei oft
+// unbemerkt durch, weil die Mittelung über das ganze Fenster ihn verdünnt
+// (-42 m über 1s sind implausibel, aber über 3s gemittelt nur noch
+// -14 m/s — unter der Schwelle). Diese Präfixsumme markiert stattdessen
+// jeden einzelnen ROHEN Schritt zwischen zwei direkt aufeinanderfolgenden
+// Trackpunkten, der für sich allein schon jenseits von
+// PLAUSIBLE_MAX_VARIO_MS liegt — unabhängig von jeder Fenstergrösse —,
+// damit ein Fenster, das einen solchen Ausreisser-Schritt enthält, immer
+// verworfen wird, statt einen künstlich "plausibel" wirkenden Mittelwert zu
+// liefern. prefix[k] = Anzahl Ausreisser-Schritte unter den Schritten
+// 0..k-1; ein Fenster [lo,hi) enthält einen Ausreisser, wenn
+// prefix[hi]-prefix[lo] > 0 ist (siehe altitudeGlitchWindowOverlaps
+// direkt darunter).
+function buildAltitudeGlitchPrefix(track) {
+  const n = track.length;
+  const prefix = new Array(n).fill(0);
+  for (let k = 0; k < n - 1; k++) {
+    const dt = track[k+1].timeSec - track[k].timeSec;
+    const rate = dt > 0 ? (track[k+1].gpsAlt - track[k].gpsAlt) / dt : 0;
+    const isGlitch = dt > 0 && Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS;
+    prefix[k+1] = prefix[k] + (isGlitch ? 1 : 0);
+  }
+  return prefix;
+}
+// Enthält der Schritt-Bereich [lo,hi) mindestens einen Ausreisser-Schritt?
+function altitudeGlitchWindowOverlaps(prefix, lo, hi) {
+  return (prefix[hi] - prefix[lo]) > 0;
+}
+
 // Aufsummierte Kursänderung zwischen zwei Trackpunkt-Indizes — Grundlage der
 // Spiralen-/Wingover-Erkennung in windowedClimbSinkExtremes und
 // computeClimbSinkPoints unten. Analog zu circlingTurnSumDeg weiter unten in
@@ -223,7 +256,11 @@ const MANEUVER_TURN_RATE_DEG_S = 40;
 // klar noch zum Manöver — eine rein fensterlokale Prüfung liess solche
 // Ränder früher als "normales Sinken" durchrutschen und meldete dort
 // fälschlich zweistellige Sinkraten als Max.Sinken des ganzen Flugs.
-function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix) {
+// glitchPrefix (siehe buildAltitudeGlitchPrefix weiter oben): verwirft
+// zusätzlich jedes Fenster, das einen einzelnen unplausiblen rohen
+// Höhensprung enthält, statt sich allein auf die über das Fenster
+// gemittelte (und damit verdünnte) Rate zu verlassen.
+function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix, glitchPrefix) {
   let maxRate = -Infinity, minRate = Infinity;
   let j = 0;
   for (let i=0; i<track.length; i++) {
@@ -236,6 +273,7 @@ function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix) {
     if (dt <= 0) continue;
     const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
+    if (altitudeGlitchWindowOverlaps(glitchPrefix, i, j)) continue; // einzelner unplausibler Höhensprung im Fenster versteckt, ignorieren
     if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover, ignorieren
     if (rate > maxRate) maxRate = rate;
     if (rate < minRate) minRate = rate;
@@ -248,11 +286,14 @@ function computeClimbSinkStats(track) {
   // buildManeuverPrefix weiter unten) und für beide Fenstergrössen
   // wiederverwenden, statt sie separat je Fenster neu zu berechnen.
   const maneuverPrefix = buildManeuverPrefix(track);
+  // Dito für einzelne unplausible rohe Höhensprünge (siehe
+  // buildAltitudeGlitchPrefix weiter oben).
+  const glitchPrefix = buildAltitudeGlitchPrefix(track);
   // Max.Steigen / Max.Sinken: nicht mehr der rohe Punkt-zu-Punkt-Sprung
   // (der war schutzlos einem einzelnen GPS-Höhenausreisser ausgesetzt),
   // sondern wie bei Max Speed über ein kurzes gleitendes 3-Sekunden-Fenster
   // plus Plausibilitätsgrenze.
-  const { maxRate: maxClimbRaw, minRate: maxSinkRaw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC, maneuverPrefix);
+  const { maxRate: maxClimbRaw, minRate: maxSinkRaw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC, maneuverPrefix, glitchPrefix);
   const maxClimb = isFinite(maxClimbRaw) ? +maxClimbRaw.toFixed(1) : 0;
   const maxSinkRate = isFinite(maxSinkRaw) ? +maxSinkRaw.toFixed(1) : 0;
   // "Max.Steigen 20s": gleiches Fensterprinzip, aber mit dem in Wettbewerbs-/
@@ -260,7 +301,7 @@ function computeClimbSinkStats(track) {
   // eigener, separater Wert geführt, da die beiden Fenster unterschiedliche
   // Vergleiche bedienen sollen (Max.Steigen dieser App vs. extern berichtete
   // 20s-Steigwerte).
-  const { maxRate: maxClimb20Raw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC_20, maneuverPrefix);
+  const { maxRate: maxClimb20Raw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC_20, maneuverPrefix, glitchPrefix);
   const maxClimb20 = isFinite(maxClimb20Raw) ? +maxClimb20Raw.toFixed(1) : 0;
   return { maxClimb, maxClimb20, maxSinkRate };
 }
@@ -278,8 +319,10 @@ function computeClimbSinkPoints(track, windowSec) {
   const candidates = [];
   // Siehe windowedClimbSinkExtremes oben: Manöver-Ausschluss anhand der
   // ganzen, lückentoleranten Manöver-Abschnitte statt einer rein
-  // fensterlokalen Kursänderungs-Prüfung.
+  // fensterlokalen Kursänderungs-Prüfung, plus derselbe Ausschluss
+  // einzelner unplausibler roher Höhensprünge.
   const maneuverPrefix = buildManeuverPrefix(track);
+  const glitchPrefix = buildAltitudeGlitchPrefix(track);
   let j = 0;
   for (let i=0; i<track.length; i++) {
     const t0 = track[i].timeSec;
@@ -291,6 +334,7 @@ function computeClimbSinkPoints(track, windowSec) {
     if (dt <= 0) continue;
     const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
+    if (altitudeGlitchWindowOverlaps(glitchPrefix, i, j)) continue; // einzelner unplausibler Höhensprung im Fenster versteckt, ignorieren
     if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover, ignorieren
     const mid = Math.round((i+j)/2);
     candidates.push({ idx: mid, rate, timeSec: track[mid].timeSec });
@@ -374,8 +418,12 @@ function turnNetSumDegBetween(track, lo, hi) {
 // Stärkstes Sinken innerhalb eines vorgegebenen Indexbereichs — wie
 // windowedClimbSinkExtremes oben, aber ohne dessen Manöver-Ausschluss (hier
 // soll ja gerade das Manöver selbst vermessen werden) und auf [lo,hi] statt
-// den ganzen Track beschränkt.
-function maxSinkInRange(track, lo, hi) {
+// den ganzen Track beschränkt. glitchPrefix (siehe buildAltitudeGlitchPrefix
+// weiter oben) verwirft aber auch hier ein Fenster, das einen einzelnen
+// unplausiblen rohen Höhensprung versteckt — sonst könnte z.B. ein
+// einmaliger GPS-Ausreisser mitten in einer echten Spirale deren
+// Max.Sinken künstlich weiter nach oben treiben.
+function maxSinkInRange(track, lo, hi, glitchPrefix) {
   let minRate = Infinity, j = lo;
   for (let i = lo; i <= hi; i++) {
     const t0 = track[i].timeSec, target = t0 + CLIMB_WINDOW_SEC;
@@ -387,6 +435,7 @@ function maxSinkInRange(track, lo, hi) {
     if (dt <= 0) continue;
     const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
+    if (altitudeGlitchWindowOverlaps(glitchPrefix, i, j)) continue; // einzelner unplausibler Höhensprung im Fenster versteckt, ignorieren
     if (rate < minRate) minRate = rate;
   }
   return isFinite(minRate) ? minRate : 0;
@@ -495,6 +544,9 @@ function maneuverWindowOverlaps(prefix, lo, hi) {
 // abgebaute Höhe).
 function classifyManeuverRuns(track) {
   const spiralen = [], wingovers = [];
+  // Einmal für den ganzen Track ermitteln (siehe buildAltitudeGlitchPrefix
+  // weiter oben) und für jede Sequenz wiederverwenden.
+  const glitchPrefix = buildAltitudeGlitchPrefix(track);
   for (const { startIdx, endIdx } of findRawManeuverRuns(track)) {
     const durationSec = track[endIdx].timeSec - track[startIdx].timeSec;
     const totalTurn = turnSumDegBetween(track, startIdx, endIdx);
@@ -503,7 +555,7 @@ function classifyManeuverRuns(track) {
     if (avgSink > MANEUVER_MIN_AVG_SINK) continue; // kein nennenswerter Höhenverlust -> keine echte Spirale/kein echter Wingover
     const netTurn = turnNetSumDegBetween(track, startIdx, endIdx);
     const ratio = totalTurn > 0 ? Math.abs(netTurn) / totalTurn : 0;
-    const maxSink = +maxSinkInRange(track, startIdx, endIdx).toFixed(1);
+    const maxSink = +maxSinkInRange(track, startIdx, endIdx, glitchPrefix).toFixed(1);
     const hoehenabbau = Math.round(Math.max(0, track[startIdx].gpsAlt - track[endIdx].gpsAlt));
     if (ratio >= SPIRAL_NET_RATIO) {
       if (totalTurn < SPIRAL_MIN_TURN_DEG) continue; // "Kreisen" braucht mind. einen vollen Kreis, sonst zu kurz/uneindeutig
