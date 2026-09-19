@@ -783,7 +783,7 @@ const SPEED_CORRIDOR_DEG = 15;
 // ~82 km/h — 100 km/h lässt trotzdem grosszügig Spielraum nach oben.
 const PLAUSIBLE_MAX_SPEED_KMH = 100;
 
-// isWindowStraight (Kursprüfung) allein erkennt zwei wiederkehrende
+// isWindowStraight (Kursprüfung) allein erkennt drei wiederkehrende
 // Fehlerbilder nicht, weil die Gesamtpeilung des Fensters trotzdem "gerade
 // genug" bleiben kann:
 //   1. Ein Empfangsloch (fehlende Fixes für mehrere Sekunden, meist am
@@ -791,17 +791,24 @@ const PLAUSIBLE_MAX_SPEED_KMH = 100;
 //      die Distanz zum nächsten Fix ist real, aber der GPS-Weg dazwischen
 //      fehlt — die berechnete Geschwindigkeit liegt dadurch weit über der
 //      tatsächlich geflogenen.
-//   2. Ein springender Einzelfix (Mehrwegempfang/Reflexion, typisch an
-//      Startplatz-Geländekanten oder beim Landen zwischen Bäumen/
-//      Gebäuden/Menschen): ein Schritt liegt weit über der Geschwindigkeit
-//      der unmittelbaren Nachbarschaft, obwohl ringsherum normal geflogen
-//      wird — ein Gleitschirm kann innerhalb einer einzigen Fix-Periode
-//      nicht so stark beschleunigen/abbremsen.
+//   2. Ein GPS-Sprung (Mehrwegempfang/Reflexion oder kurzer Fix-Verlust
+//      mit anschliessendem Snap zur echten Position — typisch an
+//      Startplatz-Geländekanten, siehe Flug vom 04.10.2016/Chalvet: dort
+//      springt der Track 59s nach dem Start 1529m in nur 3s, ≈1835 km/h):
+//      ein einzelner Rohschritt impliziert für sich schon eine physikalisch
+//      unmögliche Geschwindigkeit — unabhängig davon, ob die Zeitlücke
+//      dabei auffällig gross war oder (wie hier) nur knapp über dem
+//      normalen Fix-Abstand lag.
+//   3. Ein springender Einzelfix, der zwar (noch) unterhalb der harten
+//      Plausibilitätsgrenze bleibt, aber deutlich über der Geschwindigkeit
+//      der unmittelbaren Nachbarschaft liegt, obwohl ringsherum normal
+//      geflogen wird — ein Gleitschirm kann innerhalb einer einzigen
+//      Fix-Periode nicht so stark beschleunigen/abbremsen.
 // Zusätzlich gilt physikalisch: Ohne Motor sinkt ein Gleitschirm im
 // Geradeausflug immer — hält ein Fenster mit auffällig hoher Geschwindigkeit
 // über einen längeren Zeitraum praktisch die Höhe (oder gewinnt sogar
 // welche), ist das kein Flug, sondern z.B. ein GPS-Fix, der noch/wieder in
-// einem Fahrzeug mitlief. Alle drei Muster wurden an über 1000 realen
+// einem Fahrzeug mitlief. Alle vier Muster wurden an über 1000 realen
 // IGC-Files aus diesem Flugbuch verifiziert: legitime schnelle
 // Geradeausflüge (starker Rückenwind) zeigen einen glatten
 // Geschwindigkeitsverlauf UND einen zur Geschwindigkeit passenden
@@ -830,14 +837,29 @@ function medianFixIntervalSec(track) {
   dts.sort((a,b) => a-b);
   return dts[Math.floor(dts.length/2)];
 }
-// Fehlerbild 1 (Empfangsloch): liegt irgendwo im Fenster eine Lücke, die
-// deutlich über dem für diesen Track üblichen Fix-Abstand liegt, ist die
-// im Fenster gemessene Distanz nicht vertrauenswürdig.
-function hasReceptionGap(track, lo, hi, medianDt) {
+// Einmal pro Track berechnet: für jeden Rohschritt k→k+1, ist er ein
+// "Bruch" — Fehlerbild 1 (Empfangsloch) ODER Fehlerbild 2 (physikalisch
+// unplausible Distanz für die verstrichene Zeit, auch bei normal wirkender
+// Zeitlücke)? Wird unten nicht nur benutzt, um das direkt betroffene
+// Speed-Fenster zu verwerfen, sondern auch um die WEITERE Umgebung
+// (isSpeedLocallyPlausible, hasPlausibleDescent) als kontaminiert zu
+// behandeln, wenn ein Bruch irgendwo in ihrem Radius liegt — ein einzelner
+// Sprung wie beim Flug vom 04.10.2016 macht sonst auch die Höhen-
+// Plausibilität für ein unabhängiges, nahegelegenes Fenster unglaubwürdig.
+function computeSpeedBreaks(track, medianDt) {
   const gapLimitSec = Math.max(GAP_MIN_SEC, medianDt * GAP_FACTOR);
-  for (let k = lo; k < hi; k++) {
-    if ((track[k+1].timeSec - track[k].timeSec) > gapLimitSec) return true;
+  const breaks = new Array(track.length - 1).fill(false);
+  for (let k = 0; k < track.length - 1; k++) {
+    const dt = track[k+1].timeSec - track[k].timeSec;
+    if (dt <= 0) continue; // doppelter/rückwärts laufender Zeitstempel — kein auswertbarer Schritt
+    if (dt > gapLimitSec) { breaks[k] = true; continue; }
+    const distKm = haversineDistKm(track[k], track[k+1]) || 0;
+    if ((distKm / (dt/3600)) > PLAUSIBLE_MAX_SPEED_KMH) breaks[k] = true;
   }
+  return breaks;
+}
+function rangeHasBreak(breaks, lo, hi) {
+  for (let k = lo; k < hi; k++) if (breaks[k]) return true;
   return false;
 }
 // Punkt-zu-Punkt-Geschwindigkeit für jeden Schritt einmal vorab berechnen —
@@ -851,15 +873,17 @@ function stepSpeedsKmh(track) {
   }
   return speeds;
 }
-// Fehlerbild 2 (springender Einzelfix): passt die im Fenster gemessene
+// Fehlerbild 3 (springender Einzelfix): passt die im Fenster gemessene
 // Geschwindigkeit zum Tempo der unmittelbaren Nachbarschaft (±20s,
-// abzüglich des Fensters selbst), oder sticht sie deutlich heraus?
-function isSpeedLocallyPlausible(track, speeds, i, lo, hi, windowSpeedKmh) {
+// abzüglich des Fensters selbst und bekannter Brüche), oder sticht sie
+// deutlich heraus?
+function isSpeedLocallyPlausible(track, speeds, breaks, i, lo, hi, windowSpeedKmh) {
   if (windowSpeedKmh < LOCAL_MIN_KMH) return true; // Schwankung im normalen Bereich ist kein Ausreisser
   const { lo: nlo, hi: nhi } = timeWindowBounds(track, i, LOCAL_CONTEXT_SEC);
   const context = [];
   for (let k = nlo; k < nhi; k++) {
     if (k >= lo && k < hi) continue; // das Fenster gehört nicht zu seinem eigenen Vergleichsmassstab
+    if (breaks[k]) continue; // kontaminierter Vergleichswert — kein normales Tempo
     context.push(speeds[k]);
   }
   if (context.length < 3) return true; // zu wenig Kontext (z.B. Track-Rand) — nicht verwerfen
@@ -870,10 +894,15 @@ function isSpeedLocallyPlausible(track, speeds, i, lo, hi, windowSpeedKmh) {
 // Physik-Check: Ohne Höhenverlust kein echter Geradeausflug bei dieser
 // Geschwindigkeit — über einen grosszügigen ±45s-Radius (kurzfristiges
 // GPS-Höhenrauschen mittelt sich darüber weitgehend heraus) muss die Höhe
-// tatsächlich gesunken sein.
-function hasPlausibleDescent(track, i, windowSpeedKmh) {
+// tatsächlich gesunken sein. Liegt irgendwo in diesem Radius ein bekannter
+// Bruch, ist der Höhenvergleich zwischen den beiden Rand-Fixes nicht
+// vertrauenswürdig (sie könnten aus zwei unzusammenhängenden Trackstücken
+// stammen) — dann lieber vorsichtig ausklammern statt fälschlich
+// durchwinken.
+function hasPlausibleDescent(track, breaks, i, windowSpeedKmh) {
   if (windowSpeedKmh < LOCAL_MIN_KMH) return true;
   const { lo: nlo, hi: nhi } = timeWindowBounds(track, i, DESCENT_CONTEXT_SEC);
+  if (rangeHasBreak(breaks, nlo, nhi)) return false;
   const altLoss = track[nlo].gpsAlt - track[nhi].gpsAlt;
   return altLoss > FLAT_ALT_TOLERANCE_M;
 }
@@ -883,16 +912,17 @@ function computeMaxStraightSpeedKmh(track) {
   let maxSpeed = 0;
   const medianDt = medianFixIntervalSec(track);
   const speeds = stepSpeedsKmh(track);
+  const breaks = computeSpeedBreaks(track, medianDt);
   for (let i = 1; i < track.length - 1; i++) {
     const { lo, hi } = timeWindowBounds(track, i, SPEED_WINDOW_SEC);
     if (hi === lo) continue;
     if (!isWindowStraight(track, lo, hi, SPEED_CORRIDOR_DEG)) continue; // Kurve/Spirale/Wingover/Thermikkreis — ausklammern
-    if (hasReceptionGap(track, lo, hi, medianDt)) continue; // Empfangsloch im Fenster — ausklammern
+    if (rangeHasBreak(breaks, lo, hi)) continue; // Empfangsloch oder GPS-Sprung im Fenster — ausklammern
     const dt = track[hi].timeSec - track[lo].timeSec;
     const speedKmh = (haversineDistKm(track[lo], track[hi]) || 0) / (dt / 3600);
     if (speedKmh > PLAUSIBLE_MAX_SPEED_KMH) continue;
-    if (!isSpeedLocallyPlausible(track, speeds, i, lo, hi, speedKmh)) continue; // springender Einzelfix — ausklammern
-    if (!hasPlausibleDescent(track, i, speedKmh)) continue; // kein zur Geschwindigkeit passender Höhenverlust — ausklammern
+    if (!isSpeedLocallyPlausible(track, speeds, breaks, i, lo, hi, speedKmh)) continue; // springender Einzelfix — ausklammern
+    if (!hasPlausibleDescent(track, breaks, i, speedKmh)) continue; // kein zur Geschwindigkeit passender Höhenverlust — ausklammern
     if (speedKmh > maxSpeed) maxSpeed = speedKmh;
   }
   return +maxSpeed.toFixed(1);
