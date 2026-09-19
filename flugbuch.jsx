@@ -615,10 +615,23 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   const startAlt = track[0].gpsAlt, endAlt = track[track.length-1].gpsAlt;
   const startPt = track[0], endPt = track[track.length-1];
   const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(track);
+  // Thermal count und Höhengewinn unten liefen bisher OHNE den Schutz, den
+  // Max.Steigen/-20s/Max.Sinken oben längst haben (siehe
+  // buildAltitudeGlitchPrefix/PLAUSIBLE_MAX_VARIO_MS weiter oben in dieser
+  // Datei): ein einzelner unplausibler roher Höhensprung (Mehrwegempfang,
+  // kurzer Fix-Verlust) floss hier direkt in die Summe bzw. die
+  // Thermik-Schwelle ein. An über 1000 realen Flügen aus diesem Flugbuch
+  // verifiziert: das trieb den gemeldeten Höhengewinn bei einzelnen Flügen
+  // um bis zu 340m fälschlich nach oben. glitchPrefix wird hier separat
+  // (statt in computeClimbSinkStats mitgeliefert) neu berechnet — eine
+  // zusätzliche O(n)-Passe über den Track, aber ohne dessen Signatur
+  // anzufassen.
+  const glitchPrefix = buildAltitudeGlitchPrefix(track);
   // Thermal count (separate from the climb/sink rate calc above) — counts
   // sustained climb segments using a simple threshold-crossing detector.
   const thermals=[]; let inT=false, tStart=null;
   for(let i=1;i<track.length;i++){
+    if (altitudeGlitchWindowOverlaps(glitchPrefix, i-1, i)) continue; // einzelner Höhensprung — ausklammern
     const rate=(track[i].gpsAlt-track[i-1].gpsAlt)/(track[i].timeSec-track[i-1].timeSec||1);
     if(rate>0.5&&!inT){inT=true;tStart=i;}
     else if(rate<=0.5&&inT){inT=false;if(tStart)thermals.push({start:tStart,end:i});}
@@ -630,6 +643,7 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   // all up rather than only counting the single best one.
   let totalGain = 0;
   for (let i=1;i<track.length;i++) {
+    if (altitudeGlitchWindowOverlaps(glitchPrefix, i-1, i)) continue; // einzelner Höhensprung — ausklammern
     const diff = track[i].gpsAlt - track[i-1].gpsAlt;
     if (diff > 0) totalGain += diff;
   }
@@ -778,18 +792,178 @@ const SPEED_CORRIDOR_DEG = 15;
 // Reine Sicherheitsmarge für den unwahrscheinlichen Fall, dass trotz allem
 // noch ein Ausreisser durchrutscht — ein Gleitschirm erreicht auch im
 // Vollgas-Speedbar-Geradeausflug mit starkem Rückenwind keine höheren
-// GPS-Bodengeschwindigkeiten.
-const PLAUSIBLE_MAX_SPEED_KMH = 120;
+// GPS-Bodengeschwindigkeiten. Über 1000 reale Flüge aus diesem Flugbuch
+// wurden geprüft: kein einziger verifiziert echter Geradeausflug lag über
+// ~82 km/h — 100 km/h lässt trotzdem grosszügig Spielraum nach oben.
+const PLAUSIBLE_MAX_SPEED_KMH = 100;
+
+// isWindowStraight (Kursprüfung) allein erkennt drei wiederkehrende
+// Fehlerbilder nicht, weil die Gesamtpeilung des Fensters trotzdem "gerade
+// genug" bleiben kann:
+//   1. Ein Empfangsloch (fehlende Fixes für mehrere Sekunden, meist am
+//      Start-/Landeplatz oder mitten im Flug bei schlechter Satsicht):
+//      die Distanz zum nächsten Fix ist real, aber der GPS-Weg dazwischen
+//      fehlt — die berechnete Geschwindigkeit liegt dadurch weit über der
+//      tatsächlich geflogenen.
+//   2. Ein GPS-Sprung (Mehrwegempfang/Reflexion oder kurzer Fix-Verlust
+//      mit anschliessendem Snap zur echten Position — typisch an
+//      Startplatz-Geländekanten, siehe Flug vom 04.10.2016/Chalvet: dort
+//      springt der Track 59s nach dem Start 1529m in nur 3s, ≈1835 km/h):
+//      ein einzelner Rohschritt impliziert für sich schon eine physikalisch
+//      unmögliche Geschwindigkeit — unabhängig davon, ob die Zeitlücke
+//      dabei auffällig gross war oder (wie hier) nur knapp über dem
+//      normalen Fix-Abstand lag.
+//   3. Ein springender Einzelfix, der zwar (noch) unterhalb der harten
+//      Plausibilitätsgrenze bleibt, aber deutlich über der Geschwindigkeit
+//      der unmittelbaren Nachbarschaft liegt, obwohl ringsherum normal
+//      geflogen wird — ein Gleitschirm kann innerhalb einer einzigen
+//      Fix-Periode nicht so stark beschleunigen/abbremsen.
+// Zusätzlich gilt physikalisch: Ohne Motor sinkt ein Gleitschirm im
+// Geradeausflug immer — hält ein Fenster mit auffällig hoher Geschwindigkeit
+// über einen längeren Zeitraum praktisch die Höhe (oder gewinnt sogar
+// welche), ist das kein Flug, sondern z.B. ein GPS-Fix, der noch/wieder in
+// einem Fahrzeug mitlief. Alle vier Muster wurden an über 1000 realen
+// IGC-Files aus diesem Flugbuch verifiziert: legitime schnelle
+// Geradeausflüge (starker Rückenwind) zeigen einen glatten
+// Geschwindigkeitsverlauf UND einen zur Geschwindigkeit passenden
+// Höhenverlust, auch wenn ein einzelnes 4-6s-Fenster durch GPS-Rauschen
+// mal kaum Höhenänderung zeigt (z.B. am Übergang von einem schnellen
+// Abflug in eine Thermik).
+const GAP_FACTOR = 3;          // wie viel länger als der übliche Fix-Abstand ein Loch sein darf
+const GAP_MIN_SEC = 3;         // Mindest-Schwelle, auch bei 1Hz-Loggern
+const LOCAL_CONTEXT_SEC = 20;  // Radius für den Vergleich mit der unmittelbaren Nachbarschaft
+const LOCAL_SPEED_FACTOR = 1.5; // ein Fenster darf höchstens so viel schneller sein als sein Umfeld
+const LOCAL_MIN_KMH = 55;      // unterhalb davon ist Schwankung normal, kein Ausreisser
+const DESCENT_CONTEXT_SEC = 45; // längerer Radius für die Höhen-Plausibilität (Höhe ist verrauscht/träge)
+const FLAT_ALT_TOLERANCE_M = 5; // GPS-Höhe ist ohnehin verrauscht — erst darüber zählt es als echter Verlust
+
+// Median-Zeitabstand zwischen aufeinanderfolgenden Trackpunkten — Referenz
+// dafür, was für DIESEN Track (1s-, 2s- oder 4s-Logger) ein "normaler"
+// Fix-Abstand ist, statt einen festen Sekundenwert für alle Logger
+// anzunehmen.
+function medianFixIntervalSec(track) {
+  const dts = [];
+  for (let k = 1; k < track.length; k++) {
+    const dt = track[k].timeSec - track[k-1].timeSec;
+    if (dt > 0) dts.push(dt);
+  }
+  if (!dts.length) return 1;
+  dts.sort((a,b) => a-b);
+  return dts[Math.floor(dts.length/2)];
+}
+// Einmal pro Track berechnet: für jeden Rohschritt k→k+1, ist er ein
+// "Bruch" — Fehlerbild 1 (Empfangsloch) ODER Fehlerbild 2 (physikalisch
+// unplausible Distanz für die verstrichene Zeit, auch bei normal wirkender
+// Zeitlücke)? Wird unten nicht nur benutzt, um das direkt betroffene
+// Speed-Fenster zu verwerfen, sondern auch um die WEITERE Umgebung
+// (isSpeedLocallyPlausible, hasPlausibleDescent) als kontaminiert zu
+// behandeln, wenn ein Bruch irgendwo in ihrem Radius liegt — ein einzelner
+// Sprung wie beim Flug vom 04.10.2016 macht sonst auch die Höhen-
+// Plausibilität für ein unabhängiges, nahegelegenes Fenster unglaubwürdig.
+function computeSpeedBreaks(track, medianDt) {
+  const gapLimitSec = Math.max(GAP_MIN_SEC, medianDt * GAP_FACTOR);
+  const breaks = new Array(track.length - 1).fill(false);
+  for (let k = 0; k < track.length - 1; k++) {
+    const dt = track[k+1].timeSec - track[k].timeSec;
+    if (dt <= 0) continue; // doppelter/rückwärts laufender Zeitstempel — kein auswertbarer Schritt
+    if (dt > gapLimitSec) { breaks[k] = true; continue; }
+    const distKm = haversineDistKm(track[k], track[k+1]) || 0;
+    if ((distKm / (dt/3600)) > PLAUSIBLE_MAX_SPEED_KMH) breaks[k] = true;
+  }
+  return breaks;
+}
+function rangeHasBreak(breaks, lo, hi) {
+  for (let k = lo; k < hi; k++) if (breaks[k]) return true;
+  return false;
+}
+// Wie computeSpeedBreaks oben, aber als sortierte Liste von Zeitstempeln
+// statt eines index-basierten Arrays — für computeOpenDistancePath weiter
+// unten in dieser Datei, das mit einer (Douglas-Peucker-)vereinfachten
+// Kandidatenmenge arbeitet, deren Punkte nicht mehr direkt den Original-
+// Indizes entsprechen. Zeitstempel bleiben dagegen für jeden Kandidaten
+// erhalten, daher der Umweg über die Zeit statt den Index. Dieselbe
+// zugrundeliegende Bruch-Erkennung wie bei Max Speed, damit ein GPS-Sprung
+// überall im Flugbuch gleich behandelt wird.
+function computeTrackBreakTimes(track) {
+  const medianDt = medianFixIntervalSec(track);
+  const breaks = computeSpeedBreaks(track, medianDt);
+  const times = [];
+  for (let k = 0; k < breaks.length; k++) if (breaks[k]) times.push(track[k].timeSec);
+  return times;
+}
+// Binärsuche: liegt irgendein Bruch-Zeitstempel echt zwischen lo und hi?
+// sortedBreakTimes ist von computeTrackBreakTimes bereits chronologisch
+// (aufsteigend) geliefert, da der Track selbst chronologisch ist.
+function anyBreakBetween(sortedBreakTimes, lo, hi) {
+  if (!sortedBreakTimes.length) return false;
+  let left = 0, right = sortedBreakTimes.length;
+  while (left < right) {
+    const mid = (left + right) >> 1;
+    if (sortedBreakTimes[mid] < lo) left = mid + 1; else right = mid;
+  }
+  return left < sortedBreakTimes.length && sortedBreakTimes[left] < hi;
+}
+// Punkt-zu-Punkt-Geschwindigkeit für jeden Schritt einmal vorab berechnen —
+// Grundlage für den Nachbarschaftsvergleich in isSpeedLocallyPlausible.
+function stepSpeedsKmh(track) {
+  const speeds = new Array(track.length - 1);
+  for (let k = 0; k < track.length - 1; k++) {
+    const dt = track[k+1].timeSec - track[k].timeSec;
+    const distKm = haversineDistKm(track[k], track[k+1]) || 0;
+    speeds[k] = dt > 0 ? distKm / (dt/3600) : 0;
+  }
+  return speeds;
+}
+// Fehlerbild 3 (springender Einzelfix): passt die im Fenster gemessene
+// Geschwindigkeit zum Tempo der unmittelbaren Nachbarschaft (±20s,
+// abzüglich des Fensters selbst und bekannter Brüche), oder sticht sie
+// deutlich heraus?
+function isSpeedLocallyPlausible(track, speeds, breaks, i, lo, hi, windowSpeedKmh) {
+  if (windowSpeedKmh < LOCAL_MIN_KMH) return true; // Schwankung im normalen Bereich ist kein Ausreisser
+  const { lo: nlo, hi: nhi } = timeWindowBounds(track, i, LOCAL_CONTEXT_SEC);
+  const context = [];
+  for (let k = nlo; k < nhi; k++) {
+    if (k >= lo && k < hi) continue; // das Fenster gehört nicht zu seinem eigenen Vergleichsmassstab
+    if (breaks[k]) continue; // kontaminierter Vergleichswert — kein normales Tempo
+    context.push(speeds[k]);
+  }
+  if (context.length < 3) return true; // zu wenig Kontext (z.B. Track-Rand) — nicht verwerfen
+  context.sort((a,b) => a-b);
+  const localMedian = context[Math.floor(context.length/2)];
+  return windowSpeedKmh <= localMedian * LOCAL_SPEED_FACTOR;
+}
+// Physik-Check: Ohne Höhenverlust kein echter Geradeausflug bei dieser
+// Geschwindigkeit — über einen grosszügigen ±45s-Radius (kurzfristiges
+// GPS-Höhenrauschen mittelt sich darüber weitgehend heraus) muss die Höhe
+// tatsächlich gesunken sein. Liegt irgendwo in diesem Radius ein bekannter
+// Bruch, ist der Höhenvergleich zwischen den beiden Rand-Fixes nicht
+// vertrauenswürdig (sie könnten aus zwei unzusammenhängenden Trackstücken
+// stammen) — dann lieber vorsichtig ausklammern statt fälschlich
+// durchwinken.
+function hasPlausibleDescent(track, breaks, i, windowSpeedKmh) {
+  if (windowSpeedKmh < LOCAL_MIN_KMH) return true;
+  const { lo: nlo, hi: nhi } = timeWindowBounds(track, i, DESCENT_CONTEXT_SEC);
+  if (rangeHasBreak(breaks, nlo, nhi)) return false;
+  const altLoss = track[nlo].gpsAlt - track[nhi].gpsAlt;
+  return altLoss > FLAT_ALT_TOLERANCE_M;
+}
+
 function computeMaxStraightSpeedKmh(track) {
   if (!track || track.length < 3) return 0;
   let maxSpeed = 0;
+  const medianDt = medianFixIntervalSec(track);
+  const speeds = stepSpeedsKmh(track);
+  const breaks = computeSpeedBreaks(track, medianDt);
   for (let i = 1; i < track.length - 1; i++) {
     const { lo, hi } = timeWindowBounds(track, i, SPEED_WINDOW_SEC);
     if (hi === lo) continue;
     if (!isWindowStraight(track, lo, hi, SPEED_CORRIDOR_DEG)) continue; // Kurve/Spirale/Wingover/Thermikkreis — ausklammern
+    if (rangeHasBreak(breaks, lo, hi)) continue; // Empfangsloch oder GPS-Sprung im Fenster — ausklammern
     const dt = track[hi].timeSec - track[lo].timeSec;
     const speedKmh = (haversineDistKm(track[lo], track[hi]) || 0) / (dt / 3600);
     if (speedKmh > PLAUSIBLE_MAX_SPEED_KMH) continue;
+    if (!isSpeedLocallyPlausible(track, speeds, breaks, i, lo, hi, speedKmh)) continue; // springender Einzelfix — ausklammern
+    if (!hasPlausibleDescent(track, breaks, i, speedKmh)) continue; // kein zur Geschwindigkeit passender Höhenverlust — ausklammern
     if (speedKmh > maxSpeed) maxSpeed = speedKmh;
   }
   return +maxSpeed.toFixed(1);
@@ -2798,6 +2972,21 @@ function computeOpenDistancePath(track) {
   const k = candidates.length;
   if (k < 2) return null;
   const dist = (i, j) => haversineDistKm(candidates[i], candidates[j]) || 0;
+  // Douglas-Peucker behält gerade GROSSE Ausreisser besonders zuverlässig
+  // (sie weichen ja per Definition am stärksten von der Gerade ab) — ein
+  // einzelner GPS-Sprung wird von simplifyTrackDP oben also nicht etwa
+  // herausgefiltert, sondern bevorzugt als "wichtiger" Kandidatenpunkt
+  // übernommen. Die freie Etappen-Optimierung unten misst reine
+  // Luftlinien-Distanz zwischen zwei beliebigen (nicht zwingend
+  // benachbarten) Kandidaten — ein solcher Sprung liefert dabei einen
+  // scheinbar perfekten, aber nie tatsächlich geflogenen Wendepunkt. An
+  // über 1000 realen Flügen aus diesem Flugbuch verifiziert: das hat die
+  // gemeldete Distanz bei einzelnen Flügen um bis zu 180km aufgebläht (der
+  // Flug bestand dabei streckenweise gar nicht aus echten Flugdaten,
+  // siehe computeSpeedBreaks weiter oben). breakTimes markiert dieselben
+  // Bruchstellen wie bei Max Speed; jede Etappe, die einen Bruch
+  // überspringen würde, ist für die DP unten gesperrt.
+  const breakTimes = computeTrackBreakTimes(track);
 
   const MAX_LEGS = 4; // bis zu 3 Wendepunkte = bis zu 4 Teilstrecken
   // best[L][i] = beste Gesamtdistanz eines Pfads mit genau L Teilstrecken,
@@ -2813,6 +3002,7 @@ function computeOpenDistancePath(track) {
       let localBest = -Infinity, localJ = -1;
       for (let j = 0; j < i; j++) {
         if (best[L-1][j] === -Infinity) continue;
+        if (anyBreakBetween(breakTimes, candidates[j].timeSec, candidates[i].timeSec)) continue; // Etappe würde einen GPS-Sprung überspringen
         const cand = best[L-1][j] + dist(j, i);
         if (cand > localBest) { localBest = cand; localJ = j; }
       }
@@ -5280,6 +5470,16 @@ function FlugbuchApp() {
   const [showRowImport, setShowRowImport] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
+  // ── TEMPORÄR: Max Speed für alle bestehenden Flüge neu berechnen ────────
+  // Einmalige Migrationshilfe, nachdem computeMaxStraightSpeedKmh robuster
+  // gegen GPS-Ausreisser gemacht wurde (Empfangslöcher, springende
+  // Einzelfixe, Höhen-Plausibilität) — bestehende Flüge behalten sonst den
+  // beim Import berechneten, alten Wert für immer. Nach einmaligem Gebrauch
+  // wieder entfernen: dieser State, der Button in headerIconButtons weiter
+  // unten und das dazugehörige Panel im JSX (Suche nach "TEMPORÄR").
+  const [showRecalcSpeed, setShowRecalcSpeed] = useState(false);
+  const [recalcSpeedRunning, setRecalcSpeedRunning] = useState(false);
+  const [recalcSpeedResult, setRecalcSpeedResult] = useState(null);
   const [csvColumns, setCsvColumns] = useState(
     CSV_COLUMN_DEFS.map(c => ({ key: c.key, enabled: true }))
   );
@@ -5422,6 +5622,77 @@ function FlugbuchApp() {
       return { ok: false, error: e };
     }
   }, []);
+
+  // TEMPORÄR — siehe showRecalcSpeed weiter oben. Liest für jeden Flug die
+  // gespeicherte IGC-Rohdatei zurück (loadRawIgcFile, siehe Dateianfang) und
+  // berechnet Max Speed, Max.Steigen/-20s/Max.Sinken, Höhengewinn sowie
+  // Distanz/Ø Speed mit dem aktuellen, robusteren analyzeIGC neu — dieselben
+  // Track-Werte, die auch ein (Re-)Import über attachIgcToFlight setzen
+  // würde. Es gelten exakt dieselben Überschreib-Regeln wie dort:
+  //   - Max Speed / Max.Steigen / Max.Steigen 20s / Max.Sinken werden IMMER
+  //     neu gesetzt (rein track-berechnete Werte, siehe attachIgcToFlight).
+  //   - Höhengewinn sowie Distanz/Ø Speed werden NUR nachgetragen, wenn sie
+  //     noch leer sind (computeDistanceSpeedBackfill) — ein bereits
+  //     erfasster, evtl. manuell korrigierter Wert wird nie überschrieben.
+  // Flüge ohne gespeicherte Rohdatei (z.B. reine PDF-Einträge oder Importe
+  // von vor der Rohdatei-Speicherung) werden übersprungen und separat
+  // gezählt statt stillschweigend ignoriert.
+  const runRecalcMaxSpeed = useCallback(async () => {
+    setRecalcSpeedRunning(true);
+    setRecalcSpeedResult(null);
+    const changed = [];
+    let noFile = 0, unchanged = 0, failed = 0;
+    const nextFlights = [];
+    for (const f of flights) {
+      try {
+        const buf = await loadRawIgcFile(f.id);
+        if (!buf) { noFile++; nextFlights.push(f); continue; }
+        const text = new TextDecoder().decode(new Uint8Array(buf));
+        const { track, date, tzOffsetHours } = parseIGC(text);
+        if (!track || track.length < 3) { failed++; nextFlights.push(f); continue; }
+        const igcData = analyzeIGC(track, tzOffsetHours, date);
+
+        const fieldChanges = [];
+        let nextMaxSpeed = f.maxSpeedKmh;
+        const oldSpeed = f.maxSpeedKmh || 0;
+        if (Math.abs(igcData.maxSpeedKmh - oldSpeed) >= 0.05) {
+          nextMaxSpeed = igcData.maxSpeedKmh;
+          fieldChanges.push(`Max Speed ${oldSpeed} → ${igcData.maxSpeedKmh} km/h`);
+        }
+
+        const cf = { ...(f.customFields||{}) };
+        const steigenNew = String(igcData.maxClimb);
+        if ((cf.maxSteigen||"") !== steigenNew) { fieldChanges.push(`Max.Steigen ${cf.maxSteigen||"–"} → ${steigenNew} m/s`); cf.maxSteigen = steigenNew; }
+        const steigen20New = String(igcData.maxClimb20);
+        if ((cf.maxSteigen20||"") !== steigen20New) { fieldChanges.push(`Max.Steigen 20s ${cf.maxSteigen20||"–"} → ${steigen20New} m/s`); cf.maxSteigen20 = steigen20New; }
+        const sinkenNew = String(igcData.maxSinkRate);
+        if ((cf.maxSinken||"") !== sinkenNew) { fieldChanges.push(`Max.Sinken ${cf.maxSinken||"–"} → ${sinkenNew} m/s`); cf.maxSinken = sinkenNew; }
+
+        if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) {
+          cf.hGew = String(igcData.totalGain);
+          fieldChanges.push(`Höhengewinn (neu) ${igcData.totalGain} m`);
+        }
+
+        let nextTotalDist = f.totalDist;
+        const backfill = computeDistanceSpeedBackfill(f.totalDist, cf, igcData.scoreDistanceKm, igcData.durationSec || f.durationSec);
+        if (backfill.distKm != null) { cf.distKm = backfill.distKm; nextTotalDist = backfill.totalDist; fieldChanges.push(`Distanz (neu) ${backfill.distKm} km`); }
+        if (backfill.kmh != null) { cf.kmh = backfill.kmh; fieldChanges.push(`Ø Speed (neu) ${backfill.kmh} km/h`); }
+
+        if (!fieldChanges.length) { unchanged++; nextFlights.push(f); continue; }
+        const updated = { ...f, maxSpeedKmh: nextMaxSpeed, totalDist: nextTotalDist, customFields: cf };
+        const res = await saveFlight(updated);
+        if (!res.ok) { failed++; nextFlights.push(f); continue; }
+        changed.push({ id: f.id, name: f.name, site: f.site, date: f.date, fieldChanges });
+        nextFlights.push(updated);
+      } catch (e) {
+        console.error("Neuberechnung fehlgeschlagen für Flug", f?.id, e);
+        failed++; nextFlights.push(f);
+      }
+    }
+    setFlights(nextFlights);
+    setRecalcSpeedResult({ changed, noFile, unchanged, failed, total: flights.length });
+    setRecalcSpeedRunning(false);
+  }, [flights, saveFlight]);
 
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
@@ -6042,6 +6313,8 @@ function FlugbuchApp() {
     { key:"map", title:"Weltkarte", active:false, onClick:()=>setView("worldmap"), icon:"🗺️" },
     { key:"views", title:"Gespeicherte Darstellungen", active:showViewsMenu, onClick:()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }, icon:"💡" },
     { key:"search", title:"Suchen/Sortieren", active:searchRowOpen, onClick:()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }, icon:"🔍" },
+    // TEMPORÄR — siehe showRecalcSpeed weiter oben, nach Gebrauch wieder entfernen.
+    { key:"recalcSpeed", title:"Track-Werte neu berechnen (temporär)", active:showRecalcSpeed, onClick:()=>{ setShowRecalcSpeed(m=>!m); }, icon:"🛠️" },
   ];
   const headerTileStyle = (active, compact) => compact
     ? {width:34,height:34,flexShrink:0,boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:active?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${active?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:9,color:"#fff",fontSize:16,cursor:"pointer"}
@@ -6186,6 +6459,48 @@ function FlugbuchApp() {
         <div style={{margin:"4px 16px 0",fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <span>📁 IGC-Ordner: {igcDirName}</span>
           <button onClick={clearIgcDir} style={{background:"none",border:"none",color:"rgba(248,113,113,0.6)",fontSize:11,cursor:"pointer"}}>ändern</button>
+        </div>
+      )}
+
+      {/* TEMPORÄR: Track-Werte (Max Speed/Distanz/Thermik) für alle Flüge neu
+          berechnen — siehe showRecalcSpeed weiter oben, nach Gebrauch wieder
+          entfernen (dieses Panel, der Button oben in headerIconButtons, der
+          State und runRecalcMaxSpeed). */}
+      {showRecalcSpeed && (
+        <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(245,158,11,0.3)",borderRadius:10,padding:12}}>
+          <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:10}}>
+            🛠️ Temporäres Werkzeug: berechnet Max Speed, Max.Steigen/-20s/Max.Sinken, Höhengewinn und
+            Distanz/Ø Speed für alle Flüge mit gespeicherter IGC-Rohdatei neu (aktuelles, robusteres
+            analyzeIGC) und speichert nur geänderte Werte. Höhengewinn/Distanz/Ø Speed werden dabei nur
+            nachgetragen, wenn sie noch leer sind — ein bereits erfasster Wert wird nie überschrieben.
+          </div>
+          <button onClick={runRecalcMaxSpeed} disabled={recalcSpeedRunning}
+            style={{width:"100%",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,padding:"9px 0",color:"#fcd34d",fontSize:13,fontWeight:700,cursor:recalcSpeedRunning?"default":"pointer",opacity:recalcSpeedRunning?0.6:1}}>
+            {recalcSpeedRunning ? "⏳ Berechne…" : "Track-Werte für alle Flüge prüfen/neu berechnen"}
+          </button>
+          {recalcSpeedResult && (
+            <div style={{marginTop:10}}>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.7)",marginBottom:6}}>
+                {recalcSpeedResult.total} Flüge geprüft · {recalcSpeedResult.changed.length} geändert ·{" "}
+                {recalcSpeedResult.unchanged} unverändert · {recalcSpeedResult.noFile} ohne gespeicherte IGC-Datei
+                {recalcSpeedResult.failed > 0 && ` · ${recalcSpeedResult.failed} fehlgeschlagen`}
+              </div>
+              {recalcSpeedResult.changed.length > 0 && (
+                <div style={{maxHeight:320,overflowY:"auto",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8}}>
+                  {recalcSpeedResult.changed.map(c => (
+                    <div key={c.id} style={{padding:"6px 10px",fontSize:12,borderBottom:"1px solid rgba(255,255,255,0.06)"}}>
+                      <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"rgba(232,244,253,0.85)",marginBottom:2}}>
+                        {c.name}{c.site ? ` · ${c.site}` : ""}{c.date ? ` · ${c.date}` : ""}
+                      </div>
+                      {c.fieldChanges.map((fc, idx) => (
+                        <div key={idx} style={{color:"#fcd34d",paddingLeft:8}}>{fc}</div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
