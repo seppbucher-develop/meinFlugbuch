@@ -615,10 +615,23 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   const startAlt = track[0].gpsAlt, endAlt = track[track.length-1].gpsAlt;
   const startPt = track[0], endPt = track[track.length-1];
   const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(track);
+  // Thermal count und Höhengewinn unten liefen bisher OHNE den Schutz, den
+  // Max.Steigen/-20s/Max.Sinken oben längst haben (siehe
+  // buildAltitudeGlitchPrefix/PLAUSIBLE_MAX_VARIO_MS weiter oben in dieser
+  // Datei): ein einzelner unplausibler roher Höhensprung (Mehrwegempfang,
+  // kurzer Fix-Verlust) floss hier direkt in die Summe bzw. die
+  // Thermik-Schwelle ein. An über 1000 realen Flügen aus diesem Flugbuch
+  // verifiziert: das trieb den gemeldeten Höhengewinn bei einzelnen Flügen
+  // um bis zu 340m fälschlich nach oben. glitchPrefix wird hier separat
+  // (statt in computeClimbSinkStats mitgeliefert) neu berechnet — eine
+  // zusätzliche O(n)-Passe über den Track, aber ohne dessen Signatur
+  // anzufassen.
+  const glitchPrefix = buildAltitudeGlitchPrefix(track);
   // Thermal count (separate from the climb/sink rate calc above) — counts
   // sustained climb segments using a simple threshold-crossing detector.
   const thermals=[]; let inT=false, tStart=null;
   for(let i=1;i<track.length;i++){
+    if (altitudeGlitchWindowOverlaps(glitchPrefix, i-1, i)) continue; // einzelner Höhensprung — ausklammern
     const rate=(track[i].gpsAlt-track[i-1].gpsAlt)/(track[i].timeSec-track[i-1].timeSec||1);
     if(rate>0.5&&!inT){inT=true;tStart=i;}
     else if(rate<=0.5&&inT){inT=false;if(tStart)thermals.push({start:tStart,end:i});}
@@ -630,6 +643,7 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   // all up rather than only counting the single best one.
   let totalGain = 0;
   for (let i=1;i<track.length;i++) {
+    if (altitudeGlitchWindowOverlaps(glitchPrefix, i-1, i)) continue; // einzelner Höhensprung — ausklammern
     const diff = track[i].gpsAlt - track[i-1].gpsAlt;
     if (diff > 0) totalGain += diff;
   }
@@ -861,6 +875,33 @@ function computeSpeedBreaks(track, medianDt) {
 function rangeHasBreak(breaks, lo, hi) {
   for (let k = lo; k < hi; k++) if (breaks[k]) return true;
   return false;
+}
+// Wie computeSpeedBreaks oben, aber als sortierte Liste von Zeitstempeln
+// statt eines index-basierten Arrays — für computeOpenDistancePath weiter
+// unten in dieser Datei, das mit einer (Douglas-Peucker-)vereinfachten
+// Kandidatenmenge arbeitet, deren Punkte nicht mehr direkt den Original-
+// Indizes entsprechen. Zeitstempel bleiben dagegen für jeden Kandidaten
+// erhalten, daher der Umweg über die Zeit statt den Index. Dieselbe
+// zugrundeliegende Bruch-Erkennung wie bei Max Speed, damit ein GPS-Sprung
+// überall im Flugbuch gleich behandelt wird.
+function computeTrackBreakTimes(track) {
+  const medianDt = medianFixIntervalSec(track);
+  const breaks = computeSpeedBreaks(track, medianDt);
+  const times = [];
+  for (let k = 0; k < breaks.length; k++) if (breaks[k]) times.push(track[k].timeSec);
+  return times;
+}
+// Binärsuche: liegt irgendein Bruch-Zeitstempel echt zwischen lo und hi?
+// sortedBreakTimes ist von computeTrackBreakTimes bereits chronologisch
+// (aufsteigend) geliefert, da der Track selbst chronologisch ist.
+function anyBreakBetween(sortedBreakTimes, lo, hi) {
+  if (!sortedBreakTimes.length) return false;
+  let left = 0, right = sortedBreakTimes.length;
+  while (left < right) {
+    const mid = (left + right) >> 1;
+    if (sortedBreakTimes[mid] < lo) left = mid + 1; else right = mid;
+  }
+  return left < sortedBreakTimes.length && sortedBreakTimes[left] < hi;
 }
 // Punkt-zu-Punkt-Geschwindigkeit für jeden Schritt einmal vorab berechnen —
 // Grundlage für den Nachbarschaftsvergleich in isSpeedLocallyPlausible.
@@ -2931,6 +2972,21 @@ function computeOpenDistancePath(track) {
   const k = candidates.length;
   if (k < 2) return null;
   const dist = (i, j) => haversineDistKm(candidates[i], candidates[j]) || 0;
+  // Douglas-Peucker behält gerade GROSSE Ausreisser besonders zuverlässig
+  // (sie weichen ja per Definition am stärksten von der Gerade ab) — ein
+  // einzelner GPS-Sprung wird von simplifyTrackDP oben also nicht etwa
+  // herausgefiltert, sondern bevorzugt als "wichtiger" Kandidatenpunkt
+  // übernommen. Die freie Etappen-Optimierung unten misst reine
+  // Luftlinien-Distanz zwischen zwei beliebigen (nicht zwingend
+  // benachbarten) Kandidaten — ein solcher Sprung liefert dabei einen
+  // scheinbar perfekten, aber nie tatsächlich geflogenen Wendepunkt. An
+  // über 1000 realen Flügen aus diesem Flugbuch verifiziert: das hat die
+  // gemeldete Distanz bei einzelnen Flügen um bis zu 180km aufgebläht (der
+  // Flug bestand dabei streckenweise gar nicht aus echten Flugdaten,
+  // siehe computeSpeedBreaks weiter oben). breakTimes markiert dieselben
+  // Bruchstellen wie bei Max Speed; jede Etappe, die einen Bruch
+  // überspringen würde, ist für die DP unten gesperrt.
+  const breakTimes = computeTrackBreakTimes(track);
 
   const MAX_LEGS = 4; // bis zu 3 Wendepunkte = bis zu 4 Teilstrecken
   // best[L][i] = beste Gesamtdistanz eines Pfads mit genau L Teilstrecken,
@@ -2946,6 +3002,7 @@ function computeOpenDistancePath(track) {
       let localBest = -Infinity, localJ = -1;
       for (let j = 0; j < i; j++) {
         if (best[L-1][j] === -Infinity) continue;
+        if (anyBreakBetween(breakTimes, candidates[j].timeSec, candidates[i].timeSec)) continue; // Etappe würde einen GPS-Sprung überspringen
         const cand = best[L-1][j] + dist(j, i);
         if (cand > localBest) { localBest = cand; localJ = j; }
       }
@@ -5567,12 +5624,19 @@ function FlugbuchApp() {
   }, []);
 
   // TEMPORÄR — siehe showRecalcSpeed weiter oben. Liest für jeden Flug die
-  // gespeicherte IGC-Rohdatei zurück (loadRawIgcFile, siehe Dateianfang),
-  // berechnet maxSpeedKmh mit der aktuellen computeMaxStraightSpeedKmh neu
-  // und speichert nur die Flüge, bei denen sich der Wert tatsächlich
-  // ändert. Flüge ohne gespeicherte Rohdatei (z.B. reine PDF-Einträge oder
-  // Importe von vor der Rohdatei-Speicherung) werden übersprungen und
-  // separat gezählt statt stillschweigend ignoriert.
+  // gespeicherte IGC-Rohdatei zurück (loadRawIgcFile, siehe Dateianfang) und
+  // berechnet Max Speed, Max.Steigen/-20s/Max.Sinken, Höhengewinn sowie
+  // Distanz/Ø Speed mit dem aktuellen, robusteren analyzeIGC neu — dieselben
+  // Track-Werte, die auch ein (Re-)Import über attachIgcToFlight setzen
+  // würde. Es gelten exakt dieselben Überschreib-Regeln wie dort:
+  //   - Max Speed / Max.Steigen / Max.Steigen 20s / Max.Sinken werden IMMER
+  //     neu gesetzt (rein track-berechnete Werte, siehe attachIgcToFlight).
+  //   - Höhengewinn sowie Distanz/Ø Speed werden NUR nachgetragen, wenn sie
+  //     noch leer sind (computeDistanceSpeedBackfill) — ein bereits
+  //     erfasster, evtl. manuell korrigierter Wert wird nie überschrieben.
+  // Flüge ohne gespeicherte Rohdatei (z.B. reine PDF-Einträge oder Importe
+  // von vor der Rohdatei-Speicherung) werden übersprungen und separat
+  // gezählt statt stillschweigend ignoriert.
   const runRecalcMaxSpeed = useCallback(async () => {
     setRecalcSpeedRunning(true);
     setRecalcSpeedResult(null);
@@ -5584,22 +5648,47 @@ function FlugbuchApp() {
         const buf = await loadRawIgcFile(f.id);
         if (!buf) { noFile++; nextFlights.push(f); continue; }
         const text = new TextDecoder().decode(new Uint8Array(buf));
-        const { track } = parseIGC(text);
+        const { track, date, tzOffsetHours } = parseIGC(text);
         if (!track || track.length < 3) { failed++; nextFlights.push(f); continue; }
-        const newSpeed = computeMaxStraightSpeedKmh(track);
+        const igcData = analyzeIGC(track, tzOffsetHours, date);
+
+        const fieldChanges = [];
+        let nextMaxSpeed = f.maxSpeedKmh;
         const oldSpeed = f.maxSpeedKmh || 0;
-        if (Math.abs(newSpeed - oldSpeed) < 0.05) { unchanged++; nextFlights.push(f); continue; }
-        const updated = { ...f, maxSpeedKmh: newSpeed };
+        if (Math.abs(igcData.maxSpeedKmh - oldSpeed) >= 0.05) {
+          nextMaxSpeed = igcData.maxSpeedKmh;
+          fieldChanges.push(`Max Speed ${oldSpeed} → ${igcData.maxSpeedKmh} km/h`);
+        }
+
+        const cf = { ...(f.customFields||{}) };
+        const steigenNew = String(igcData.maxClimb);
+        if ((cf.maxSteigen||"") !== steigenNew) { fieldChanges.push(`Max.Steigen ${cf.maxSteigen||"–"} → ${steigenNew} m/s`); cf.maxSteigen = steigenNew; }
+        const steigen20New = String(igcData.maxClimb20);
+        if ((cf.maxSteigen20||"") !== steigen20New) { fieldChanges.push(`Max.Steigen 20s ${cf.maxSteigen20||"–"} → ${steigen20New} m/s`); cf.maxSteigen20 = steigen20New; }
+        const sinkenNew = String(igcData.maxSinkRate);
+        if ((cf.maxSinken||"") !== sinkenNew) { fieldChanges.push(`Max.Sinken ${cf.maxSinken||"–"} → ${sinkenNew} m/s`); cf.maxSinken = sinkenNew; }
+
+        if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) {
+          cf.hGew = String(igcData.totalGain);
+          fieldChanges.push(`Höhengewinn (neu) ${igcData.totalGain} m`);
+        }
+
+        let nextTotalDist = f.totalDist;
+        const backfill = computeDistanceSpeedBackfill(f.totalDist, cf, igcData.scoreDistanceKm, igcData.durationSec || f.durationSec);
+        if (backfill.distKm != null) { cf.distKm = backfill.distKm; nextTotalDist = backfill.totalDist; fieldChanges.push(`Distanz (neu) ${backfill.distKm} km`); }
+        if (backfill.kmh != null) { cf.kmh = backfill.kmh; fieldChanges.push(`Ø Speed (neu) ${backfill.kmh} km/h`); }
+
+        if (!fieldChanges.length) { unchanged++; nextFlights.push(f); continue; }
+        const updated = { ...f, maxSpeedKmh: nextMaxSpeed, totalDist: nextTotalDist, customFields: cf };
         const res = await saveFlight(updated);
         if (!res.ok) { failed++; nextFlights.push(f); continue; }
-        changed.push({ id: f.id, name: f.name, site: f.site, date: f.date, oldSpeed, newSpeed });
+        changed.push({ id: f.id, name: f.name, site: f.site, date: f.date, fieldChanges });
         nextFlights.push(updated);
       } catch (e) {
-        console.error("Max Speed neu berechnen fehlgeschlagen für Flug", f?.id, e);
+        console.error("Neuberechnung fehlgeschlagen für Flug", f?.id, e);
         failed++; nextFlights.push(f);
       }
     }
-    changed.sort((a,b) => Math.abs(b.newSpeed-b.oldSpeed) - Math.abs(a.newSpeed-a.oldSpeed));
     setFlights(nextFlights);
     setRecalcSpeedResult({ changed, noFile, unchanged, failed, total: flights.length });
     setRecalcSpeedRunning(false);
@@ -6225,7 +6314,7 @@ function FlugbuchApp() {
     { key:"views", title:"Gespeicherte Darstellungen", active:showViewsMenu, onClick:()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }, icon:"💡" },
     { key:"search", title:"Suchen/Sortieren", active:searchRowOpen, onClick:()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }, icon:"🔍" },
     // TEMPORÄR — siehe showRecalcSpeed weiter oben, nach Gebrauch wieder entfernen.
-    { key:"recalcSpeed", title:"Max Speed neu berechnen (temporär)", active:showRecalcSpeed, onClick:()=>{ setShowRecalcSpeed(m=>!m); }, icon:"🛠️" },
+    { key:"recalcSpeed", title:"Track-Werte neu berechnen (temporär)", active:showRecalcSpeed, onClick:()=>{ setShowRecalcSpeed(m=>!m); }, icon:"🛠️" },
   ];
   const headerTileStyle = (active, compact) => compact
     ? {width:34,height:34,flexShrink:0,boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:active?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${active?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:9,color:"#fff",fontSize:16,cursor:"pointer"}
@@ -6373,18 +6462,21 @@ function FlugbuchApp() {
         </div>
       )}
 
-      {/* TEMPORÄR: Max Speed für alle Flüge neu berechnen — siehe showRecalcSpeed
-          weiter oben, nach Gebrauch wieder entfernen (dieses Panel, der Button
-          oben in headerIconButtons, der State und runRecalcMaxSpeed). */}
+      {/* TEMPORÄR: Track-Werte (Max Speed/Distanz/Thermik) für alle Flüge neu
+          berechnen — siehe showRecalcSpeed weiter oben, nach Gebrauch wieder
+          entfernen (dieses Panel, der Button oben in headerIconButtons, der
+          State und runRecalcMaxSpeed). */}
       {showRecalcSpeed && (
         <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(245,158,11,0.3)",borderRadius:10,padding:12}}>
           <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:10}}>
-            🛠️ Temporäres Werkzeug: berechnet Max Speed für alle Flüge mit gespeicherter IGC-Rohdatei
-            neu (aktuelle, robustere computeMaxStraightSpeedKmh) und speichert nur geänderte Werte.
+            🛠️ Temporäres Werkzeug: berechnet Max Speed, Max.Steigen/-20s/Max.Sinken, Höhengewinn und
+            Distanz/Ø Speed für alle Flüge mit gespeicherter IGC-Rohdatei neu (aktuelles, robusteres
+            analyzeIGC) und speichert nur geänderte Werte. Höhengewinn/Distanz/Ø Speed werden dabei nur
+            nachgetragen, wenn sie noch leer sind — ein bereits erfasster Wert wird nie überschrieben.
           </div>
           <button onClick={runRecalcMaxSpeed} disabled={recalcSpeedRunning}
             style={{width:"100%",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,padding:"9px 0",color:"#fcd34d",fontSize:13,fontWeight:700,cursor:recalcSpeedRunning?"default":"pointer",opacity:recalcSpeedRunning?0.6:1}}>
-            {recalcSpeedRunning ? "⏳ Berechne…" : "Max Speed für alle Flüge prüfen/neu berechnen"}
+            {recalcSpeedRunning ? "⏳ Berechne…" : "Track-Werte für alle Flüge prüfen/neu berechnen"}
           </button>
           {recalcSpeedResult && (
             <div style={{marginTop:10}}>
@@ -6394,15 +6486,15 @@ function FlugbuchApp() {
                 {recalcSpeedResult.failed > 0 && ` · ${recalcSpeedResult.failed} fehlgeschlagen`}
               </div>
               {recalcSpeedResult.changed.length > 0 && (
-                <div style={{maxHeight:260,overflowY:"auto",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8}}>
+                <div style={{maxHeight:320,overflowY:"auto",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8}}>
                   {recalcSpeedResult.changed.map(c => (
-                    <div key={c.id} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"6px 10px",fontSize:12,borderBottom:"1px solid rgba(255,255,255,0.06)"}}>
-                      <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"rgba(232,244,253,0.85)"}}>
+                    <div key={c.id} style={{padding:"6px 10px",fontSize:12,borderBottom:"1px solid rgba(255,255,255,0.06)"}}>
+                      <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"rgba(232,244,253,0.85)",marginBottom:2}}>
                         {c.name}{c.site ? ` · ${c.site}` : ""}{c.date ? ` · ${c.date}` : ""}
-                      </span>
-                      <span style={{flexShrink:0,color:"rgba(232,244,253,0.6)"}}>
-                        {c.oldSpeed} → <span style={{color:"#fcd34d",fontWeight:700}}>{c.newSpeed}</span> km/h
-                      </span>
+                      </div>
+                      {c.fieldChanges.map((fc, idx) => (
+                        <div key={idx} style={{color:"#fcd34d",paddingLeft:8}}>{fc}</div>
+                      ))}
                     </div>
                   ))}
                 </div>
