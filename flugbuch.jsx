@@ -5470,16 +5470,6 @@ function FlugbuchApp() {
   const [showRowImport, setShowRowImport] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
-  // ── TEMPORÄR: Max Speed für alle bestehenden Flüge neu berechnen ────────
-  // Einmalige Migrationshilfe, nachdem computeMaxStraightSpeedKmh robuster
-  // gegen GPS-Ausreisser gemacht wurde (Empfangslöcher, springende
-  // Einzelfixe, Höhen-Plausibilität) — bestehende Flüge behalten sonst den
-  // beim Import berechneten, alten Wert für immer. Nach einmaligem Gebrauch
-  // wieder entfernen: dieser State, der Button in headerIconButtons weiter
-  // unten und das dazugehörige Panel im JSX (Suche nach "TEMPORÄR").
-  const [showRecalcSpeed, setShowRecalcSpeed] = useState(false);
-  const [recalcSpeedRunning, setRecalcSpeedRunning] = useState(false);
-  const [recalcSpeedResult, setRecalcSpeedResult] = useState(null);
   const [csvColumns, setCsvColumns] = useState(
     CSV_COLUMN_DEFS.map(c => ({ key: c.key, enabled: true }))
   );
@@ -5622,91 +5612,6 @@ function FlugbuchApp() {
       return { ok: false, error: e };
     }
   }, []);
-
-  // TEMPORÄR — siehe showRecalcSpeed weiter oben. Liest für jeden Flug
-  // primär die gespeicherte IGC-Rohdatei zurück (loadRawIgcFile, siehe
-  // Dateianfang) und berechnet Max Speed, Max.Steigen/-20s/Max.Sinken,
-  // Höhengewinn sowie Distanz/Ø Speed mit dem aktuellen, robusteren
-  // analyzeIGC neu — dieselben Track-Werte, die auch ein (Re-)Import über
-  // attachIgcToFlight setzen würde. Ist keine Rohdatei gespeichert (Importe
-  // von vor Einführung der Rohdatei-Speicherung — die grosse Mehrheit der
-  // älteren Flüge betroffen, siehe Chat vom 2026-09-19: 2422 von 2433
-  // Flügen ohne Rohdatei), wird stattdessen auf den bereits beim Import
-  // geparsten und im Flug gespeicherten Track (f.track) zurückgegriffen —
-  // exakt dieselbe Punktstruktur {lat,lon,gpsAlt,timeSec} wie aus
-  // parseIGC. tzOffsetHours/date sind dabei bewusst irrelevant (0 bzw.
-  // leer): sie fliessen nur in Start-/Landezeit-Strings ein, die dieses
-  // Werkzeug nicht anfasst. Es gelten exakt dieselben Überschreib-Regeln
-  // wie bei attachIgcToFlight:
-  //   - Max Speed / Max.Steigen / Max.Steigen 20s / Max.Sinken werden IMMER
-  //     neu gesetzt (rein track-berechnete Werte, siehe attachIgcToFlight).
-  //   - Höhengewinn sowie Distanz/Ø Speed werden NUR nachgetragen, wenn sie
-  //     noch leer sind (computeDistanceSpeedBackfill) — ein bereits
-  //     erfasster, evtl. manuell korrigierter Wert wird nie überschrieben.
-  // Nur Flüge ganz ohne jeden Track (z.B. reine PDF-Einträge) werden
-  // übersprungen und separat gezählt statt stillschweigend ignoriert.
-  const runRecalcMaxSpeed = useCallback(async () => {
-    setRecalcSpeedRunning(true);
-    setRecalcSpeedResult(null);
-    const changed = [];
-    let noFile = 0, unchanged = 0, failed = 0;
-    const nextFlights = [];
-    for (const f of flights) {
-      try {
-        let track, date = "", tzOffsetHours = 0;
-        const buf = await loadRawIgcFile(f.id);
-        if (buf) {
-          const text = new TextDecoder().decode(new Uint8Array(buf));
-          ({ track, date, tzOffsetHours } = parseIGC(text));
-        } else if (f.track && f.track.length >= 3) {
-          track = f.track;
-        } else {
-          noFile++; nextFlights.push(f); continue;
-        }
-        if (!track || track.length < 3) { failed++; nextFlights.push(f); continue; }
-        const igcData = analyzeIGC(track, tzOffsetHours, date);
-
-        const fieldChanges = [];
-        let nextMaxSpeed = f.maxSpeedKmh;
-        const oldSpeed = f.maxSpeedKmh || 0;
-        if (Math.abs(igcData.maxSpeedKmh - oldSpeed) >= 0.05) {
-          nextMaxSpeed = igcData.maxSpeedKmh;
-          fieldChanges.push(`Max Speed ${oldSpeed} → ${igcData.maxSpeedKmh} km/h`);
-        }
-
-        const cf = { ...(f.customFields||{}) };
-        const steigenNew = String(igcData.maxClimb);
-        if ((cf.maxSteigen||"") !== steigenNew) { fieldChanges.push(`Max.Steigen ${cf.maxSteigen||"–"} → ${steigenNew} m/s`); cf.maxSteigen = steigenNew; }
-        const steigen20New = String(igcData.maxClimb20);
-        if ((cf.maxSteigen20||"") !== steigen20New) { fieldChanges.push(`Max.Steigen 20s ${cf.maxSteigen20||"–"} → ${steigen20New} m/s`); cf.maxSteigen20 = steigen20New; }
-        const sinkenNew = String(igcData.maxSinkRate);
-        if ((cf.maxSinken||"") !== sinkenNew) { fieldChanges.push(`Max.Sinken ${cf.maxSinken||"–"} → ${sinkenNew} m/s`); cf.maxSinken = sinkenNew; }
-
-        if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) {
-          cf.hGew = String(igcData.totalGain);
-          fieldChanges.push(`Höhengewinn (neu) ${igcData.totalGain} m`);
-        }
-
-        let nextTotalDist = f.totalDist;
-        const backfill = computeDistanceSpeedBackfill(f.totalDist, cf, igcData.scoreDistanceKm, igcData.durationSec || f.durationSec);
-        if (backfill.distKm != null) { cf.distKm = backfill.distKm; nextTotalDist = backfill.totalDist; fieldChanges.push(`Distanz (neu) ${backfill.distKm} km`); }
-        if (backfill.kmh != null) { cf.kmh = backfill.kmh; fieldChanges.push(`Ø Speed (neu) ${backfill.kmh} km/h`); }
-
-        if (!fieldChanges.length) { unchanged++; nextFlights.push(f); continue; }
-        const updated = { ...f, maxSpeedKmh: nextMaxSpeed, totalDist: nextTotalDist, customFields: cf };
-        const res = await saveFlight(updated);
-        if (!res.ok) { failed++; nextFlights.push(f); continue; }
-        changed.push({ id: f.id, name: f.name, site: f.site, date: f.date, fieldChanges });
-        nextFlights.push(updated);
-      } catch (e) {
-        console.error("Neuberechnung fehlgeschlagen für Flug", f?.id, e);
-        failed++; nextFlights.push(f);
-      }
-    }
-    setFlights(nextFlights);
-    setRecalcSpeedResult({ changed, noFile, unchanged, failed, total: flights.length });
-    setRecalcSpeedRunning(false);
-  }, [flights, saveFlight]);
 
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
@@ -6327,8 +6232,6 @@ function FlugbuchApp() {
     { key:"map", title:"Weltkarte", active:false, onClick:()=>setView("worldmap"), icon:"🗺️" },
     { key:"views", title:"Gespeicherte Darstellungen", active:showViewsMenu, onClick:()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }, icon:"💡" },
     { key:"search", title:"Suchen/Sortieren", active:searchRowOpen, onClick:()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }, icon:"🔍" },
-    // TEMPORÄR — siehe showRecalcSpeed weiter oben, nach Gebrauch wieder entfernen.
-    { key:"recalcSpeed", title:"Track-Werte neu berechnen (temporär)", active:showRecalcSpeed, onClick:()=>{ setShowRecalcSpeed(m=>!m); }, icon:"🛠️" },
   ];
   const headerTileStyle = (active, compact) => compact
     ? {width:34,height:34,flexShrink:0,boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:active?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${active?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:9,color:"#fff",fontSize:16,cursor:"pointer"}
@@ -6473,49 +6376,6 @@ function FlugbuchApp() {
         <div style={{margin:"4px 16px 0",fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <span>📁 IGC-Ordner: {igcDirName}</span>
           <button onClick={clearIgcDir} style={{background:"none",border:"none",color:"rgba(248,113,113,0.6)",fontSize:11,cursor:"pointer"}}>ändern</button>
-        </div>
-      )}
-
-      {/* TEMPORÄR: Track-Werte (Max Speed/Distanz/Thermik) für alle Flüge neu
-          berechnen — siehe showRecalcSpeed weiter oben, nach Gebrauch wieder
-          entfernen (dieses Panel, der Button oben in headerIconButtons, der
-          State und runRecalcMaxSpeed). */}
-      {showRecalcSpeed && (
-        <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(245,158,11,0.3)",borderRadius:10,padding:12}}>
-          <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:10}}>
-            🛠️ Temporäres Werkzeug: berechnet Max Speed, Max.Steigen/-20s/Max.Sinken, Höhengewinn und
-            Distanz/Ø Speed für alle Flüge mit Track neu (aktuelles, robusteres analyzeIGC) und speichert
-            nur geänderte Werte. Nutzt die gespeicherte IGC-Rohdatei, falls vorhanden, sonst den bereits
-            beim Import geparsten Track. Höhengewinn/Distanz/Ø Speed werden dabei nur nachgetragen, wenn
-            sie noch leer sind — ein bereits erfasster Wert wird nie überschrieben.
-          </div>
-          <button onClick={runRecalcMaxSpeed} disabled={recalcSpeedRunning}
-            style={{width:"100%",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,padding:"9px 0",color:"#fcd34d",fontSize:13,fontWeight:700,cursor:recalcSpeedRunning?"default":"pointer",opacity:recalcSpeedRunning?0.6:1}}>
-            {recalcSpeedRunning ? "⏳ Berechne…" : "Track-Werte für alle Flüge prüfen/neu berechnen"}
-          </button>
-          {recalcSpeedResult && (
-            <div style={{marginTop:10}}>
-              <div style={{fontSize:12,color:"rgba(232,244,253,0.7)",marginBottom:6}}>
-                {recalcSpeedResult.total} Flüge geprüft · {recalcSpeedResult.changed.length} geändert ·{" "}
-                {recalcSpeedResult.unchanged} unverändert · {recalcSpeedResult.noFile} ohne jeden Track
-                {recalcSpeedResult.failed > 0 && ` · ${recalcSpeedResult.failed} fehlgeschlagen`}
-              </div>
-              {recalcSpeedResult.changed.length > 0 && (
-                <div style={{maxHeight:320,overflowY:"auto",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8}}>
-                  {recalcSpeedResult.changed.map(c => (
-                    <div key={c.id} style={{padding:"6px 10px",fontSize:12,borderBottom:"1px solid rgba(255,255,255,0.06)"}}>
-                      <div style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"rgba(232,244,253,0.85)",marginBottom:2}}>
-                        {c.name}{c.site ? ` · ${c.site}` : ""}{c.date ? ` · ${c.date}` : ""}
-                      </div>
-                      {c.fieldChanges.map((fc, idx) => (
-                        <div key={idx} style={{color:"#fcd34d",paddingLeft:8}}>{fc}</div>
-                      ))}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
         </div>
       )}
 
