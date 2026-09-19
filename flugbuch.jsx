@@ -5383,6 +5383,16 @@ function FlugbuchApp() {
   const [showRowImport, setShowRowImport] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
+  // ── TEMPORÄR: Max Speed für alle bestehenden Flüge neu berechnen ────────
+  // Einmalige Migrationshilfe, nachdem computeMaxStraightSpeedKmh robuster
+  // gegen GPS-Ausreisser gemacht wurde (Empfangslöcher, springende
+  // Einzelfixe, Höhen-Plausibilität) — bestehende Flüge behalten sonst den
+  // beim Import berechneten, alten Wert für immer. Nach einmaligem Gebrauch
+  // wieder entfernen: dieser State, der Button in headerIconButtons weiter
+  // unten und das dazugehörige Panel im JSX (Suche nach "TEMPORÄR").
+  const [showRecalcSpeed, setShowRecalcSpeed] = useState(false);
+  const [recalcSpeedRunning, setRecalcSpeedRunning] = useState(false);
+  const [recalcSpeedResult, setRecalcSpeedResult] = useState(null);
   const [csvColumns, setCsvColumns] = useState(
     CSV_COLUMN_DEFS.map(c => ({ key: c.key, enabled: true }))
   );
@@ -5525,6 +5535,45 @@ function FlugbuchApp() {
       return { ok: false, error: e };
     }
   }, []);
+
+  // TEMPORÄR — siehe showRecalcSpeed weiter oben. Liest für jeden Flug die
+  // gespeicherte IGC-Rohdatei zurück (loadRawIgcFile, siehe Dateianfang),
+  // berechnet maxSpeedKmh mit der aktuellen computeMaxStraightSpeedKmh neu
+  // und speichert nur die Flüge, bei denen sich der Wert tatsächlich
+  // ändert. Flüge ohne gespeicherte Rohdatei (z.B. reine PDF-Einträge oder
+  // Importe von vor der Rohdatei-Speicherung) werden übersprungen und
+  // separat gezählt statt stillschweigend ignoriert.
+  const runRecalcMaxSpeed = useCallback(async () => {
+    setRecalcSpeedRunning(true);
+    setRecalcSpeedResult(null);
+    const changed = [];
+    let noFile = 0, unchanged = 0, failed = 0;
+    const nextFlights = [];
+    for (const f of flights) {
+      try {
+        const buf = await loadRawIgcFile(f.id);
+        if (!buf) { noFile++; nextFlights.push(f); continue; }
+        const text = new TextDecoder().decode(new Uint8Array(buf));
+        const { track } = parseIGC(text);
+        if (!track || track.length < 3) { failed++; nextFlights.push(f); continue; }
+        const newSpeed = computeMaxStraightSpeedKmh(track);
+        const oldSpeed = f.maxSpeedKmh || 0;
+        if (Math.abs(newSpeed - oldSpeed) < 0.05) { unchanged++; nextFlights.push(f); continue; }
+        const updated = { ...f, maxSpeedKmh: newSpeed };
+        const res = await saveFlight(updated);
+        if (!res.ok) { failed++; nextFlights.push(f); continue; }
+        changed.push({ id: f.id, name: f.name, site: f.site, date: f.date, oldSpeed, newSpeed });
+        nextFlights.push(updated);
+      } catch (e) {
+        console.error("Max Speed neu berechnen fehlgeschlagen für Flug", f?.id, e);
+        failed++; nextFlights.push(f);
+      }
+    }
+    changed.sort((a,b) => Math.abs(b.newSpeed-b.oldSpeed) - Math.abs(a.newSpeed-a.oldSpeed));
+    setFlights(nextFlights);
+    setRecalcSpeedResult({ changed, noFile, unchanged, failed, total: flights.length });
+    setRecalcSpeedRunning(false);
+  }, [flights, saveFlight]);
 
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
@@ -6145,6 +6194,8 @@ function FlugbuchApp() {
     { key:"map", title:"Weltkarte", active:false, onClick:()=>setView("worldmap"), icon:"🗺️" },
     { key:"views", title:"Gespeicherte Darstellungen", active:showViewsMenu, onClick:()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }, icon:"💡" },
     { key:"search", title:"Suchen/Sortieren", active:searchRowOpen, onClick:()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }, icon:"🔍" },
+    // TEMPORÄR — siehe showRecalcSpeed weiter oben, nach Gebrauch wieder entfernen.
+    { key:"recalcSpeed", title:"Max Speed neu berechnen (temporär)", active:showRecalcSpeed, onClick:()=>{ setShowRecalcSpeed(m=>!m); }, icon:"🛠️" },
   ];
   const headerTileStyle = (active, compact) => compact
     ? {width:34,height:34,flexShrink:0,boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:active?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${active?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:9,color:"#fff",fontSize:16,cursor:"pointer"}
@@ -6289,6 +6340,45 @@ function FlugbuchApp() {
         <div style={{margin:"4px 16px 0",fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <span>📁 IGC-Ordner: {igcDirName}</span>
           <button onClick={clearIgcDir} style={{background:"none",border:"none",color:"rgba(248,113,113,0.6)",fontSize:11,cursor:"pointer"}}>ändern</button>
+        </div>
+      )}
+
+      {/* TEMPORÄR: Max Speed für alle Flüge neu berechnen — siehe showRecalcSpeed
+          weiter oben, nach Gebrauch wieder entfernen (dieses Panel, der Button
+          oben in headerIconButtons, der State und runRecalcMaxSpeed). */}
+      {showRecalcSpeed && (
+        <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(245,158,11,0.3)",borderRadius:10,padding:12}}>
+          <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:10}}>
+            🛠️ Temporäres Werkzeug: berechnet Max Speed für alle Flüge mit gespeicherter IGC-Rohdatei
+            neu (aktuelle, robustere computeMaxStraightSpeedKmh) und speichert nur geänderte Werte.
+          </div>
+          <button onClick={runRecalcMaxSpeed} disabled={recalcSpeedRunning}
+            style={{width:"100%",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,padding:"9px 0",color:"#fcd34d",fontSize:13,fontWeight:700,cursor:recalcSpeedRunning?"default":"pointer",opacity:recalcSpeedRunning?0.6:1}}>
+            {recalcSpeedRunning ? "⏳ Berechne…" : "Max Speed für alle Flüge prüfen/neu berechnen"}
+          </button>
+          {recalcSpeedResult && (
+            <div style={{marginTop:10}}>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.7)",marginBottom:6}}>
+                {recalcSpeedResult.total} Flüge geprüft · {recalcSpeedResult.changed.length} geändert ·{" "}
+                {recalcSpeedResult.unchanged} unverändert · {recalcSpeedResult.noFile} ohne gespeicherte IGC-Datei
+                {recalcSpeedResult.failed > 0 && ` · ${recalcSpeedResult.failed} fehlgeschlagen`}
+              </div>
+              {recalcSpeedResult.changed.length > 0 && (
+                <div style={{maxHeight:260,overflowY:"auto",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8}}>
+                  {recalcSpeedResult.changed.map(c => (
+                    <div key={c.id} style={{display:"flex",justifyContent:"space-between",gap:8,padding:"6px 10px",fontSize:12,borderBottom:"1px solid rgba(255,255,255,0.06)"}}>
+                      <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",color:"rgba(232,244,253,0.85)"}}>
+                        {c.name}{c.site ? ` · ${c.site}` : ""}{c.date ? ` · ${c.date}` : ""}
+                      </span>
+                      <span style={{flexShrink:0,color:"rgba(232,244,253,0.6)"}}>
+                        {c.oldSpeed} → <span style={{color:"#fcd34d",fontWeight:700}}>{c.newSpeed}</span> km/h
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
