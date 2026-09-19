@@ -5623,20 +5623,28 @@ function FlugbuchApp() {
     }
   }, []);
 
-  // TEMPORÄR — siehe showRecalcSpeed weiter oben. Liest für jeden Flug die
-  // gespeicherte IGC-Rohdatei zurück (loadRawIgcFile, siehe Dateianfang) und
-  // berechnet Max Speed, Max.Steigen/-20s/Max.Sinken, Höhengewinn sowie
-  // Distanz/Ø Speed mit dem aktuellen, robusteren analyzeIGC neu — dieselben
-  // Track-Werte, die auch ein (Re-)Import über attachIgcToFlight setzen
-  // würde. Es gelten exakt dieselben Überschreib-Regeln wie dort:
+  // TEMPORÄR — siehe showRecalcSpeed weiter oben. Liest für jeden Flug
+  // primär die gespeicherte IGC-Rohdatei zurück (loadRawIgcFile, siehe
+  // Dateianfang) und berechnet Max Speed, Max.Steigen/-20s/Max.Sinken,
+  // Höhengewinn sowie Distanz/Ø Speed mit dem aktuellen, robusteren
+  // analyzeIGC neu — dieselben Track-Werte, die auch ein (Re-)Import über
+  // attachIgcToFlight setzen würde. Ist keine Rohdatei gespeichert (Importe
+  // von vor Einführung der Rohdatei-Speicherung — die grosse Mehrheit der
+  // älteren Flüge betroffen, siehe Chat vom 2026-09-19: 2422 von 2433
+  // Flügen ohne Rohdatei), wird stattdessen auf den bereits beim Import
+  // geparsten und im Flug gespeicherten Track (f.track) zurückgegriffen —
+  // exakt dieselbe Punktstruktur {lat,lon,gpsAlt,timeSec} wie aus
+  // parseIGC. tzOffsetHours/date sind dabei bewusst irrelevant (0 bzw.
+  // leer): sie fliessen nur in Start-/Landezeit-Strings ein, die dieses
+  // Werkzeug nicht anfasst. Es gelten exakt dieselben Überschreib-Regeln
+  // wie bei attachIgcToFlight:
   //   - Max Speed / Max.Steigen / Max.Steigen 20s / Max.Sinken werden IMMER
   //     neu gesetzt (rein track-berechnete Werte, siehe attachIgcToFlight).
   //   - Höhengewinn sowie Distanz/Ø Speed werden NUR nachgetragen, wenn sie
   //     noch leer sind (computeDistanceSpeedBackfill) — ein bereits
   //     erfasster, evtl. manuell korrigierter Wert wird nie überschrieben.
-  // Flüge ohne gespeicherte Rohdatei (z.B. reine PDF-Einträge oder Importe
-  // von vor der Rohdatei-Speicherung) werden übersprungen und separat
-  // gezählt statt stillschweigend ignoriert.
+  // Nur Flüge ganz ohne jeden Track (z.B. reine PDF-Einträge) werden
+  // übersprungen und separat gezählt statt stillschweigend ignoriert.
   const runRecalcMaxSpeed = useCallback(async () => {
     setRecalcSpeedRunning(true);
     setRecalcSpeedResult(null);
@@ -5645,10 +5653,16 @@ function FlugbuchApp() {
     const nextFlights = [];
     for (const f of flights) {
       try {
+        let track, date = "", tzOffsetHours = 0;
         const buf = await loadRawIgcFile(f.id);
-        if (!buf) { noFile++; nextFlights.push(f); continue; }
-        const text = new TextDecoder().decode(new Uint8Array(buf));
-        const { track, date, tzOffsetHours } = parseIGC(text);
+        if (buf) {
+          const text = new TextDecoder().decode(new Uint8Array(buf));
+          ({ track, date, tzOffsetHours } = parseIGC(text));
+        } else if (f.track && f.track.length >= 3) {
+          track = f.track;
+        } else {
+          noFile++; nextFlights.push(f); continue;
+        }
         if (!track || track.length < 3) { failed++; nextFlights.push(f); continue; }
         const igcData = analyzeIGC(track, tzOffsetHours, date);
 
@@ -6470,9 +6484,10 @@ function FlugbuchApp() {
         <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(245,158,11,0.3)",borderRadius:10,padding:12}}>
           <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:10}}>
             🛠️ Temporäres Werkzeug: berechnet Max Speed, Max.Steigen/-20s/Max.Sinken, Höhengewinn und
-            Distanz/Ø Speed für alle Flüge mit gespeicherter IGC-Rohdatei neu (aktuelles, robusteres
-            analyzeIGC) und speichert nur geänderte Werte. Höhengewinn/Distanz/Ø Speed werden dabei nur
-            nachgetragen, wenn sie noch leer sind — ein bereits erfasster Wert wird nie überschrieben.
+            Distanz/Ø Speed für alle Flüge mit Track neu (aktuelles, robusteres analyzeIGC) und speichert
+            nur geänderte Werte. Nutzt die gespeicherte IGC-Rohdatei, falls vorhanden, sonst den bereits
+            beim Import geparsten Track. Höhengewinn/Distanz/Ø Speed werden dabei nur nachgetragen, wenn
+            sie noch leer sind — ein bereits erfasster Wert wird nie überschrieben.
           </div>
           <button onClick={runRecalcMaxSpeed} disabled={recalcSpeedRunning}
             style={{width:"100%",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,padding:"9px 0",color:"#fcd34d",fontSize:13,fontWeight:700,cursor:recalcSpeedRunning?"default":"pointer",opacity:recalcSpeedRunning?0.6:1}}>
@@ -6482,7 +6497,7 @@ function FlugbuchApp() {
             <div style={{marginTop:10}}>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.7)",marginBottom:6}}>
                 {recalcSpeedResult.total} Flüge geprüft · {recalcSpeedResult.changed.length} geändert ·{" "}
-                {recalcSpeedResult.unchanged} unverändert · {recalcSpeedResult.noFile} ohne gespeicherte IGC-Datei
+                {recalcSpeedResult.unchanged} unverändert · {recalcSpeedResult.noFile} ohne jeden Track
                 {recalcSpeedResult.failed > 0 && ` · ${recalcSpeedResult.failed} fehlgeschlagen`}
               </div>
               {recalcSpeedResult.changed.length > 0 && (
