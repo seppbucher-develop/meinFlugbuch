@@ -2084,8 +2084,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
                 sich zu überlappen; pointerEvents:"auto" auf dem Button hebt
                 das "none" der Badges für ihn gezielt wieder auf. */}
             <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:10,zIndex:1,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:8}}>
+              {/* Schwarzes Kreuz auf fast deckend weissem Grund statt weiss
+                  auf durchsichtigem Weiss — das vorige Weiss-auf-Weiss war
+                  vor hellem Kartenuntergrund (Schnee, helles Gelände) kaum
+                  sichtbar; Schwarz auf Weiss bleibt vor JEDEM Kartenuntergrund
+                  lesbar. */}
               <button onClick={()=>setIsFullscreen(false)}
-                style={{background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:12,width:22,height:22,color:"#fff",fontSize:12,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0,pointerEvents:"auto"}}>
+                style={{background:"rgba(255,255,255,0.92)",border:"1px solid rgba(0,0,0,0.15)",borderRadius:12,width:22,height:22,color:"#111",fontSize:12,fontWeight:700,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0,pointerEvents:"auto",boxShadow:"0 1px 4px rgba(0,0,0,0.4)"}}>
                 ✕
               </button>
               {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
