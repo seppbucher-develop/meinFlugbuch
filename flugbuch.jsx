@@ -1921,7 +1921,12 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   return (
     <>
       <div style={{position:"relative"}} onClick={()=>{ if (hasMap) setIsFullscreen(true); }}>
-        <div ref={previewDivRef} style={{width:"100%",aspectRatio:"3/2",background:"#040e20",borderRadius:10,overflow:"hidden",cursor:hasMap?"pointer":"default"}} />
+        {/* position:relative + zIndex:0 (statt "auto") fängt MapTilers
+            eigene, intern absolut positionierte Bedienelemente (Zoom-+/--
+            Buttons oben rechts) in einem eigenen Stacking-Context dieses
+            Divs ein, damit sie nie über Geschwister-Overlays wie die Badges
+            landen können — analog zum Vollbild-Kartendiv (fullDivRef). */}
+        <div ref={previewDivRef} style={{width:"100%",aspectRatio:"3/2",background:"#040e20",borderRadius:10,overflow:"hidden",cursor:hasMap?"pointer":"default",position:"relative",zIndex:0}} />
         {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
           // Alle Badges links oben statt rechts: die eingebauten Zoom-+/--
           // Buttons der Karte sitzen rechts oben und überlagerten dort ein
@@ -2032,7 +2037,14 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
               Teil dieses vh-basierten Overlays, damit sie nicht mit den
               absolut positionierten Overlays der Karte kollidiert. */}
           <div style={{position:"relative",flex:"1 1 auto",minHeight:0,width:"100%"}}>
-            <div ref={fullDivRef} style={{position:"absolute",inset:0}} />
+            {/* zIndex:0 (statt "auto") fängt MapTilers eigene, intern per
+                absoluter Position eingefügte Bedienelemente (u.a. die
+                eingebauten Zoom-+/--Buttons oben rechts, siehe Kommentar
+                weiter unten) in einem eigenen Stacking-Context dieses Divs
+                ein — ohne das könnten sie (je nach von MapTiler gesetztem
+                z-index) über den Geschwister-Elementen wie dem
+                Schliessen-Button landen, obwohl der im Markup danach kommt. */}
+            <div ref={fullDivRef} style={{position:"absolute",inset:0,zIndex:0}} />
             {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
               // Alle Badges links statt rechts: die eingebauten Zoom-+/--
               // Buttons der Karte sitzen rechts oben und überlagerten dort ein
@@ -2096,7 +2108,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
                 Kartenfläche, während der Rest der Karte unverändert bis an
                 den Bildschirmrand reicht. */}
             <button onClick={()=>setIsFullscreen(false)}
-              style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 8px)",right:10,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:12,width:22,height:22,color:"#fff",fontSize:12,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>
+              style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 8px)",right:10,zIndex:1,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:12,width:22,height:22,color:"#fff",fontSize:12,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>
               ✕
             </button>
           </div>
@@ -2263,6 +2275,15 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    // fullscreenSlot in den Deps: beim Wechsel zwischen normaler Ansicht und
+    // Vollbild-Leiste (siehe fullscreenSlot/chart weiter unten) hängt sich
+    // dieselbe FlightProfile-Instanz per Portal um — React ersetzt dabei den
+    // <canvas> durch ein NEUES DOM-Element (Wechsel zwischen "inline" und
+    // "portal" ist für React ein Fiber-Typ-Wechsel, kein reines Re-Layout),
+    // wodurch die zuvor am alten Canvas registrierten Touch/Maus-Listener
+    // ins Leere liefen — der Scrub-Cursor liess sich dann gar nicht mehr
+    // verschieben. Dieser Effekt hier bindet sich deshalb bei jedem Wechsel
+    // neu an das jeweils aktuelle canvasRef.current.
     // Gleiche Achsen-Mathematik wie im Zeichnen-Effekt weiter unten (padL=42,
     // padR=8 in CSS-Pixeln), nur umgekehrt: aus einer Bildschirm-X-Position
     // die zugehörige (skalierte) Flugdistanz gewinnen.
@@ -2349,7 +2370,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("mouseup", onMouseUp);
     };
-  }, []);
+  }, [fullscreenSlot]);
 
 
   useEffect(() => {
