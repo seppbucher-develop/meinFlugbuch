@@ -1861,38 +1861,69 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (isFullscreen && fullReadyRef.current) placeOn(fullMapRef.current, playMarkerRef, true);
   }, [playElapsedSec, isFullscreen]);
 
+  // Interpoliert Position (lat/lon) und Flugzeit an einer gegebenen (RAW,
+  // unskalierten) Distanz entlang des Tracks — dieselbe Distanz-Basis wie
+  // cumDist/playbackDistanceKm. Gemeinsam genutzt vom Scrub-Marker unten und
+  // vom Scrub-Seek-Effekt (setzt playElapsedSec), damit Marker-Position und
+  // Wiedergabe-Zeitpunkt beim Scrubben immer exakt zueinander passen.
+  const interpAtDistance = (distKm) => {
+    if (track.length < 2 || !cumDist.length) return null;
+    let i = 0;
+    while (i < cumDist.length-2 && cumDist[i+1] < distKm) i++;
+    const a = track[i], b = track[i+1] || a;
+    const da = cumDist[i], db = cumDist[i+1] != null ? cumDist[i+1] : da;
+    const span = (db-da) || 1;
+    const frac = Math.max(0, Math.min(1, (distKm-da)/span));
+    return {
+      lat: a.lat + (b.lat-a.lat)*frac,
+      lon: a.lon + (b.lon-a.lon)*frac,
+      timeSec: a.timeSec + ((b.timeSec!=null?b.timeSec:a.timeSec) - a.timeSec)*frac,
+    };
+  };
+
   // Scrub-Cursor aus dem Höhenprofil (Finger-Drag dort, siehe FlightProfile/
   // onScrubChange) als Marker auf der Karte — rein informativ, rührt nie an
   // Zoom/Kamera (kein jumpTo/fitBounds hier), damit Verschieben des Cursors
-  // niemals den Kartenausschnitt verändert. Bleibt während der Kino-
-  // Wiedergabe aus, weil FlightProfile scrubDistanceKm dann selbst auf null
-  // setzt (siehe dort) — der Wiedergabe-Marker (placeOn oben) übernimmt.
+  // niemals den Kartenausschnitt verändert. Funktioniert jetzt auch während
+  // der Kino-Wiedergabe (siehe Scrub-Seek-Effekt gleich danach) — FlightProfile
+  // blendet den Cursor nur noch aus, sobald man ihn loslässt, während gerade
+  // abgespielt wird (siehe dort), damit hier kein dauerhaft "eingefrorener"
+  // zweiter Marker neben dem laufenden Wiedergabe-Marker (placeOn oben) übrig bleibt.
   useEffect(() => {
     const placeScrub = (map, ref) => {
       if (!map) return;
-      if (scrubDistanceKm == null || track.length < 2 || !cumDist.length) {
+      const p = scrubDistanceKm != null ? interpAtDistance(scrubDistanceKm) : null;
+      if (!p) {
         if (ref.current) { ref.current.remove(); ref.current = null; }
         return;
       }
-      let i = 0;
-      while (i < cumDist.length-2 && cumDist[i+1] < scrubDistanceKm) i++;
-      const a = track[i], b = track[i+1] || a;
-      const da = cumDist[i], db = cumDist[i+1] != null ? cumDist[i+1] : da;
-      const span = (db-da) || 1;
-      const frac = Math.max(0, Math.min(1, (scrubDistanceKm-da)/span));
-      const lat = a.lat + (b.lat-a.lat)*frac, lon = a.lon + (b.lon-a.lon)*frac;
       const sdk = window.maptilersdk;
       if (!ref.current) {
         const el = document.createElement("div");
         el.style.cssText = `width:20px;height:20px;border-radius:50%;background:#38bdf8;border:3px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,0.6);`;
-        ref.current = new sdk.Marker({ element: el }).setLngLat([lon, lat]).addTo(map);
+        ref.current = new sdk.Marker({ element: el }).setLngLat([p.lon, p.lat]).addTo(map);
       } else {
-        ref.current.setLngLat([lon, lat]);
+        ref.current.setLngLat([p.lon, p.lat]);
       }
     };
     if (previewReadyRef.current) placeScrub(previewMapRef.current, previewScrubMarkerRef);
     if (isFullscreen && fullReadyRef.current) placeScrub(fullMapRef.current, fullScrubMarkerRef);
   }, [scrubDistanceKm, isFullscreen, track, cumDist]);
+
+  // Scrubben verschiebt jetzt auch die eigentliche Wiedergabe-Position
+  // (playElapsedSec) an die neue Cursorstelle — sowohl während der
+  // Wiedergabe (dann läuft sie ab dort einfach weiter) als auch pausiert
+  // (dann setzt ein späterer Play-Klick genau dort fort, statt an der alten
+  // Position). Der laufende Wiedergabe-rAF (siehe oben) liest playElapsedSec
+  // bei jedem Frame per funktionalem setState-Update neu, übernimmt einen
+  // hier gesetzten Sprung also nahtlos für sein nächstes Delta.
+  useEffect(() => {
+    if (scrubDistanceKm == null) return;
+    const p = interpAtDistance(scrubDistanceKm);
+    const t0 = track[0]?.timeSec;
+    if (!p || t0 == null) return;
+    setPlayElapsedSec(Math.max(0, p.timeSec - t0));
+  }, [scrubDistanceKm, track, cumDist]);
 
   // Cleans up the fullscreen-specific playback marker whenever fullscreen
   // closes (playback itself keeps going — it's shared with the preview
@@ -2221,20 +2252,25 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     profileZoomActive = zoomLevel > 1;
     return () => { profileZoomActive = false; };
   }, [zoomLevel]);
-  // Der Wiedergabe-Marker übernimmt während der Kino-Wiedergabe exklusiv —
-  // ein noch gesetzter Scrub-Cursor würde sonst zwei Marker gleichzeitig auf
-  // der Karte zeigen und dort widersprüchliche Positionen behaupten.
+  // Blendet einen von PAUSIERT übernommenen Scrub-Cursor aus, sobald Play
+  // gedrückt wird — die Wiedergabe wurde ja bereits per Scrub-Seek (siehe
+  // FlightMap) exakt auf diese Position gesetzt, der Wiedergabe-Marker
+  // übernimmt ab hier. Während eines Drags BEI LAUFENDER Wiedergabe greift
+  // das nicht (isPlaybackActive ändert sich dabei nicht), siehe stattdessen
+  // endScrub oben, das den Cursor erst beim Loslassen ausblendet.
   useEffect(() => { if (isPlaybackActive) setScrubDist(null); }, [isPlaybackActive]);
   // Meldet den Scrub-Cursor (RAW/unskaliert, wie playbackDistanceKm) an die
-  // Karte, die daraus einen eigenen Marker positioniert — bewusst getrennt
-  // von onPositionChange/highlightRange oben, damit Scrubben nie einen
+  // Karte — die setzt daraus sowohl einen eigenen Marker als auch (siehe
+  // dort) die Wiedergabe-Position (playElapsedSec) selbst, funktioniert
+  // also jetzt auch während der Wiedergabe. Bewusst getrennt von
+  // onPositionChange/highlightRange oben, damit Scrubben nie einen
   // Kamera-Fit auf der Karte auslöst (siehe applyHighlightCamera in
   // FlightMap: die reagiert nur auf highlightRange, nicht auf diesen Wert).
   useEffect(() => {
     if (!onScrubChange) return;
-    if (isPlaybackActive || scrubDist == null || !totalDist) { onScrubChange(null); return; }
+    if (scrubDist == null || !totalDist) { onScrubChange(null); return; }
     onScrubChange(scale > 0 ? scrubDist/scale : scrubDist);
-  }, [scrubDist, totalDist, scale, isPlaybackActive, onScrubChange]);
+  }, [scrubDist, totalDist, scale, onScrubChange]);
 
   // Tells the map above what part of the flight (in the flight's own,
   // unscaled distance units — the manual-Distanz proportional rescale only
@@ -2297,14 +2333,26 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
       const vEnd = vStart + total/vScale;
       return Math.max(0, Math.min(total, vStart + relX*(vEnd-vStart)));
     };
+    // Scrubben ist jetzt auch während der Kino-Wiedergabe erlaubt (vorher
+    // per isPlaybackActiveRef-Check blockiert) — FlightMap greift den
+    // Cursor über scrubDistanceKm auf und setzt playElapsedSec direkt
+    // darauf, die Wiedergabe läuft also ab der neuen Stelle weiter statt
+    // wie zuvor beim nächsten Play-Klick an der alten Position fortzusetzen.
     const startScrub = (clientX) => {
-      if (isPlaybackActiveRef.current) return false;
       scrubGestureRef.current = true;
       setScrubDist(distAtClientX(clientX));
       return true;
     };
     const moveScrub = (clientX) => { if (scrubGestureRef.current) setScrubDist(distAtClientX(clientX)); };
-    const endScrub = () => { scrubGestureRef.current = false; };
+    // Läuft die Wiedergabe noch, blendet endScrub den Cursor beim Loslassen
+    // sofort aus — sonst bliebe er als zweiter, eingefrorener Marker neben
+    // dem weiterlaufenden Wiedergabe-Marker stehen. Pausiert bleibt er
+    // sichtbar stehen, als sichtbare Markierung der (jetzt auch tatsächlich
+    // gesetzten) Fortsetzungsposition für den nächsten Play-Klick.
+    const endScrub = () => {
+      scrubGestureRef.current = false;
+      if (isPlaybackActiveRef.current) setScrubDist(null);
+    };
 
     const onTouchStart = (e) => {
       if (e.touches.length !== 1) return;
