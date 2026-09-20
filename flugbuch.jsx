@@ -1534,12 +1534,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // and swaps the track source's data between the full track and just the
   // zoomed-in segment. Safe to call repeatedly — does nothing until the
   // map's initial "load" has actually finished.
-  const applyHighlight = (map, refMarkerRefObj) => {
+  // Nur der statische Referenz-Marker — reine Sichtbarkeits-/Positions-
+  // Umschaltung, fasst Zoom/Kamera nie an. Dadurch kann sie unabhängig vom
+  // Kamera-Fit (siehe applyHighlightCamera) bei jedem Play/Pause aufgerufen
+  // werden, ohne dass Play/Pause dabei je den Zoom verändert.
+  const applyRefMarker = (map, refMarkerRefObj) => {
     if (!map) return;
     const sdk = window.maptilersdk;
-    // Line always shows the whole track — only the camera zooms into the
-    // profile's segment (via fitBounds below), so nothing here needs to
-    // touch the "track" source at all once it's been set on load.
     if (refMarkerRefObj.current) { refMarkerRefObj.current.remove(); refMarkerRefObj.current = null; }
     // Skip the static reference marker entirely while cine playback is
     // running — the moving playback marker already shows the current
@@ -1566,17 +1567,14 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       refMarkerRefObj.current = new sdk.Marker({ element: el, rotationAlignment: "viewport", pitchAlignment: "viewport" })
         .setLngLat([refPoint.lon, refPoint.lat]).addTo(map);
     }
-    // Während der Wiedergabe übernimmt placeOn (weiter unten) exklusiv die
-    // Kameraführung mit bewusst unverändertem Zoom. Ein gezoomtes
-    // Höhenprofil meldet highlightRange dabei laufend neu (jeder
-    // Fortschritt der Wiedergabeposition), was hier bei jedem Frame ein
-    // fitBounds auf die gerade sichtbare Profil-Distanz ausgelöst hätte —
-    // und damit einen neuen, zur Profilbreite passenden Zoom berechnet, der
-    // mit dem in placeOn fixierten Zoom kollidierte (sichtbar z.B. als
-    // Zoom-Rücksprung, sobald ein längerer Geradeausflug-Abschnitt vor
-    // einer Thermik eine grössere Fläche abdeckte). Marker-Auf-/Abbau oben
-    // bleibt davon unberührt.
-    if (isPlaying) return;
+  };
+  // Kamera-Fit auf das Profil-Segment (bzw. den ganzen Track) — wird
+  // absichtlich nie durch Play/Pause selbst ausgelöst (siehe Aufrufer
+  // unten), damit Play/Pause ausschliesslich die Wiedergabe steuert und nie
+  // Zoom/Kamera verändert. Während der Wiedergabe übernimmt placeOn (weiter
+  // unten) exklusiv die Kameraführung mit bewusst unverändertem Zoom.
+  const applyHighlightCamera = (map) => {
+    if (!map) return;
     const fitToPoints = (pts) => {
       if (!pts.length) return;
       const lons = pts.map(p=>p.lon), lats = pts.map(p=>p.lat);
@@ -1586,6 +1584,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (segment && segment.length > 1) fitToPoints(segment);
     else if (track.length) fitToPoints(cleanTrack.length ? cleanTrack : track);
     else if (sP && eP) fitToPoints([sP, eP]);
+  };
+  const applyHighlight = (map, refMarkerRefObj) => {
+    applyRefMarker(map, refMarkerRefObj);
+    if (isPlaying) return;
+    applyHighlightCamera(map);
   };
 
   // Schaltet die in buildMap bereits angelegte (aber standardmässig
@@ -1693,14 +1696,25 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     };
   }, [isFullscreen, flight?.id, gliderIcon]);
 
-  // Profile pan/zoom changes land here — updates the already-live map(s) in
-  // place (camera + reference marker + track segment) instead of rebuilding
-  // them, which is what previously exhausted the browser's WebGL context
-  // budget during a drag gesture.
+  // Profile pan/zoom changes land here — updates the already-live map(s)
+  // camera in place instead of rebuilding them, which is what previously
+  // exhausted the browser's WebGL context budget during a drag gesture.
+  // isPlaying is deliberately NOT a dependency: Play/Pause must only start/
+  // stop the playback, never itself trigger a camera fit (that used to snap
+  // the zoom to the whole track on Pause and leave it stuck there).
   useEffect(() => {
-    if (previewReadyRef.current) applyHighlight(previewMapRef.current, previewRefMarkerRef);
-    if (isFullscreen && fullReadyRef.current) applyHighlight(fullMapRef.current, fullRefMarkerRef);
-  }, [highlightRange?.start, highlightRange?.end, isFullscreen, isPlaying]);
+    if (isPlaying) return;
+    if (previewReadyRef.current) applyHighlightCamera(previewMapRef.current);
+    if (isFullscreen && fullReadyRef.current) applyHighlightCamera(fullMapRef.current);
+  }, [highlightRange?.start, highlightRange?.end, isFullscreen]);
+
+  // Der statische Referenz-Marker wird separat umgeschaltet (sichtbar nur
+  // ausserhalb der Wiedergabe) — reine Sichtbarkeits-/Positions-Änderung,
+  // rührt nie an Zoom/Kamera, siehe applyRefMarker.
+  useEffect(() => {
+    if (previewReadyRef.current) applyRefMarker(previewMapRef.current, previewRefMarkerRef);
+    if (isFullscreen && fullReadyRef.current) applyRefMarker(fullMapRef.current, fullRefMarkerRef);
+  }, [refPoint, heading, isPlaying, isFullscreen]);
 
   // Cine playback: moves a dedicated glider marker along the track over
   // time, at playSpeed× real flight time. Works on the preview map too now
