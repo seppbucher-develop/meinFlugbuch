@@ -31,8 +31,48 @@ const CACHE_NAME = "flugbuch-cache-" + CACHE_VERSION;
 //
 // Zum Zurückstellen auf die alte Strategie einfach wieder auf
 // "network-first" ändern — beide Code-Pfade bleiben unten vollständig
-// erhalten, es wird nur zwischen ihnen umgeschaltet.
+// erhalten, es wird nur zwischen ihnen umgeschaltet. Das ist der
+// eingebaute STANDARD; unter Service → "Updates & Offline-Cache" kann die
+// Person selbst zur Laufzeit auf "network-first" umschalten (siehe
+// getStrategyOverride/message-Handler unten) — praktisch beim aktiven
+// Testen neuer Versionen, ohne dafür extra einen Deploy zu machen.
 const SAME_ORIGIN_STRATEGY = "stale-while-revalidate";
+
+// Persistiert die per Service-Checkbox gewählte Strategie NICHT in
+// "flugbuch-db" (dieselbe IndexedDB, die window.storage in den Seiten
+// selbst verwendet) — ein Service Worker, der als Erster jemals darauf
+// zugreift, würde ohne den dortigen onupgradeneeded-Handler eine leere DB
+// ohne den "kv"-Object-Store anlegen und so das Anlegen des Stores durch
+// die Seiten selbst dauerhaft blockieren. Ein eigener, unversionierter
+// Cache-Name umgeht dieses Risiko komplett und übersteht (anders als
+// CACHE_NAME) auch einen CACHE_VERSION-Bump, weil die activate-Bereinigung
+// unten nur Caches mit dem Präfix "flugbuch-cache-" löscht.
+const SETTINGS_CACHE_NAME = "flugbuch-settings";
+const CACHE_STRATEGY_KEY = "/__meta__/cache-strategy";
+
+async function getStrategyOverride() {
+  try {
+    const cache = await caches.open(SETTINGS_CACHE_NAME);
+    const resp = await cache.match(CACHE_STRATEGY_KEY);
+    if (!resp) return null;
+    const text = await resp.text();
+    return text === "network-first" ? "network-first" : null;
+  } catch {
+    return null;
+  }
+}
+
+// Nimmt die Checkbox-Auswahl von service.jsx entgegen (dort per
+// navigator.serviceWorker.getRegistration() → reg.active.postMessage(...)
+// gesendet, sowohl beim Umschalten als auch einmal beim Laden der Seite,
+// damit ein evtl. verlorener Cache-Eintrag repariert wird).
+self.addEventListener("message", (event) => {
+  if (!event.data || event.data.type !== "setCacheStrategy") return;
+  const value = event.data.value === "network-first" ? "network-first" : "stale-while-revalidate";
+  event.waitUntil(
+    caches.open(SETTINGS_CACHE_NAME).then((cache) => cache.put(CACHE_STRATEGY_KEY, new Response(value)))
+  );
+});
 
 // React/Babel/MapTiler etc. werden bisher direkt von externen CDNs geladen
 // und NIE offline verfügbar gemacht (der fetch-Handler reicht Cross-Origin-
@@ -157,36 +197,32 @@ self.addEventListener("fetch", (event) => {
   // verwendet).
   const cacheKey = url.pathname.split("/").pop() || "./";
 
-  if (SAME_ORIGIN_STRATEGY === "stale-while-revalidate") {
-    event.respondWith(
-      caches.match(cacheKey).then((cached) => {
-        const networkUpdate = fetch(req)
-          .then((networkResponse) => {
-            const clone = networkResponse.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
-            return networkResponse;
-          })
-          .catch(() => null);
+  const respondStaleWhileRevalidate = () =>
+    caches.match(cacheKey).then((cached) => {
+      const networkUpdate = fetch(req)
+        .then((networkResponse) => {
+          const clone = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
+          return networkResponse;
+        })
+        .catch(() => null);
 
-        if (cached) {
-          // Auf das Netzwerk-Ergebnis NICHT warten — der Cache-Eintrag wird
-          // im Hintergrund fürs nächste Mal aktualisiert. event.waitUntil
-          // hält den Service Worker am Leben, bis das fertig ist, auch wenn
-          // die Antwort selbst längst zurückgegeben wurde.
-          event.waitUntil(networkUpdate);
-          return cached;
-        }
-        // Nichts im Cache (z.B. beim allerersten Aufruf überhaupt) — hier
-        // bleibt nur, auf das Netzwerk zu warten; schlägt auch das fehl,
-        // wie in der network-first-Strategie auf index.html zurückfallen.
-        return networkUpdate.then((networkResponse) => networkResponse || caches.match("index.html"));
-      })
-    );
-    return;
-  }
+      if (cached) {
+        // Auf das Netzwerk-Ergebnis NICHT warten — der Cache-Eintrag wird
+        // im Hintergrund fürs nächste Mal aktualisiert. event.waitUntil
+        // hält den Service Worker am Leben, bis das fertig ist, auch wenn
+        // die Antwort selbst längst zurückgegeben wurde.
+        event.waitUntil(networkUpdate);
+        return cached;
+      }
+      // Nichts im Cache (z.B. beim allerersten Aufruf überhaupt) — hier
+      // bleibt nur, auf das Netzwerk zu warten; schlägt auch das fehl,
+      // wie in der network-first-Strategie auf index.html zurückfallen.
+      return networkUpdate.then((networkResponse) => networkResponse || caches.match("index.html"));
+    });
 
   // network-first (ursprüngliche Strategie, siehe SAME_ORIGIN_STRATEGY oben)
-  event.respondWith(
+  const respondNetworkFirst = () =>
     fetch(req)
       .then((networkResponse) => {
         const clone = networkResponse.clone();
@@ -200,6 +236,15 @@ self.addEventListener("fetch", (event) => {
           // die zuletzt gecachte Basisversion ohne Query-String.
           return caches.match(cacheKey) || caches.match("index.html");
         })
-      )
+      );
+
+  // Die per Service-Checkbox gewählte Strategie (falls gesetzt) hat Vorrang
+  // vor der fest codierten SAME_ORIGIN_STRATEGY oben.
+  event.respondWith(
+    getStrategyOverride().then((override) =>
+      (override || SAME_ORIGIN_STRATEGY) === "network-first"
+        ? respondNetworkFirst()
+        : respondStaleWhileRevalidate()
+    )
   );
 });
