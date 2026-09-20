@@ -252,6 +252,54 @@ function ServiceApp() {
     }
   };
 
+  // Cache-Strategie des Service Workers für die eigenen Seiten (siehe
+  // sw.js/SAME_ORIGIN_STRATEGY dort für die ausführliche Erklärung).
+  // Standard "stale-while-revalidate" zeigt nach einem Update immer erst
+  // beim ÜBERNÄCHSTEN Öffnen die neue Version — praktisch fürs normale
+  // Nutzen (sofort da, auch bei schwachem Netz am Lande-/Startplatz), aber
+  // verwirrend beim aktiven Testen neuer Versionen. Diese Checkbox schaltet
+  // stattdessen auf "network-first" um: jedes Öffnen lädt zuerst die
+  // neueste Version übers Netz, auf Kosten von potenziell spürbar
+  // langsamerem Laden bei schwachem Empfang. sw.js liest die Wahl bei
+  // jedem Request direkt aus einem eigenen, unversionierten Cache-Eintrag
+  // (siehe getStrategyOverride dort) — window.storage hier dient nur dazu,
+  // die Checkbox selbst über einen Seiten-Neuladen hinweg richtig
+  // anzuzeigen, und die Seite schickt den gespeicherten Wert bei jedem
+  // Laden zusätzlich per postMessage an den Service Worker, damit ein
+  // versehentlich verlorener Cache-Eintrag dort repariert wird.
+  const [networkFirst, setNetworkFirst] = React.useState(false);
+  const sendCacheStrategyToSw = async (value) => {
+    try {
+      if (!("serviceWorker" in navigator)) return;
+      const reg = await navigator.serviceWorker.getRegistration();
+      reg?.active?.postMessage({ type: "setCacheStrategy", value });
+    } catch {}
+  };
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("settings:cacheStrategy");
+        const value = r?.value === "network-first" ? "network-first" : "stale-while-revalidate";
+        setNetworkFirst(value === "network-first");
+        sendCacheStrategyToSw(value);
+      } catch {}
+    })();
+  }, []);
+  const saveNetworkFirst = async (checked) => {
+    const value = checked ? "network-first" : "stale-while-revalidate";
+    setNetworkFirst(checked);
+    try {
+      await window.storage.set("settings:cacheStrategy", value);
+      await window.storage.set("settings:backupDirty", "1");
+      await sendCacheStrategyToSw(value);
+      setMsg({ type: "ok", text: checked
+        ? "✓ Network-First aktiviert — neue Versionen sind ab dem nächsten Öffnen sofort sichtbar."
+        : "✓ Wieder auf die Standard-Strategie umgestellt (sofort aus dem Zwischenspeicher, Updates ab dem übernächsten Öffnen)." });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Speichern: " + (e.message || String(e)) });
+    }
+  };
+
   // Lokaler Backup-Ordner (File System Access API) — nur Chrome/Edge
   // Desktop unterstützen das; auf allen anderen Browsern (Safari, Firefox,
   // jedes Handy) bleibt es beim Teilen/Download-Weg weiter unten.
@@ -724,6 +772,18 @@ function ServiceApp() {
           {nearbyRadiusSaved && (
             <div style={{ fontSize: 11, color: "rgba(74,222,128,0.8)", marginTop: 8 }}>✓ Aktueller Standardradius: {nearbyRadius} km.</div>
           )}
+        </div>
+
+        <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>🔄 Updates &amp; Offline-Cache</div>
+          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+            Die App speichert ihre eigenen Seiten für die Offline-Nutzung zwischen. Standardmässig wird beim Öffnen immer sofort die zuletzt gespeicherte Version angezeigt (auch offline oder bei schwachem Netz sofort da) — ein Update wird dadurch erst beim übernächsten Öffnen sichtbar. Mit dieser Einstellung lädt die App stattdessen bei jedem Öffnen zuerst die neueste Version übers Netz; Updates sind dann sofort sichtbar, aber bei schwachem Empfang (z.B. am Lande-/Startplatz) kann das Laden dadurch spürbar länger dauern.
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+            <input type="checkbox" checked={networkFirst} onChange={e => saveNetworkFirst(e.target.checked)}
+              style={{ width: 18, height: 18, cursor: "pointer", flexShrink: 0 }} />
+            <span style={{ fontSize: 13 }}>Immer neueste Version laden (Network-First)</span>
+          </label>
         </div>
 
         {fsapiSupported && (

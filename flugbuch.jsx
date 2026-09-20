@@ -2070,38 +2070,47 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           <div style={{position:"relative",flex:"1 1 auto",minHeight:0,width:"100%"}}>
             {/* zIndex:0 (statt "auto") fängt MapTilers eigene, intern per
                 absoluter Position eingefügte Bedienelemente (u.a. die
-                eingebauten Zoom-+/--Buttons oben rechts, siehe Kommentar
-                weiter unten) in einem eigenen Stacking-Context dieses Divs
-                ein — ohne das könnten sie (je nach von MapTiler gesetztem
-                z-index) über den Geschwister-Elementen wie dem
-                Schliessen-Button landen, obwohl der im Markup danach kommt. */}
+                eingebauten Zoom-+/--Buttons oben rechts) in einem eigenen
+                Stacking-Context dieses Divs ein. */}
             <div ref={fullDivRef} style={{position:"absolute",inset:0,zIndex:0}} />
-            {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
-              // Alle Badges links statt rechts: die eingebauten Zoom-+/--
-              // Buttons der Karte sitzen rechts oben und überlagerten dort ein
-              // Badge. Sind mehrere Badges aktiv, stehen sie als eigene Zeilen
-              // untereinander (Distanz, Steigen/Sinken, Monitor).
-              <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:8,pointerEvents:"none"}}>
-                {showDistance && distanceRoute && (
-                  <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
-                    📏 {distanceRoute.km} km
-                  </div>
-                )}
-                {showClimbSink && climbSinkPoints && (
-                  <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
-                    <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
-                    <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
-                  </div>
-                )}
-                {showMonitor && monitorInfo && (
-                  <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
-                    <span style={{color:"#7dd3fc"}}>⬆ {Math.round(monitorInfo.alt)} m</span>
-                    <span style={{color:"#e8f4fd"}}>➤ {Math.round(monitorInfo.speedKmh)} km/h</span>
-                    <span style={{color:monitorInfo.varioMs>=0?"#4ade80":"#f87171"}}>{monitorInfo.varioMs>=0?"↑":"↓"} {Math.abs(monitorInfo.varioMs).toFixed(1)} m/s</span>
-                  </div>
-                )}
-              </div>
-            )}
+            {/* Schliessen-Button UND Badges jetzt zusammen oben LINKS statt
+                rechts (Button war zuvor oben rechts platziert und wurde dort
+                trotz eigenem Stacking-Context von MapTilers eingebauten
+                Zoom-+/--Buttons verdeckt — bei Geräten/Browsern, bei denen
+                sich das per z-index allein nicht zuverlässig lösen liess,
+                macht der Eckenwechsel eine Überlappung von vornherein
+                unmöglich, unabhängig von jeglicher CSS-Stacking-Feinheit).
+                Ein gemeinsamer Flex-Container hält beide übereinander statt
+                sich zu überlappen; pointerEvents:"auto" auf dem Button hebt
+                das "none" der Badges für ihn gezielt wieder auf. */}
+            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:10,zIndex:1,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:8}}>
+              <button onClick={()=>setIsFullscreen(false)}
+                style={{background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:12,width:22,height:22,color:"#fff",fontSize:12,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0,pointerEvents:"auto"}}>
+                ✕
+              </button>
+              {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
+                <div style={{display:"flex",flexDirection:"column",gap:8,pointerEvents:"none"}}>
+                  {showDistance && distanceRoute && (
+                    <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+                      📏 {distanceRoute.km} km
+                    </div>
+                  )}
+                  {showClimbSink && climbSinkPoints && (
+                    <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
+                      <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
+                      <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
+                    </div>
+                  )}
+                  {showMonitor && monitorInfo && (
+                    <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
+                      <span style={{color:"#7dd3fc"}}>⬆ {Math.round(monitorInfo.alt)} m</span>
+                      <span style={{color:"#e8f4fd"}}>➤ {Math.round(monitorInfo.speedKmh)} km/h</span>
+                      <span style={{color:monitorInfo.varioMs>=0?"#4ade80":"#f87171"}}>{monitorInfo.varioMs>=0?"↑":"↓"} {Math.abs(monitorInfo.varioMs).toFixed(1)} m/s</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
             {flight?.track?.length > 1 && (
               <div style={{position:"absolute",bottom:14,right:14,display:"flex",gap:6,alignItems:"center"}}>
                 <button onClick={togglePlay}
@@ -2135,13 +2144,6 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
                 )}
               </div>
             )}
-            {/* Kleiner als zuvor (32px → 22px) — reserviert weniger von der
-                Kartenfläche, während der Rest der Karte unverändert bis an
-                den Bildschirmrand reicht. */}
-            <button onClick={()=>setIsFullscreen(false)}
-              style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 8px)",right:10,zIndex:1,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:12,width:22,height:22,color:"#fff",fontSize:12,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>
-              ✕
-            </button>
           </div>
           {/* Höhenprofil-Leiste unterhalb der Karte — Portal-Ziel für
               FlightProfile (siehe onFullscreenProfileSlot/fullscreenSlot),
