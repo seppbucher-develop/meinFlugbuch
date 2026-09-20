@@ -1189,7 +1189,7 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
 }
 
 
-function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, onPlaybackPhaseChange, controlsSlot, isWide, mapTilerKey }) {
+function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, onPlaybackPhaseChange, controlsSlot, isWide, mapTilerKey, onFullscreenProfileSlot, scrubDistanceKm }) {
   const previewDivRef = useRef(null);
   const previewMapRef = useRef(null);
   const previewRefMarkerRef = useRef(null);
@@ -1208,7 +1208,17 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // stärksten Steig- und den stärksten Sinkpunkt im Track.
   const previewClimbSinkMarkersRef = useRef([]);
   const fullClimbSinkMarkersRef = useRef([]);
+  // Marker des im Höhenprofil per Finger gesetzten Scrub-Cursors (siehe
+  // scrubDistanceKm) — eigenständig vom stehenden Referenz-Marker und vom
+  // Wiedergabe-Marker, da er unabhängig von Zoom-Fenster und Kino-Wiedergabe
+  // an jeder beliebigen Trackposition stehen kann.
+  const previewScrubMarkerRef = useRef(null);
+  const fullScrubMarkerRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Nur genutzt, um den Vollbild-Profilstreifen unterhalb der Karte im
+  // Quermodus schmal statt hoch zu halten (siehe unten) — derselbe Hook, den
+  // auch die Listenansicht für ihr Quermodus-Layout verwendet.
+  const isLandscapePhone = useIsLandscapePhone();
   // Which glider marker to use — chosen in Settings > Schirme, shared
   // across the whole app via storage. Re-read on focus so a change made in
   // Settings (a different page) takes effect without needing a full reload
@@ -1492,13 +1502,16 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           lineMetrics: true,
           data: { type: "Feature", geometry: { type: "LineString", coordinates: fullTrace.map(p=>[p.lon,p.lat]) } },
         });
+        // Dünner als zuvor (6.5/3.5) und mit explizitem line-blur:0 — wirkt
+        // dadurch merklich schärfer/knackiger statt wie ein weicher Balken,
+        // ohne den Track auf der Karte optisch zu verlieren.
         map.addLayer({ id: "track-casing", type: "line", source: "track",
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: { "line-color": "rgba(255,255,255,0.55)", "line-width": 6.5 } });
+          paint: { "line-color": "rgba(255,255,255,0.55)", "line-width": 4.5, "line-blur": 0 } });
         const gradient = buildLineGradient(fullTrace);
         map.addLayer({ id: "track-line", type: "line", source: "track",
           layout: { "line-join": "round", "line-cap": "round" },
-          paint: gradient ? { "line-gradient": gradient, "line-width": 3.5 } : { "line-color": "#1e40af", "line-width": 3.5 } });
+          paint: gradient ? { "line-gradient": gradient, "line-width": 2.4, "line-blur": 0 } : { "line-color": "#1e40af", "line-width": 2.4, "line-blur": 0 } });
       }
       if (track.length) {
         addMarker(track[0], "#22c55e", "S");
@@ -1534,12 +1547,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // and swaps the track source's data between the full track and just the
   // zoomed-in segment. Safe to call repeatedly — does nothing until the
   // map's initial "load" has actually finished.
-  const applyHighlight = (map, refMarkerRefObj) => {
+  // Nur der statische Referenz-Marker — reine Sichtbarkeits-/Positions-
+  // Umschaltung, fasst Zoom/Kamera nie an. Dadurch kann sie unabhängig vom
+  // Kamera-Fit (siehe applyHighlightCamera) bei jedem Play/Pause aufgerufen
+  // werden, ohne dass Play/Pause dabei je den Zoom verändert.
+  const applyRefMarker = (map, refMarkerRefObj) => {
     if (!map) return;
     const sdk = window.maptilersdk;
-    // Line always shows the whole track — only the camera zooms into the
-    // profile's segment (via fitBounds below), so nothing here needs to
-    // touch the "track" source at all once it's been set on load.
     if (refMarkerRefObj.current) { refMarkerRefObj.current.remove(); refMarkerRefObj.current = null; }
     // Skip the static reference marker entirely while cine playback is
     // running — the moving playback marker already shows the current
@@ -1566,17 +1580,14 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       refMarkerRefObj.current = new sdk.Marker({ element: el, rotationAlignment: "viewport", pitchAlignment: "viewport" })
         .setLngLat([refPoint.lon, refPoint.lat]).addTo(map);
     }
-    // Während der Wiedergabe übernimmt placeOn (weiter unten) exklusiv die
-    // Kameraführung mit bewusst unverändertem Zoom. Ein gezoomtes
-    // Höhenprofil meldet highlightRange dabei laufend neu (jeder
-    // Fortschritt der Wiedergabeposition), was hier bei jedem Frame ein
-    // fitBounds auf die gerade sichtbare Profil-Distanz ausgelöst hätte —
-    // und damit einen neuen, zur Profilbreite passenden Zoom berechnet, der
-    // mit dem in placeOn fixierten Zoom kollidierte (sichtbar z.B. als
-    // Zoom-Rücksprung, sobald ein längerer Geradeausflug-Abschnitt vor
-    // einer Thermik eine grössere Fläche abdeckte). Marker-Auf-/Abbau oben
-    // bleibt davon unberührt.
-    if (isPlaying) return;
+  };
+  // Kamera-Fit auf das Profil-Segment (bzw. den ganzen Track) — wird
+  // absichtlich nie durch Play/Pause selbst ausgelöst (siehe Aufrufer
+  // unten), damit Play/Pause ausschliesslich die Wiedergabe steuert und nie
+  // Zoom/Kamera verändert. Während der Wiedergabe übernimmt placeOn (weiter
+  // unten) exklusiv die Kameraführung mit bewusst unverändertem Zoom.
+  const applyHighlightCamera = (map) => {
+    if (!map) return;
     const fitToPoints = (pts) => {
       if (!pts.length) return;
       const lons = pts.map(p=>p.lon), lats = pts.map(p=>p.lat);
@@ -1586,6 +1597,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (segment && segment.length > 1) fitToPoints(segment);
     else if (track.length) fitToPoints(cleanTrack.length ? cleanTrack : track);
     else if (sP && eP) fitToPoints([sP, eP]);
+  };
+  const applyHighlight = (map, refMarkerRefObj) => {
+    applyRefMarker(map, refMarkerRefObj);
+    if (isPlaying) return;
+    applyHighlightCamera(map);
   };
 
   // Schaltet die in buildMap bereits angelegte (aber standardmässig
@@ -1693,14 +1709,25 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     };
   }, [isFullscreen, flight?.id, gliderIcon]);
 
-  // Profile pan/zoom changes land here — updates the already-live map(s) in
-  // place (camera + reference marker + track segment) instead of rebuilding
-  // them, which is what previously exhausted the browser's WebGL context
-  // budget during a drag gesture.
+  // Profile pan/zoom changes land here — updates the already-live map(s)
+  // camera in place instead of rebuilding them, which is what previously
+  // exhausted the browser's WebGL context budget during a drag gesture.
+  // isPlaying is deliberately NOT a dependency: Play/Pause must only start/
+  // stop the playback, never itself trigger a camera fit (that used to snap
+  // the zoom to the whole track on Pause and leave it stuck there).
   useEffect(() => {
-    if (previewReadyRef.current) applyHighlight(previewMapRef.current, previewRefMarkerRef);
-    if (isFullscreen && fullReadyRef.current) applyHighlight(fullMapRef.current, fullRefMarkerRef);
-  }, [highlightRange?.start, highlightRange?.end, isFullscreen, isPlaying]);
+    if (isPlaying) return;
+    if (previewReadyRef.current) applyHighlightCamera(previewMapRef.current);
+    if (isFullscreen && fullReadyRef.current) applyHighlightCamera(fullMapRef.current);
+  }, [highlightRange?.start, highlightRange?.end, isFullscreen]);
+
+  // Der statische Referenz-Marker wird separat umgeschaltet (sichtbar nur
+  // ausserhalb der Wiedergabe) — reine Sichtbarkeits-/Positions-Änderung,
+  // rührt nie an Zoom/Kamera, siehe applyRefMarker.
+  useEffect(() => {
+    if (previewReadyRef.current) applyRefMarker(previewMapRef.current, previewRefMarkerRef);
+    if (isFullscreen && fullReadyRef.current) applyRefMarker(fullMapRef.current, fullRefMarkerRef);
+  }, [refPoint, heading, isPlaying, isFullscreen]);
 
   // Cine playback: moves a dedicated glider marker along the track over
   // time, at playSpeed× real flight time. Works on the preview map too now
@@ -1834,12 +1861,48 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (isFullscreen && fullReadyRef.current) placeOn(fullMapRef.current, playMarkerRef, true);
   }, [playElapsedSec, isFullscreen]);
 
+  // Scrub-Cursor aus dem Höhenprofil (Finger-Drag dort, siehe FlightProfile/
+  // onScrubChange) als Marker auf der Karte — rein informativ, rührt nie an
+  // Zoom/Kamera (kein jumpTo/fitBounds hier), damit Verschieben des Cursors
+  // niemals den Kartenausschnitt verändert. Bleibt während der Kino-
+  // Wiedergabe aus, weil FlightProfile scrubDistanceKm dann selbst auf null
+  // setzt (siehe dort) — der Wiedergabe-Marker (placeOn oben) übernimmt.
+  useEffect(() => {
+    const placeScrub = (map, ref) => {
+      if (!map) return;
+      if (scrubDistanceKm == null || track.length < 2 || !cumDist.length) {
+        if (ref.current) { ref.current.remove(); ref.current = null; }
+        return;
+      }
+      let i = 0;
+      while (i < cumDist.length-2 && cumDist[i+1] < scrubDistanceKm) i++;
+      const a = track[i], b = track[i+1] || a;
+      const da = cumDist[i], db = cumDist[i+1] != null ? cumDist[i+1] : da;
+      const span = (db-da) || 1;
+      const frac = Math.max(0, Math.min(1, (scrubDistanceKm-da)/span));
+      const lat = a.lat + (b.lat-a.lat)*frac, lon = a.lon + (b.lon-a.lon)*frac;
+      const sdk = window.maptilersdk;
+      if (!ref.current) {
+        const el = document.createElement("div");
+        el.style.cssText = `width:20px;height:20px;border-radius:50%;background:#38bdf8;border:3px solid #fff;box-shadow:0 1px 6px rgba(0,0,0,0.6);`;
+        ref.current = new sdk.Marker({ element: el }).setLngLat([lon, lat]).addTo(map);
+      } else {
+        ref.current.setLngLat([lon, lat]);
+      }
+    };
+    if (previewReadyRef.current) placeScrub(previewMapRef.current, previewScrubMarkerRef);
+    if (isFullscreen && fullReadyRef.current) placeScrub(fullMapRef.current, fullScrubMarkerRef);
+  }, [scrubDistanceKm, isFullscreen, track, cumDist]);
+
   // Cleans up the fullscreen-specific playback marker whenever fullscreen
   // closes (playback itself keeps going — it's shared with the preview
   // now, not fullscreen-only), and resets everything when the flight
   // changes so a stale marker never lingers into the next map instance.
   useEffect(() => {
-    if (!isFullscreen && playMarkerRef.current) { playMarkerRef.current.remove(); playMarkerRef.current = null; }
+    if (!isFullscreen) {
+      if (playMarkerRef.current) { playMarkerRef.current.remove(); playMarkerRef.current = null; }
+      if (fullScrubMarkerRef.current) { fullScrubMarkerRef.current.remove(); fullScrubMarkerRef.current = null; }
+    }
   }, [isFullscreen]);
   useEffect(() => {
     setIsPlaying(false);
@@ -1848,6 +1911,8 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     setShowMonitor(false);
     if (playMarkerRef.current) { playMarkerRef.current.remove(); playMarkerRef.current = null; }
     if (previewPlayMarkerRef.current) { previewPlayMarkerRef.current.remove(); previewPlayMarkerRef.current = null; }
+    if (previewScrubMarkerRef.current) { previewScrubMarkerRef.current.remove(); previewScrubMarkerRef.current = null; }
+    if (fullScrubMarkerRef.current) { fullScrubMarkerRef.current.remove(); fullScrubMarkerRef.current = null; }
     if (onPlaybackPositionChange) onPlaybackPositionChange(null);
     if (onPlaybackPhaseChange) onPlaybackPhaseChange("flight");
   }, [flight?.id]);
@@ -1959,72 +2024,92 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       )}
       {isFullscreen && (
         <div
-          style={{position:"fixed",inset:0,background:"#000",zIndex:200,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",overflow:"hidden"}}
+          style={{position:"fixed",inset:0,background:"#000",zIndex:200,display:"flex",flexDirection:"column",overflow:"hidden"}}
         >
-          <div ref={fullDivRef} style={{width:"100%",height:"70vh"}} />
-          {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
-            // Alle Badges links statt rechts: die eingebauten Zoom-+/--
-            // Buttons der Karte sitzen rechts oben und überlagerten dort ein
-            // Badge. Sind mehrere Badges aktiv, stehen sie als eigene Zeilen
-            // untereinander (Distanz, Steigen/Sinken, Monitor).
-            <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:8,pointerEvents:"none"}}>
-              {showDistance && distanceRoute && (
-                <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
-                  📏 {distanceRoute.km} km
-                </div>
-              )}
-              {showClimbSink && climbSinkPoints && (
-                <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
-                  <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
-                  <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
-                </div>
-              )}
-              {showMonitor && monitorInfo && (
-                <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
-                  <span style={{color:"#7dd3fc"}}>⬆ {Math.round(monitorInfo.alt)} m</span>
-                  <span style={{color:"#e8f4fd"}}>➤ {Math.round(monitorInfo.speedKmh)} km/h</span>
-                  <span style={{color:monitorInfo.varioMs>=0?"#4ade80":"#f87171"}}>{monitorInfo.varioMs>=0?"↑":"↓"} {Math.abs(monitorInfo.varioMs).toFixed(1)} m/s</span>
-                </div>
-              )}
-            </div>
-          )}
-          {flight?.track?.length > 1 && (
-            <div style={{position:"absolute",bottom:"calc(15vh + 10px)",right:14,display:"flex",gap:6,alignItems:"center"}}>
-              <button onClick={togglePlay}
-                title={isPlaying?"Pause":"Abspielen"}
-                style={{background:isPlaying?"#dc2626":"#16a34a",border:"none",borderRadius:20,width:40,height:40,color:"#fff",fontSize:17,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
-                {isPlaying ? "⏸" : "▶"}
-              </button>
-              <div style={{position:"relative"}}>
-                <button onClick={()=>setPlayPickerOpen(o=>!o)}
-                  style={{background:"#1e40af",border:"none",borderRadius:20,padding:"9px 14px",color:"#fff",fontSize:13,fontWeight:800,cursor:"pointer",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
-                  {playSpeed}× ▾
-                </button>
-                {playPickerOpen && (
-                  <div onClick={()=>setPlayPickerOpen(false)}
-                    style={{position:"absolute",bottom:"calc(100% + 4px)",right:0,background:"#14253a",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:4,boxShadow:"0 8px 24px rgba(0,0,0,0.5)",display:"flex",flexDirection:"column",gap:2,minWidth:64}}>
-                    {[1,2,5,10,20,50,100].map(sp=>(
-                      <button key={sp} onClick={()=>{setPlaySpeed(sp);setPlayPickerOpen(false);}}
-                        style={{background:sp===playSpeed?"rgba(125,211,252,0.2)":"transparent",border:"none",borderRadius:6,padding:"6px 10px",color:sp===playSpeed?"#7dd3fc":"#e8f4fd",fontSize:13,fontWeight:sp===playSpeed?700:400,cursor:"pointer",textAlign:"left"}}>
-                        {sp}×
-                      </button>
-                    ))}
+          {/* Eigener relative-Wrapper nur für Karte + ihre Overlays (Badges,
+              Play-Controls, Schliessen-Button) — die Höhenprofil-Leiste
+              darunter ist ein normaler Flex-Sibling mit fester Höhe statt
+              Teil dieses vh-basierten Overlays, damit sie nicht mit den
+              absolut positionierten Overlays der Karte kollidiert. */}
+          <div style={{position:"relative",flex:"1 1 auto",minHeight:0,width:"100%"}}>
+            <div ref={fullDivRef} style={{position:"absolute",inset:0}} />
+            {((showDistance && distanceRoute) || (showClimbSink && climbSinkPoints) || (showMonitor && monitorInfo)) && (
+              // Alle Badges links statt rechts: die eingebauten Zoom-+/--
+              // Buttons der Karte sitzen rechts oben und überlagerten dort ein
+              // Badge. Sind mehrere Badges aktiv, stehen sie als eigene Zeilen
+              // untereinander (Distanz, Steigen/Sinken, Monitor).
+              <div style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",left:14,display:"flex",flexDirection:"column",alignItems:"flex-start",gap:8,pointerEvents:"none"}}>
+                {showDistance && distanceRoute && (
+                  <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(245,158,11,0.5)",borderRadius:20,padding:"7px 14px",color:"#f59e0b",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+                    📏 {distanceRoute.km} km
+                  </div>
+                )}
+                {showClimbSink && climbSinkPoints && (
+                  <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(34,197,94,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
+                    <span style={{color:"#4ade80"}}>↑ {climbSinkPoints.climbs[0].rate.toFixed(1)} m/s{climbSinkPoints.climbs.length>1?` ×${climbSinkPoints.climbs.length}`:""}</span>
+                    <span style={{color:"#f87171"}}>↓ {climbSinkPoints.sinks[0].rate.toFixed(1)} m/s{climbSinkPoints.sinks.length>1?` ×${climbSinkPoints.sinks.length}`:""}</span>
+                  </div>
+                )}
+                {showMonitor && monitorInfo && (
+                  <div style={{background:"rgba(4,14,32,0.85)",border:"1px solid rgba(125,211,252,0.5)",borderRadius:20,padding:"7px 14px",fontSize:13,fontWeight:700,boxShadow:"0 2px 10px rgba(0,0,0,0.5)",display:"flex",gap:10}}>
+                    <span style={{color:"#7dd3fc"}}>⬆ {Math.round(monitorInfo.alt)} m</span>
+                    <span style={{color:"#e8f4fd"}}>➤ {Math.round(monitorInfo.speedKmh)} km/h</span>
+                    <span style={{color:monitorInfo.varioMs>=0?"#4ade80":"#f87171"}}>{monitorInfo.varioMs>=0?"↑":"↓"} {Math.abs(monitorInfo.varioMs).toFixed(1)} m/s</span>
                   </div>
                 )}
               </div>
-              {playElapsedSec > 0 && (
-                <button onClick={()=>{setIsPlaying(false);setPlayElapsedSec(0);}}
-                  title="Zurück zum Start"
-                  style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:20,width:40,height:40,color:"#fff",fontSize:15,cursor:"pointer",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
-                  ↺
+            )}
+            {flight?.track?.length > 1 && (
+              <div style={{position:"absolute",bottom:14,right:14,display:"flex",gap:6,alignItems:"center"}}>
+                <button onClick={togglePlay}
+                  title={isPlaying?"Pause":"Abspielen"}
+                  style={{background:isPlaying?"#dc2626":"#16a34a",border:"none",borderRadius:20,width:40,height:40,color:"#fff",fontSize:17,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:0,boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+                  {isPlaying ? "⏸" : "▶"}
                 </button>
-              )}
-            </div>
+                <div style={{position:"relative"}}>
+                  <button onClick={()=>setPlayPickerOpen(o=>!o)}
+                    style={{background:"#1e40af",border:"none",borderRadius:20,padding:"9px 14px",color:"#fff",fontSize:13,fontWeight:800,cursor:"pointer",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+                    {playSpeed}× ▾
+                  </button>
+                  {playPickerOpen && (
+                    <div onClick={()=>setPlayPickerOpen(false)}
+                      style={{position:"absolute",bottom:"calc(100% + 4px)",right:0,background:"#14253a",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:4,boxShadow:"0 8px 24px rgba(0,0,0,0.5)",display:"flex",flexDirection:"column",gap:2,minWidth:64}}>
+                      {[1,2,5,10,20,50,100].map(sp=>(
+                        <button key={sp} onClick={()=>{setPlaySpeed(sp);setPlayPickerOpen(false);}}
+                          style={{background:sp===playSpeed?"rgba(125,211,252,0.2)":"transparent",border:"none",borderRadius:6,padding:"6px 10px",color:sp===playSpeed?"#7dd3fc":"#e8f4fd",fontSize:13,fontWeight:sp===playSpeed?700:400,cursor:"pointer",textAlign:"left"}}>
+                          {sp}×
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                {playElapsedSec > 0 && (
+                  <button onClick={()=>{setIsPlaying(false);setPlayElapsedSec(0);}}
+                    title="Zurück zum Start"
+                    style={{background:"rgba(255,255,255,0.15)",border:"1px solid rgba(255,255,255,0.3)",borderRadius:20,width:40,height:40,color:"#fff",fontSize:15,cursor:"pointer",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+                    ↺
+                  </button>
+                )}
+              </div>
+            )}
+            {/* Kleiner als zuvor (32px → 22px) — reserviert weniger von der
+                Kartenfläche, während der Rest der Karte unverändert bis an
+                den Bildschirmrand reicht. */}
+            <button onClick={()=>setIsFullscreen(false)}
+              style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 8px)",right:10,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:12,width:22,height:22,color:"#fff",fontSize:12,lineHeight:1,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",padding:0}}>
+              ✕
+            </button>
+          </div>
+          {/* Höhenprofil-Leiste unterhalb der Karte — Portal-Ziel für
+              FlightProfile (siehe onFullscreenProfileSlot/fullscreenSlot),
+              damit dieselbe Komponente (inkl. Zoom/Scrub-Zustand) je nach
+              Vollbildstatus mal hier, mal in der normalen Ansicht landet,
+              statt eine zweite Instanz zu erzeugen. Im Quermodus (Handy
+              quer) bewusst schmal, damit für die Karte möglichst viel
+              Höhe bleibt. */}
+          {flight?.track?.length > 1 && (
+            <div ref={onFullscreenProfileSlot} style={{flex:"0 0 auto",width:"100%",height:isLandscapePhone?64:150,background:"#040e20",borderTop:"1px solid rgba(100,180,255,0.18)"}} />
           )}
-          <button onClick={()=>setIsFullscreen(false)}
-            style={{position:"absolute",top:"calc(env(safe-area-inset-top, 0px) + 10px)",right:14,background:"rgba(255,255,255,0.12)",border:"1px solid rgba(255,255,255,0.2)",borderRadius:20,width:32,height:32,color:"#fff",fontSize:16,cursor:"pointer"}}>
-            ✕
-          </button>
         </div>
       )}
     </>
@@ -2041,7 +2126,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
 // are sent (one batched request) rather than the whole track, since terrain
 // doesn't need 1-second resolution to look right and Open-Meteo caps
 // batches at 100 coordinates anyway.
-function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybackActive, playbackPhase, controlsSlot, isWide }) {
+function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybackActive, playbackPhase, controlsSlot, isWide, fullscreenSlot, onScrubChange }) {
   const canvasRef = useRef(null);
   const [groundProfile, setGroundProfile] = useState(null);
   const [groundError, setGroundError] = useState(false);
@@ -2053,6 +2138,12 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
   const [zoomLevel, setZoomLevel] = useState(1);
   const [panPos, setPanPos] = useState(0.5);
   const [zoomPickerOpen, setZoomPickerOpen] = useState(false);
+  // Per Finger/Maus direkt gesetzter Cursor (in dieser Komponente eigenen,
+  // skalierten km) — unabhängig vom Zoom-Fenster verschiebbar (siehe
+  // Gesten-Effekt weiter unten), meldet seine Position an die Karte (siehe
+  // onScrubChange) für einen Marker dort, ohne je deren Zoom zu berühren.
+  const [scrubDist, setScrubDist] = useState(null);
+  const [canvasResizeTick, setCanvasResizeTick] = useState(0);
   const viewScale = zoomLevel;
   // panPos (0-1) is the window's CENTRE position across the whole flight —
   // 0 puts the centre exactly at the start, 1 exactly at landing. This is
@@ -2113,11 +2204,25 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     setPanPos(Math.max(0, Math.min(1, posFrac)));
   }, [playbackDistanceScaled, isPlaybackActive, playbackPhase, zoomLevel, totalDist]);
 
-  useEffect(() => { setZoomLevel(1); setPanPos(0.5); }, [flight?.id]);
+  useEffect(() => { setZoomLevel(1); setPanPos(0.5); setScrubDist(null); }, [flight?.id]);
   useEffect(() => {
     profileZoomActive = zoomLevel > 1;
     return () => { profileZoomActive = false; };
   }, [zoomLevel]);
+  // Der Wiedergabe-Marker übernimmt während der Kino-Wiedergabe exklusiv —
+  // ein noch gesetzter Scrub-Cursor würde sonst zwei Marker gleichzeitig auf
+  // der Karte zeigen und dort widersprüchliche Positionen behaupten.
+  useEffect(() => { if (isPlaybackActive) setScrubDist(null); }, [isPlaybackActive]);
+  // Meldet den Scrub-Cursor (RAW/unskaliert, wie playbackDistanceKm) an die
+  // Karte, die daraus einen eigenen Marker positioniert — bewusst getrennt
+  // von onPositionChange/highlightRange oben, damit Scrubben nie einen
+  // Kamera-Fit auf der Karte auslöst (siehe applyHighlightCamera in
+  // FlightMap: die reagiert nur auf highlightRange, nicht auf diesen Wert).
+  useEffect(() => {
+    if (!onScrubChange) return;
+    if (isPlaybackActive || scrubDist == null || !totalDist) { onScrubChange(null); return; }
+    onScrubChange(scale > 0 ? scrubDist/scale : scrubDist);
+  }, [scrubDist, totalDist, scale, isPlaybackActive, onScrubChange]);
 
   // Tells the map above what part of the flight (in the flight's own,
   // unscaled distance units — the manual-Distanz proportional rescale only
@@ -2138,37 +2243,72 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     onPositionChange({ start: toRaw(visStart), end: toRaw(visEnd), center: toRaw(overallCenter) });
   }, [zoomLevel, viewStart, viewScale, totalDist, scale]);
 
-  // Swipe-to-pan directly on the chart, active only while zoomed (>1×) —
-  // the page-level swipe-between-flights gesture is already fully disabled
-  // during this time via profileZoomActive, so this can freely claim any
-  // horizontal drag without the two competing. zoomLevelRef/panPosRef avoid
+  // Swipe-to-pan directly on the chart while zoomed (>1×), scrub-cursor
+  // directly on the chart while NOT zoomed (1×) — the page-level
+  // swipe-between-flights gesture is already fully disabled the whole time
+  // via profileZoomActive/data-no-swipe, so this can freely claim any
+  // horizontal drag without the two competing. The *Ref values avoid
   // reading stale values from the closure captured when the effect last
-  // bound its listeners.
+  // bound its listeners (it only (re-)binds on mount, see deps below).
   const zoomLevelRef = useRef(zoomLevel);
   const panPosRef = useRef(panPos);
+  const totalDistRef = useRef(totalDist);
+  const isPlaybackActiveRef = useRef(isPlaybackActive);
   useEffect(() => { zoomLevelRef.current = zoomLevel; }, [zoomLevel]);
   useEffect(() => { panPosRef.current = panPos; }, [panPos]);
+  useEffect(() => { totalDistRef.current = totalDist; }, [totalDist]);
+  useEffect(() => { isPlaybackActiveRef.current = isPlaybackActive; }, [isPlaybackActive]);
   const panGestureRef = useRef(null);
+  const scrubGestureRef = useRef(false);
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    // Gleiche Achsen-Mathematik wie im Zeichnen-Effekt weiter unten (padL=42,
+    // padR=8 in CSS-Pixeln), nur umgekehrt: aus einer Bildschirm-X-Position
+    // die zugehörige (skalierte) Flugdistanz gewinnen.
+    const distAtClientX = (clientX) => {
+      const rect = canvas.getBoundingClientRect();
+      const PAD_L = 42, PAD_R = 8;
+      const plotW = Math.max(1, rect.width - PAD_L - PAD_R);
+      const relX = Math.min(1, Math.max(0, (clientX - rect.left - PAD_L) / plotW));
+      const vScale = zoomLevelRef.current, total = totalDistRef.current;
+      const vStart = (panPosRef.current - (1/vScale)/2) * total;
+      const vEnd = vStart + total/vScale;
+      return Math.max(0, Math.min(total, vStart + relX*(vEnd-vStart)));
+    };
+    const startScrub = (clientX) => {
+      if (isPlaybackActiveRef.current) return false;
+      scrubGestureRef.current = true;
+      setScrubDist(distAtClientX(clientX));
+      return true;
+    };
+    const moveScrub = (clientX) => { if (scrubGestureRef.current) setScrubDist(distAtClientX(clientX)); };
+    const endScrub = () => { scrubGestureRef.current = false; };
+
     const onTouchStart = (e) => {
-      if (zoomLevelRef.current <= 1 || e.touches.length !== 1) return;
-      e.preventDefault(); e.stopPropagation();
-      panGestureRef.current = { startX: e.touches[0].clientX, startPan: panPosRef.current };
+      if (e.touches.length !== 1) return;
+      if (zoomLevelRef.current > 1) {
+        e.preventDefault(); e.stopPropagation();
+        panGestureRef.current = { startX: e.touches[0].clientX, startPan: panPosRef.current };
+      } else if (startScrub(e.touches[0].clientX)) {
+        e.preventDefault(); e.stopPropagation();
+      }
     };
     const onTouchMove = (e) => {
-      const g = panGestureRef.current;
-      if (!g || zoomLevelRef.current <= 1) return;
-      e.preventDefault(); e.stopPropagation();
-      const dx = e.touches[0].clientX - g.startX;
-      // How far a full-width drag should shift panPos (0-1) depends on how
-      // zoomed in we are — at higher zoom the same pixel drag should cover
-      // proportionally less of the flight, matching what's on screen.
-      const fracDelta = -dx / canvas.clientWidth / zoomLevelRef.current * 2;
-      setPanPos(Math.min(1, Math.max(0, g.startPan + fracDelta)));
+      if (panGestureRef.current) {
+        e.preventDefault(); e.stopPropagation();
+        const dx = e.touches[0].clientX - panGestureRef.current.startX;
+        // How far a full-width drag should shift panPos (0-1) depends on how
+        // zoomed in we are — at higher zoom the same pixel drag should cover
+        // proportionally less of the flight, matching what's on screen.
+        const fracDelta = -dx / canvas.clientWidth / zoomLevelRef.current * 2;
+        setPanPos(Math.min(1, Math.max(0, panGestureRef.current.startPan + fracDelta)));
+      } else if (scrubGestureRef.current) {
+        e.preventDefault(); e.stopPropagation();
+        moveScrub(e.touches[0].clientX);
+      }
     };
-    const onTouchEnd = () => { panGestureRef.current = null; };
+    const onTouchEnd = () => { panGestureRef.current = null; endScrub(); };
     canvas.addEventListener("touchstart", onTouchStart, { passive: false });
     canvas.addEventListener("touchmove", onTouchMove, { passive: false });
     canvas.addEventListener("touchend", onTouchEnd);
@@ -2177,19 +2317,25 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     // are attached to window rather than the canvas so a fast drag that
     // briefly leaves the canvas bounds doesn't get stuck.
     const onMouseDown = (e) => {
-      if (zoomLevelRef.current <= 1) return;
-      e.preventDefault();
-      panGestureRef.current = { startX: e.clientX, startPan: panPosRef.current };
+      if (zoomLevelRef.current > 1) {
+        e.preventDefault();
+        panGestureRef.current = { startX: e.clientX, startPan: panPosRef.current };
+      } else if (startScrub(e.clientX)) {
+        e.preventDefault();
+      }
     };
     const onMouseMove = (e) => {
-      const g = panGestureRef.current;
-      if (!g || zoomLevelRef.current <= 1) return;
-      e.preventDefault();
-      const dx = e.clientX - g.startX;
-      const fracDelta = -dx / canvas.clientWidth / zoomLevelRef.current * 2;
-      setPanPos(Math.min(1, Math.max(0, g.startPan + fracDelta)));
+      if (panGestureRef.current) {
+        e.preventDefault();
+        const dx = e.clientX - panGestureRef.current.startX;
+        const fracDelta = -dx / canvas.clientWidth / zoomLevelRef.current * 2;
+        setPanPos(Math.min(1, Math.max(0, panGestureRef.current.startPan + fracDelta)));
+      } else if (scrubGestureRef.current) {
+        e.preventDefault();
+        moveScrub(e.clientX);
+      }
     };
-    const onMouseUp = () => { panGestureRef.current = null; };
+    const onMouseUp = () => { panGestureRef.current = null; endScrub(); };
     canvas.addEventListener("mousedown", onMouseDown);
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
@@ -2332,7 +2478,8 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
     // marker instead, so the red label always matches whichever marker is
     // actually visible on the map right now. Shown at every zoom level,
     // including the overview (1×) — not just once actually zoomed in.
-    const centerDist = (isPlaybackActive && playbackDistanceScaled != null) ? playbackDistanceScaled : (visStart+visEnd)/2;
+    const centerDist = (isPlaybackActive && playbackDistanceScaled != null) ? playbackDistanceScaled
+      : (scrubDist != null ? scrubDist : (visStart+visEnd)/2);
     let centerAlt = null, centerLabel = "";
     if (distances.length) {
       let ci = 0, cd = Infinity;
@@ -2374,6 +2521,26 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
         ctx.fill();
         ctx.restore();
       }
+    }
+
+    // Per Finger/Maus gesetzter Scrub-Cursor (siehe Gesten-Effekt oben) —
+    // eigene Farbe (cyan) und Punkt oben statt unten, damit er sich klar vom
+    // grünen Wiedergabe-Cursor (Punkt unten) und der roten Zoom-Mittellinie
+    // unterscheidet. Während der Kino-Wiedergabe ist scrubDist bereits null
+    // (siehe Reset-Effekt oben), die beiden schliessen sich also gegenseitig aus.
+    if (scrubDist != null && scrubDist >= visStart && scrubDist <= visEnd) {
+      const px = xPos(scrubDist);
+      ctx.save();
+      ctx.strokeStyle = "#38bdf8"; ctx.lineWidth = 2*dpr;
+      ctx.beginPath();
+      ctx.moveTo(px, padT);
+      ctx.lineTo(px, padT+plotH);
+      ctx.stroke();
+      ctx.fillStyle = "#38bdf8";
+      ctx.beginPath();
+      ctx.arc(px, padT, 4*dpr, 0, Math.PI*2);
+      ctx.fill();
+      ctx.restore();
     }
 
     if (groundProfile && groundProfile.length) {
@@ -2427,18 +2594,52 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
       ctx.lineTo(xPos(distances[i]), yPos(track[i].gpsAlt));
       ctx.stroke();
     }
-  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceScaled, isPlaybackActive]);
+  }, [track, distances, totalDist, groundProfile, viewStart, viewScale, playbackDistanceScaled, isPlaybackActive, scrubDist, canvasResizeTick]);
+
+  // Neu zeichnen, sobald sich die tatsächliche Canvas-Grösse ändert — nötig
+  // seit die Komponente (siehe fullscreenSlot unten) mal mit fester Höhe
+  // (160px normale Ansicht) und mal mit variabler Höhe (Vollbild-Leiste,
+  // hoch- vs. querformatabhängig) dargestellt wird; ohne das würde beim
+  // Wechsel zwischen den beiden weiterhin mit der alten Canvas-Auflösung
+  // gezeichnet.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => setCanvasResizeTick(t => t+1));
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [fullscreenSlot]);
 
   if (!track.length) return null;
 
-  return (
+  // fullscreenSlot ist ein DOM-Knoten innerhalb von FlightMaps Vollbild-
+  // Overlay (siehe onFullscreenProfileSlot dort) — statt einer zweiten
+  // FlightProfile-Instanz wird dieselbe Komponente (inkl. Zoom-/Scrub-
+  // Zustand und schon geladenem Bodenprofil) per Portal einfach dorthin
+  // umgehängt, solange die Karte im Vollbild ist; danach fällt sie zurück
+  // auf ihre normale Position unterhalb der Karte. Kompakt: kein Header,
+  // keine Bildunterschriften, Canvas füllt die (schmale) Leiste komplett.
+  const chart = fullscreenSlot ? (
+    <div style={{width:"100%",height:"100%",boxSizing:"border-box"}}>
+      <canvas ref={canvasRef} style={{width:"100%",height:"100%",display:"block",touchAction:"none"}} />
+    </div>
+  ) : (
     <div style={{marginBottom:14}}>
       <div style={{marginBottom:6}}>
         <div style={{fontSize:10,fontWeight:700,color:"#7dd3fc",letterSpacing:1.5,textTransform:"uppercase"}}>Höhenprofil</div>
       </div>
       <div style={{borderRadius:14,overflow:"hidden",border:"1px solid rgba(100,180,255,0.12)",background:"#040e20"}}>
-        <canvas ref={canvasRef} style={{width:"100%",height:160,display:"block",touchAction:zoomLevel>1?"none":"auto"}} />
+        <canvas ref={canvasRef} style={{width:"100%",height:160,display:"block",touchAction:"none"}} />
       </div>
+      {groundError && <div style={{fontSize:10,color:"rgba(232,244,253,0.35)",marginTop:4}}>Bodenprofil für den Flug-Teil momentan nicht verfügbar (Höhendaten-Dienst nicht erreichbar) — Trace wird trotzdem angezeigt.</div>}
+      {manualDist>0 && <div style={{fontSize:9,color:"rgba(232,244,253,0.3)",marginTop:4}}>Streckenachse proportional auf die eingetragene Distanz ({manualDist} km) skaliert.</div>}
+      {zoomLevel>1 && <div style={{fontSize:9,color:"rgba(232,244,253,0.3)",marginTop:2}}>Im Profil wischen, um den sichtbaren Ausschnitt zu verschieben.</div>}
+    </div>
+  );
+
+  return (
+    <>
+      {fullscreenSlot ? ReactDOM.createPortal(chart, fullscreenSlot) : chart}
       {controlsSlot && ReactDOM.createPortal(
         <>
           <div style={{position:"relative",flex:"1.15 1 0",minWidth:0}}>
@@ -2473,10 +2674,7 @@ function FlightProfile({ flight, onPositionChange, playbackDistanceKm, isPlaybac
         </>,
         controlsSlot
       )}
-      {groundError && <div style={{fontSize:10,color:"rgba(232,244,253,0.35)",marginTop:4}}>Bodenprofil für den Flug-Teil momentan nicht verfügbar (Höhendaten-Dienst nicht erreichbar) — Trace wird trotzdem angezeigt.</div>}
-      {manualDist>0 && <div style={{fontSize:9,color:"rgba(232,244,253,0.3)",marginTop:4}}>Streckenachse proportional auf die eingetragene Distanz ({manualDist} km) skaliert.</div>}
-      {zoomLevel>1 && <div style={{fontSize:9,color:"rgba(232,244,253,0.3)",marginTop:2}}>Im Profil wischen, um den sichtbaren Ausschnitt zu verschieben.</div>}
-    </div>
+    </>
   );
 }
 
@@ -4472,6 +4670,16 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
     const controlsSlotRef = useCallback(node => { if (node) setControlsSlotEl(node); }, []);
     const [isPlaybackActive, setIsPlaybackActive] = useState(false);
     const [playbackPhase, setPlaybackPhase] = useState("flight");
+    // DOM-Knoten von FlightMaps Vollbild-Profilleiste (siehe
+    // onFullscreenProfileSlot dort) — null ausserhalb des Vollbilds, sonst
+    // Portal-Ziel für FlightProfile, damit dieselbe Instanz (samt Zoom-/
+    // Scrub-Zustand) unterhalb der Vollbild-Karte statt an ihrer normalen
+    // Stelle erscheint.
+    const [fsProfileSlotEl, setFsProfileSlotEl] = useState(null);
+    // Im Höhenprofil per Finger gesetzter Scrub-Cursor (RAW km, siehe
+    // FlightProfile/onScrubChange) — reicht ihn an FlightMap weiter, die
+    // daraus nur einen Marker setzt, ohne je Zoom/Kamera zu berühren.
+    const [scrubDistanceKm, setScrubDistanceKm] = useState(null);
     const [tileConfig, setTileConfig] = useState(DEFAULT_TILE_KEYS);
     const [tilePickerIdx, setTilePickerIdx] = useState(null);
     useEffect(() => {
@@ -4675,8 +4883,8 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
 
           {/* Map */}
           <div data-no-swipe="true">
-            <div style={{borderRadius:14,marginBottom:14,border:"1px solid rgba(100,180,255,0.12)"}}><FlightMap flight={fl} highlightRange={profileRange} onPlaybackPositionChange={setPlaybackDistance} onPlaybackActiveChange={setIsPlaybackActive} onPlaybackPhaseChange={setPlaybackPhase} controlsSlot={controlsSlotEl} isWide={isWide} mapTilerKey={mapTilerKey} /></div>
-            <FlightProfile flight={fl} onPositionChange={setProfileRange} playbackDistanceKm={playbackDistance} isPlaybackActive={isPlaybackActive} playbackPhase={playbackPhase} controlsSlot={controlsSlotEl} isWide={isWide} />
+            <div style={{borderRadius:14,marginBottom:14,border:"1px solid rgba(100,180,255,0.12)"}}><FlightMap flight={fl} highlightRange={profileRange} onPlaybackPositionChange={setPlaybackDistance} onPlaybackActiveChange={setIsPlaybackActive} onPlaybackPhaseChange={setPlaybackPhase} controlsSlot={controlsSlotEl} isWide={isWide} mapTilerKey={mapTilerKey} onFullscreenProfileSlot={setFsProfileSlotEl} scrubDistanceKm={scrubDistanceKm} /></div>
+            <FlightProfile flight={fl} onPositionChange={setProfileRange} playbackDistanceKm={playbackDistance} isPlaybackActive={isPlaybackActive} playbackPhase={playbackPhase} controlsSlot={controlsSlotEl} isWide={isWide} fullscreenSlot={fsProfileSlotEl} onScrubChange={setScrubDistanceKm} />
           </div>
           {/* Shared row: every control from both the map (play/speed/reset/
               GPS Visualizer/Höhe·Steigen-Sinken) and the profile (Zoom/Zoom

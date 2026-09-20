@@ -115,7 +115,10 @@
   .version-tag {
     margin-top: 22px;
     font-size: 11px;
-    color: rgba(232,244,253,0.3);
+    /* Gleiche Farbe wie die Flug-Infos in der Flugliste (FlightRow in
+       flugbuch.jsx, z.B. Datum/Ort) — die vorige rgba(232,244,253,0.3)
+       hatte auf dem dunklen Hintergrund zu wenig Kontrast. */
+    color: #a8d8f5;
     text-align: center;
   }
 </style>
