@@ -638,10 +638,22 @@ function formatDurationHM(sec) {
 // echte Vergleichsdaten nicht zuverlässig von einem frühen, steilen
 // Thermiksteigen nach dem Start unterscheiden, ein falscher Treffer dort
 // wäre schlimmer als gar keiner.
+// Zusätzliche Bedingung, an zwei realen Flügen (Genetiniai 19.06.2026,
+// Fiesch Kühboden 18.07.2026) nötig geworden: "schnell UND eben" allein
+// reicht nicht — ein zügiger Streckenflug mit kurzzeitig kaum Höhenverlust
+// (Rückenwind, flacher Hangflug) erfüllt dasselbe Muster für ein paar
+// Minuten, obwohl der Pilot die ganze Zeit mitten in der Luft war (in
+// beiden Fällen mehrere hundert Meter über der tiefsten Stelle des ganzen
+// Tracks). Ein Punkt zählt deshalb nur noch als Bodentransport, wenn seine
+// Höhe zusätzlich nahe der tiefsten im GANZEN Track erreichten Höhe liegt
+// (GROUND_TRANSPORT_ALT_TOLERANCE_M) — Boden-Aufenthalte (Auto, Warten)
+// finden immer nahe Geländehöhe statt, ein Flug (auch im schnellen,
+// flachen Gleitflug) fast nie.
 const GROUND_TRANSPORT_WINDOW_SEC = 30;   // Zeitfenster pro geprüftem Punkt
 const GROUND_TRANSPORT_FAST_KMH = 40;     // nachhaltig darüber ist für einen Gleitschirm untypisch (Auto/Zug)
 const GROUND_TRANSPORT_IDLE_KMH = 5;      // nachhaltig darunter ist keine Eigenbewegung (geparkt/wartend)
 const GROUND_TRANSPORT_FLAT_VARIO_MS = 0.5; // darunter gilt die Höhe als "eben", kein aktiver Gleitflug/Steigen
+const GROUND_TRANSPORT_ALT_TOLERANCE_M = 200; // Toleranz über der tiefsten Track-Höhe, die noch als "am Boden" zählt
 const GROUND_TRANSPORT_GAP_TOLERANCE_SEC = 20; // kurze Unterbrechung (z.B. GPS-Aussetzer) überbrücken
 const GROUND_TRANSPORT_MIN_RUN_SEC = 180; // kurze, zufällig "flache" Passagen nicht als Transport werten
 const GROUND_TRANSPORT_MAX_TRIM_SEC = 3*3600; // Sicherheitsgrenze: nie mehr als 3h von einer Seite kappen
@@ -675,7 +687,8 @@ function groundTransportWindowStats(track, i, dir) {
   for (let k = lo; k < hi; k++) pathKm += haversineDistKm(track[k], track[k+1]) || 0;
   return { speedKmh: pathKm / (dt/3600), varioMs: Math.abs(track[hi].gpsAlt - track[lo].gpsAlt) / dt };
 }
-function isGroundTransportPoint(track, i, dir) {
+function isGroundTransportPoint(track, i, dir, groundAltRefM) {
+  if (track[i].gpsAlt - groundAltRefM > GROUND_TRANSPORT_ALT_TOLERANCE_M) return false;
   const w = groundTransportWindowStats(track, i, dir);
   if (!w || w.varioMs >= GROUND_TRANSPORT_FLAT_VARIO_MS) return false;
   return w.speedKmh > GROUND_TRANSPORT_FAST_KMH || w.speedKmh < GROUND_TRANSPORT_IDLE_KMH;
@@ -689,13 +702,13 @@ function isGroundTransportPoint(track, i, dir) {
 // Einschalten (Fenster fällt weder unter die Idle- noch über die
 // Fahrzeug-Schwelle) die Erkennung des gesamten davor/danach liegenden,
 // eindeutigen Bodentransport-Abschnitts.
-function walkGroundTransportBoundary(track, dir) {
+function walkGroundTransportBoundary(track, dir, groundAltRefM) {
   const n = track.length;
   const refTime = track[dir > 0 ? 0 : n-1].timeSec;
   let i = dir > 0 ? 0 : n-1;
   let lastGoodIdx = -1;
   while (i >= 0 && i < n && Math.abs(track[i].timeSec - refTime) < GROUND_TRANSPORT_MAX_TRIM_SEC) {
-    if (isGroundTransportPoint(track, i, dir)) { lastGoodIdx = i; i += dir; continue; }
+    if (isGroundTransportPoint(track, i, dir, groundAltRefM)) { lastGoodIdx = i; i += dir; continue; }
     const sinceLastGood = lastGoodIdx === -1 ? Math.abs(track[i].timeSec - refTime) : Math.abs(track[i].timeSec - track[lastGoodIdx].timeSec);
     if (sinceLastGood > GROUND_TRANSPORT_GAP_TOLERANCE_SEC) break;
     i += dir;
@@ -710,9 +723,10 @@ function findFlightBoundsExcludingGroundTransport(track) {
   const full = { startIdx: 0, endIdx: track.length-1, trimmedStartSec: 0, trimmedEndSec: 0 };
   if (!track || track.length < 5) return full;
   const t0 = track[0].timeSec, tN = track[track.length-1].timeSec;
+  const groundAltRefM = Math.min(...track.map(p => p.gpsAlt));
 
-  const lastGoodStart = walkGroundTransportBoundary(track, +1);
-  const lastGoodEnd = walkGroundTransportBoundary(track, -1);
+  const lastGoodStart = walkGroundTransportBoundary(track, +1, groundAltRefM);
+  const lastGoodEnd = walkGroundTransportBoundary(track, -1, groundAltRefM);
   const startIdx = lastGoodStart === -1 ? 0 : lastGoodStart + 1;
   const endIdx = lastGoodEnd === -1 ? track.length - 1 : lastGoodEnd - 1;
 
@@ -757,8 +771,9 @@ function trimGroundTransportTrack(track) {
 function detectFlightSegments(track) {
   if (!track || track.length < 5) return track && track.length ? [{ startIdx: 0, endIdx: track.length-1 }] : [];
   const n = track.length;
+  const groundAltRefM = Math.min(...track.map(p => p.gpsAlt));
   const isGround = new Array(n);
-  for (let i = 0; i < n; i++) isGround[i] = isGroundTransportPoint(track, i, +1) || isGroundTransportPoint(track, i, -1);
+  for (let i = 0; i < n; i++) isGround[i] = isGroundTransportPoint(track, i, +1, groundAltRefM) || isGroundTransportPoint(track, i, -1, groundAltRefM);
 
   const groundRuns = [];
   let i = 0;
