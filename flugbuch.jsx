@@ -646,15 +646,24 @@ const GROUND_TRANSPORT_GAP_TOLERANCE_SEC = 20; // kurze Unterbrechung (z.B. GPS-
 const GROUND_TRANSPORT_MIN_RUN_SEC = 180; // kurze, zufällig "flache" Passagen nicht als Transport werten
 const GROUND_TRANSPORT_MAX_TRIM_SEC = 3*3600; // Sicherheitsgrenze: nie mehr als 3h von einer Seite kappen
 const GROUND_TRANSPORT_MIN_REMAINING_SEC = 180; // bleibt zu wenig übrig, lieber gar nicht kappen
+// Nur für die Trenn-Erkennung (detectFlightSegments) unten: ein Abschnitt
+// zwischen zwei erkannten Bodentransport-Läufen zählt erst ab dieser Länge
+// als eigener, vorschlagswürdiger Flug — kürzere Reste (z.B. ein paar
+// Minuten mit uneindeutigem Tempo mitten in einer längeren Pause) sollen
+// nicht schon einen eigenen Trennvorschlag auslösen.
+const GROUND_TRANSPORT_SPLIT_MIN_SEGMENT_SEC = 900;
 
 // Geschwindigkeit/Vario für das GROUND_TRANSPORT_WINDOW_SEC-Fenster ab
 // (dir>0) bzw. bis (dir<0) Punkt i — einseitig statt zentriert, damit auch
 // der allererste/letzte Trackpunkt selbst geprüft werden kann. Die
-// Geschwindigkeit misst bewusst die direkte (Luftlinien-)Distanz zwischen
-// den beiden Fensterenden statt die Summe der Einzelschritte dazwischen —
-// wie bei computeMaxStraightSpeedKmh weiter unten mittelt das einen
-// einzelnen GPS-Ausreisser innerhalb des Fensters automatisch heraus,
-// statt ihm wie eine aufsummierte Strecke schutzlos ausgesetzt zu sein.
+// Geschwindigkeit misst bewusst die SUMME der Einzelschritte im Fenster
+// (tatsächlich zurückgelegte Strecke), nicht die direkte Luftlinie
+// zwischen den beiden Fensterenden: eine Luftlinien-Distanz würde aktives
+// Kreisen (Thermik direkt nach dem Start, häufig bei diesem Flugbuch z.B.
+// am Startplatz Fiesch Kühboden) fälschlich als "keine Eigenbewegung"
+// werten, weil ein voller Kreis nahe beim Ausgangspunkt endet, obwohl die
+// ganze Zeit über spürbar geflogen wurde. Die aufsummierte Strecke bleibt
+// dagegen bei echtem Kreisen deutlich über der Idle-Schwelle.
 function groundTransportWindowStats(track, i, dir) {
   let j = i;
   if (dir > 0) { while (j < track.length-1 && (track[j+1].timeSec - track[i].timeSec) < GROUND_TRANSPORT_WINDOW_SEC) j++; }
@@ -662,8 +671,9 @@ function groundTransportWindowStats(track, i, dir) {
   const lo = dir > 0 ? i : j, hi = dir > 0 ? j : i;
   const dt = track[hi].timeSec - track[lo].timeSec;
   if (dt < GROUND_TRANSPORT_WINDOW_SEC * 0.5) return null; // Fenster zu kurz (Track-Rand) — keine verlässliche Aussage
-  const distKm = haversineDistKm(track[lo], track[hi]) || 0;
-  return { speedKmh: distKm / (dt/3600), varioMs: Math.abs(track[hi].gpsAlt - track[lo].gpsAlt) / dt };
+  let pathKm = 0;
+  for (let k = lo; k < hi; k++) pathKm += haversineDistKm(track[k], track[k+1]) || 0;
+  return { speedKmh: pathKm / (dt/3600), varioMs: Math.abs(track[hi].gpsAlt - track[lo].gpsAlt) / dt };
 }
 function isGroundTransportPoint(track, i, dir) {
   const w = groundTransportWindowStats(track, i, dir);
@@ -728,6 +738,57 @@ function trimGroundTransportTrack(track) {
   if (!track || track.length < 5) return track;
   const { startIdx, endIdx } = findFlightBoundsExcludingGroundTransport(track);
   return (startIdx === 0 && endIdx === track.length-1) ? track : track.slice(startIdx, endIdx+1);
+}
+
+// ── Mehrere Flüge in einer IGC-Datei erkennen (Trenn-Erkennung) ──────────
+// findFlightBoundsExcludingGroundTransport oben kappt Bodentransport nur an
+// den TRACK-RÄNDERN — läuft der Logger aber z.B. zwischen zwei Flügen
+// desselben Tages einfach durch (Autofahrt zurück zum Startplatz o.ä.,
+// siehe Flug vom 24.01.2020, dessen 13:12-Datei genau das zeigt: zwei
+// Flüge mit ~40 Minuten Bodentransport dazwischen), landet dieser mittlere
+// Abschnitt trotzdem in EINEM zusammengefassten Flug. detectFlightSegments
+// segmentiert den ganzen Track (nicht nur die Ränder) in Bodentransport-
+// Läufe und die dazwischenliegenden Flugabschnitte — Grundlage für den
+// Trennen-Dialog beim Import, der dem Nutzer die Wahl lässt (siehe
+// SplitFlightDialog). Dieselbe Punkt-Definition wie oben, hier aber
+// symmetrisch (vorwärts ODER rückwärts geprüft) angewendet, damit auch ein
+// Bodentransport-Lauf nahe der Trackmitte zuverlässig in beide Richtungen
+// erkannt wird, nicht nur von einem Rand aus einwärts laufend.
+function detectFlightSegments(track) {
+  if (!track || track.length < 5) return track && track.length ? [{ startIdx: 0, endIdx: track.length-1 }] : [];
+  const n = track.length;
+  const isGround = new Array(n);
+  for (let i = 0; i < n; i++) isGround[i] = isGroundTransportPoint(track, i, +1) || isGroundTransportPoint(track, i, -1);
+
+  const groundRuns = [];
+  let i = 0;
+  while (i < n) {
+    if (!isGround[i]) { i++; continue; }
+    const runStart = i;
+    let lastGoodIdx = i, j = i + 1;
+    while (j < n) {
+      if (isGround[j]) { lastGoodIdx = j; j++; continue; }
+      if (track[j].timeSec - track[lastGoodIdx].timeSec > GROUND_TRANSPORT_GAP_TOLERANCE_SEC) break;
+      j++;
+    }
+    if (track[lastGoodIdx].timeSec - track[runStart].timeSec >= GROUND_TRANSPORT_MIN_RUN_SEC) {
+      groundRuns.push({ startIdx: runStart, endIdx: lastGoodIdx });
+    }
+    i = j;
+  }
+
+  const segments = [];
+  let cursor = 0;
+  for (const run of groundRuns) {
+    if (run.startIdx > cursor) segments.push({ startIdx: cursor, endIdx: run.startIdx - 1 });
+    cursor = run.endIdx + 1;
+  }
+  if (cursor <= n - 1) segments.push({ startIdx: cursor, endIdx: n - 1 });
+  // Zu kurze Reste zwischen zwei Bodentransport-Läufen verwerfen — siehe
+  // GROUND_TRANSPORT_SPLIT_MIN_SEGMENT_SEC weiter oben (bewusst deutlich
+  // grosszügiger als GROUND_TRANSPORT_MIN_REMAINING_SEC, das nur ein
+  // Sicherheitsnetz für die einfache Randkappung ist).
+  return segments.filter(s => track[s.endIdx].timeSec - track[s.startIdx].timeSec >= GROUND_TRANSPORT_SPLIT_MIN_SEGMENT_SEC);
 }
 
 function analyzeIGC(track, tzOffsetHours, dateStr) {
@@ -5650,6 +5711,67 @@ function DateDupWarningDialog({ items, onImportAnyway, onSkip }) {
   );
 }
 
+// ── Trennen-Dialog: mehrere Flüge in einer IGC-Datei erkannt ────────────
+// Zeigt für die aktuell zu entscheidende Datei (candidate) die Werte
+// sowohl "ohne Split" (ein zusammengefasster Flug, Ränder gekappt, Pause
+// in der Mitte bleibt Teil der Dauer/Distanz) als auch "mit Split" (jeder
+// erkannte Abschnitt für sich, jeweils selbst nochmal randgekappt) — die
+// Person entscheidet anhand dieser Werte, was tatsächlich passiert ist.
+function splitDialogRowStats(igcData) {
+  const fmtClock = (t) => (t || "").slice(0, 5);
+  const distKm = igcData.scoreDistanceKm;
+  const maxSpeed = igcData.maxSpeedKmh;
+  const avgSpeed = (distKm && igcData.durationSec) ? +(distKm / (igcData.durationSec/3600)).toFixed(1) : null;
+  return {
+    zeit: `${fmtClock(igcData.startTime)}–${fmtClock(igcData.endTime)}`,
+    dauer: igcData.durationStr || "—",
+    distanz: distKm != null ? `${distKm} km` : "—",
+    maxSpeed: maxSpeed ? `${maxSpeed} km/h` : "—",
+    avgSpeed: avgSpeed != null ? `${avgSpeed} km/h` : "—",
+  };
+}
+function SplitFlightDialogRow({ label, stats, highlight }) {
+  return (
+    <div style={{background:highlight?"rgba(14,165,233,0.08)":"rgba(255,255,255,0.04)",border:"1px solid rgba(255,255,255,0.1)",borderRadius:10,padding:"10px 12px",marginBottom:8}}>
+      <div style={{fontWeight:700,fontSize:13,marginBottom:4,color:highlight?"#7dd3fc":"#e8f4fd"}}>{label}</div>
+      <div style={{display:"flex",flexWrap:"wrap",gap:"3px 14px",fontSize:12,color:"rgba(232,244,253,0.7)"}}>
+        <span>🕐 {stats.zeit}</span>
+        <span>⏱ {stats.dauer}</span>
+        <span>📏 {stats.distanz}</span>
+        <span>⚡ {stats.maxSpeed}</span>
+        <span>Ø {stats.avgSpeed}</span>
+      </div>
+    </div>
+  );
+}
+function SplitFlightDialog({ candidate, onKeep, onSplit }) {
+  const combined = splitDialogRowStats(candidate.combinedIgcData);
+  const parts = candidate.segments.map(seg => splitDialogRowStats(seg.igcData));
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:"#0a1628",borderRadius:16,padding:"18px 16px",maxWidth:440,width:"100%",maxHeight:"85vh",overflowY:"auto",border:"1px solid rgba(255,255,255,0.1)"}}>
+        <div style={{fontSize:15,fontWeight:800,marginBottom:4}}>Mehrere Flüge in einer Datei erkannt</div>
+        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:4}}>{candidate.file.name}</div>
+        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:14}}>
+          Zwischen den erkannten Abschnitten liegt eine längere Pause (Bodentransport/Warten). Als ein Flug importieren oder in {candidate.segments.length} Flüge aufteilen?
+        </div>
+        <div style={{fontSize:11,fontWeight:700,color:"rgba(232,244,253,0.4)",marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>Ohne Split</div>
+        <SplitFlightDialogRow label="1 Flug (gesamt)" stats={combined} />
+        <div style={{fontSize:11,fontWeight:700,color:"rgba(232,244,253,0.4)",margin:"10px 0 6px",textTransform:"uppercase",letterSpacing:0.5}}>Mit Split</div>
+        {parts.map((p, i) => <SplitFlightDialogRow key={i} label={`Teil ${i+1}`} stats={p} highlight />)}
+        <button onClick={onSplit}
+          style={{width:"100%",background:"rgba(14,165,233,0.15)",border:"1px solid rgba(14,165,233,0.4)",borderRadius:10,padding:"11px",color:"#7dd3fc",fontSize:14,fontWeight:700,cursor:"pointer",marginTop:10,marginBottom:8}}>
+          In {candidate.segments.length} Flüge aufteilen
+        </button>
+        <button onClick={onKeep}
+          style={{width:"100%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"9px",color:"rgba(232,244,253,0.6)",fontSize:13,cursor:"pointer"}}>
+          Nicht aufteilen (1 Flug)
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function FlugbuchApp() {
   const isWide = useIsWide();
   const isLandscapePhone = useIsLandscapePhone();
@@ -5785,6 +5907,14 @@ function FlugbuchApp() {
   // MULTIPLE existing (track-less) flights by date — resolved one at a
   // time via a picker rather than guessing which flight each belongs to.
   const [pendingDateAmbiguous, setPendingDateAmbiguous] = useState([]); // [{file, date, candidates}]
+  // IGC-Dateien im aktuellen Batch, die laut detectFlightSegments mehrere
+  // mögliche Flüge enthalten (z.B. zwei Flüge mit Bodentransport-Pause
+  // dazwischen, siehe Flug vom 24.01.2020) — vor dem Anlegen der Flüge über
+  // SplitFlightDialog eine nach der anderen entschieden (aufteilen oder als
+  // ein Flug behalten). pendingImportRef hält währenddessen simpleList
+  // (Dateien ohne Split-Kandidat), die verbleibenden splitCandidates und
+  // die schon entschiedenen resolvedList-Einträge.
+  const [pendingSplitDecisions, setPendingSplitDecisions] = useState(null); // null | [candidate, ...]
   // Schirme, die im aktuellen IGC-Batch neu auftauchen (noch kein
   // Namens-Treffer in der Schirme-Liste) — vor dem eigentlichen Anlegen der
   // Flüge/Schirme per NewSchirmDialog bestätigt/korrigiert (siehe
@@ -6534,34 +6664,11 @@ function FlugbuchApp() {
     return flights.find(f => f.track && f.track.length > 1 && f.date === p.date && f.startTime === p.igcData.startTime) || null;
   };
 
-  const processIGCFiles = useCallback(async (igcFiles) => {
-    setImporting(true); setImportProgress({done:0,total:igcFiles.length});
-    // Frischer Batch → Schirme-Liste neu laden, statt eine evtl. veraltete
-    // Kopie von einem vorherigen Import weiterzuverwenden.
-    let schirmeList;
-    try {
-      const r = await window.storage.get(SCHIRME_KEY);
-      schirmeList = r ? JSON.parse(r.value) : [];
-    } catch (e) { console.error("Schirme-Liste laden fehlgeschlagen:", e); schirmeList = []; }
-    schirmeListRef.current = schirmeList;
-
-    // Alle Dateien vorab einlesen/parsen (statt im Import-Loop selbst),
-    // damit sich unten — VOR dem eigentlichen Anlegen von Flügen/Schirmen —
-    // schon erkennen lässt, welche Dateien vermutlich Dubletten sind und
-    // welche Schirm-Namen im Batch neu sind.
-    const parsedList = [];
-    for (const file of igcFiles) {
-      const text = await file.text();
-      const { track, date, pilot, glider, tzOffsetHours } = parseIGC(text);
-      // Werte (Dauer, Distanz, Speed, Höhengewinn usw.) immer aus dem um
-      // erkannten Bodentransport (Auto/Bahn) bereinigten Track berechnen —
-      // siehe trimGroundTransportTrack weiter oben. Der volle, unveränderte
-      // Track bleibt trotzdem auf dem Flug gespeichert (unten `track`).
-      const igcData = analyzeIGC(trimGroundTransportTrack(track), tzOffsetHours, date);
-      const baseName = file.name.replace(/\.igc$/i,"");
-      parsedList.push({ file, track, date, pilot, glider, igcData, baseName });
-    }
-
+  // Zweiter Teil von processIGCFiles, ausgelagert, damit er sowohl direkt
+  // (keine Split-Entscheidung nötig) als auch nach dem letzten
+  // SplitFlightDialog (siehe resolveSplitDecision) aufgerufen werden kann,
+  // ohne die Datums-Dubletten-Prüfung/Schirm-Erkennung zu duplizieren.
+  const continueImportAfterParsing = useCallback(async (parsedList) => {
     const dateDups = [];
     const nonDupList = [];
     for (const p of parsedList) {
@@ -6579,6 +6686,108 @@ function FlugbuchApp() {
     }
     await detectAndHandleNewSchirme(parsedList);
   }, [flights, detectAndHandleNewSchirme]);
+
+  const processIGCFiles = useCallback(async (igcFiles) => {
+    setImporting(true); setImportProgress({done:0,total:igcFiles.length});
+    // Frischer Batch → Schirme-Liste neu laden, statt eine evtl. veraltete
+    // Kopie von einem vorherigen Import weiterzuverwenden.
+    let schirmeList;
+    try {
+      const r = await window.storage.get(SCHIRME_KEY);
+      schirmeList = r ? JSON.parse(r.value) : [];
+    } catch (e) { console.error("Schirme-Liste laden fehlgeschlagen:", e); schirmeList = []; }
+    schirmeListRef.current = schirmeList;
+
+    // Alle Dateien vorab einlesen/parsen (statt im Import-Loop selbst),
+    // damit sich unten — VOR dem eigentlichen Anlegen von Flügen/Schirmen —
+    // schon erkennen lässt, welche Dateien vermutlich Dubletten sind, welche
+    // Schirm-Namen im Batch neu sind, und welche Dateien mehrere mögliche
+    // Flüge enthalten (siehe detectFlightSegments/SplitFlightDialog).
+    const parsedList = [];
+    const splitCandidates = [];
+    for (const file of igcFiles) {
+      const text = await file.text();
+      const { track, date, pilot, glider, tzOffsetHours } = parseIGC(text);
+      const baseName = file.name.replace(/\.igc$/i,"");
+      const segments = detectFlightSegments(track);
+      if (segments.length > 1) {
+        // Mehrere mögliche Flüge in dieser Datei (z.B. zwei Flüge mit
+        // Bodentransport-Pause dazwischen) — nicht automatisch entscheiden,
+        // sondern der Person die Wahl lassen (SplitFlightDialog unten).
+        // "Ohne Split" bleibt dabei exakt das bisherige Verhalten: nur die
+        // Ränder gekappt, die Pause in der Mitte zählt weiter zur Dauer.
+        const combinedBounds = findFlightBoundsExcludingGroundTransport(track);
+        const combinedIgcData = analyzeIGC(track.slice(combinedBounds.startIdx, combinedBounds.endIdx+1), tzOffsetHours, date);
+        const segmentDetails = segments.map(seg => {
+          const segTrack = track.slice(seg.startIdx, seg.endIdx+1);
+          // Zusätzliche, billige Absicherung: auch den einzelnen Abschnitt
+          // nochmal randkappen (die Segmentgrenzen SIND normalerweise schon
+          // die Flugränder, das hier fängt nur Restfälle ab).
+          const innerBounds = findFlightBoundsExcludingGroundTransport(segTrack);
+          const trimmedSegTrack = segTrack.slice(innerBounds.startIdx, innerBounds.endIdx+1);
+          return { track: trimmedSegTrack, igcData: analyzeIGC(trimmedSegTrack, tzOffsetHours, date) };
+        });
+        splitCandidates.push({ file, track, date, pilot, glider, tzOffsetHours, baseName, combinedIgcData, segments: segmentDetails });
+        continue;
+      }
+      // Werte (Dauer, Distanz, Speed, Höhengewinn usw.) immer aus dem um
+      // erkannten Bodentransport (Auto/Bahn) bereinigten Track berechnen —
+      // siehe trimGroundTransportTrack weiter oben. Der volle, unveränderte
+      // Track bleibt trotzdem auf dem Flug gespeichert (unten `track`).
+      const igcData = analyzeIGC(trimGroundTransportTrack(track), tzOffsetHours, date);
+      parsedList.push({ file, track, date, pilot, glider, igcData, baseName });
+    }
+
+    if (splitCandidates.length) {
+      // Import pausiert hier — noch nichts gespeichert. Wird erst nach
+      // Entscheidung über alle SplitFlightDialoge (resolveSplitDecision)
+      // mit continueImportAfterParsing fortgesetzt.
+      pendingImportRef.current = { simpleList: parsedList, splitCandidates, resolvedList: [] };
+      setPendingSplitDecisions(splitCandidates);
+      setImporting(false); setImportProgress(null);
+      return;
+    }
+    await continueImportAfterParsing(parsedList);
+  }, [continueImportAfterParsing]);
+
+  // Eine SplitFlightDialog-Entscheidung für den JEWEILS ERSTEN offenen
+  // Split-Kandidaten anwenden ("split": pro Abschnitt ein eigener
+  // parsedList-Eintrag mit auf den Abschnitt gekapptem Track und
+  // eigenem Dateinamens-Suffix; "keep": ein Eintrag wie bisher, mit dem
+  // nur an den Rändern gekappten Gesamttrack) und entweder den nächsten
+  // Kandidaten zeigen oder — sobald alle entschieden sind — den Import mit
+  // simpleList + den aufgelösten Einträgen fortsetzen.
+  const resolveSplitDecision = useCallback(async (choice) => {
+    const pending = pendingImportRef.current;
+    if (!pending || !pending.splitCandidates?.length) return;
+    const [candidate, ...restCandidates] = pending.splitCandidates;
+    const resolvedList = [...pending.resolvedList];
+    if (choice === "split") {
+      candidate.segments.forEach((seg, idx) => {
+        resolvedList.push({
+          file: candidate.file, track: seg.track, date: candidate.date,
+          pilot: candidate.pilot, glider: candidate.glider, igcData: seg.igcData,
+          baseName: `${candidate.baseName} (Teil ${idx+1})`,
+        });
+      });
+    } else {
+      resolvedList.push({
+        file: candidate.file, track: candidate.track, date: candidate.date,
+        pilot: candidate.pilot, glider: candidate.glider, igcData: candidate.combinedIgcData,
+        baseName: candidate.baseName,
+      });
+    }
+    if (restCandidates.length) {
+      pendingImportRef.current = { ...pending, splitCandidates: restCandidates, resolvedList };
+      setPendingSplitDecisions(restCandidates);
+      return;
+    }
+    const finalList = [...pending.simpleList, ...resolvedList];
+    pendingImportRef.current = null;
+    setPendingSplitDecisions(null);
+    setImporting(true); setImportProgress({done:0,total:finalList.length});
+    await continueImportAfterParsing(finalList);
+  }, [continueImportAfterParsing]);
 
   const resolveDateDups = useCallback(async (importAnyway) => {
     const { nonDupList, dateDups } = pendingImportRef.current || { nonDupList: [], dateDups: [] };
@@ -6961,6 +7170,12 @@ function FlugbuchApp() {
             </div>
           )}
         </div>
+      )}
+
+      {pendingSplitDecisions && pendingSplitDecisions.length > 0 && (
+        <SplitFlightDialog candidate={pendingSplitDecisions[0]}
+          onSplit={()=>resolveSplitDecision("split")}
+          onKeep={()=>resolveSplitDecision("keep")} />
       )}
 
       {pendingDateDups && (
