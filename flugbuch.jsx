@@ -1,4 +1,4 @@
-const { useState, useEffect, useRef, useCallback, useMemo } = React;
+const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
 
 // ── IGC Parser ─────────────────────────────────────────────────────────────
 // Set by FlightProfile while its zoom level is above 1×, checked by the
@@ -5638,6 +5638,14 @@ function FlugbuchApp() {
   const flightsWithRanks = useMemo(() => attachComputedRanks(flights), [flights]);
   const [selected, setSelected] = useState(null);
   const [view, setView] = useState("list"); // list|detail|edit|season
+  // Scroll position of the (window-scrolling, non-wide) flight list, saved
+  // right before jumping into a flight's detail view and restored when
+  // coming back — so "zurück" lands where the person left off instead of
+  // snapping to the top of the list.
+  const listScrollRef = useRef(0);
+  useLayoutEffect(() => {
+    if (view === "list") window.scrollTo(0, listScrollRef.current);
+  }, [view]);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
   const [igcResult, setIgcResult] = useState(null);
@@ -7131,7 +7139,7 @@ function FlugbuchApp() {
           <FlightRow key={f.id} f={f} isLongest={f.id===longestId} sortId={sortId}
             selectMode={selectMode} isSelected={selectedIds.has(f.id)}
             onToggleSelect={id=>setSelectedIds(prev=>{const n=new Set(prev);n.has(id)?n.delete(id):n.add(id);return n;})}
-            onClick={()=>{setSelected(f);setView("detail");}} />
+            onClick={()=>{listScrollRef.current=window.scrollY;setSelected(f);setView("detail");}} />
         ))}
       </div>
       {showFieldEditor&&<FieldEditor customFieldDefs={customFieldDefs} onSave={handleSaveFields} onClose={()=>setShowFieldEditor(false)} />}
