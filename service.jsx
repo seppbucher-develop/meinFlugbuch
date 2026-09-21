@@ -154,11 +154,31 @@ function buildIgcTextFromFlight(fl) {
   return { filenameBase, text: igc };
 }
 
+// Aufklappbarer Erklärungstext: Titelzeile mit Aufklappsymbol rechts, Text
+// selbst standardmässig ausgeblendet — kompaktere Darstellung, Erklärung
+// bleibt bei Bedarf einen Klick entfernt.
+function SectionHeader({ title, sectionKey, open, onToggle }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+      <div style={{ fontSize: 15, fontWeight: 700 }}>{title}</div>
+      <button onClick={() => onToggle(sectionKey)} aria-label={open ? "Erklärung ausblenden" : "Erklärung einblenden"}
+        style={{ flexShrink: 0, background: "transparent", border: "none", color: "rgba(232,244,253,0.45)", fontSize: 15, cursor: "pointer", padding: "2px 4px", lineHeight: 1 }}>
+        {open ? "▾" : "▸"}
+      </button>
+    </div>
+  );
+}
+
 function ServiceApp() {
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState(null); // {type:"ok"|"error", text}
   const [stats, setStats] = React.useState(null); // {flights, material, keys}
   const fileRef = React.useRef(null);
+
+  // Welche Erklärungstexte gerade aufgeklappt sind — standardmässig alle
+  // ausgeblendet (kompaktere Darstellung), pro Bereich per Symbol umschaltbar.
+  const [openInfo, setOpenInfo] = React.useState({});
+  const toggleInfo = (key) => setOpenInfo(o => ({ ...o, [key]: !o[key] }));
 
   // API-Zugangsdaten (aktuell: MapTiler) — zentral hier hinterlegt statt
   // fest im Quellcode von flugbuch.jsx, damit ein eigener Schlüssel nicht
@@ -715,10 +735,12 @@ function ServiceApp() {
 
       <div style={{ padding: "16px" }}>
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>🔑 API-Zugangsdaten</div>
-          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
-            MapTiler-Schlüssel für die Karten im Flugbuch (Outdoor-Kartenstil). Ohne eigenen Schlüssel läuft die App mit einem eingebauten Standard-Schlüssel weiter.
-          </div>
+          <SectionHeader title="🔑 API-Zugangsdaten" sectionKey="maptiler" open={!!openInfo.maptiler} onToggle={toggleInfo} />
+          {openInfo.maptiler && (
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+              MapTiler-Schlüssel für die Karten im Flugbuch (Outdoor-Kartenstil). Ohne eigenen Schlüssel läuft die App mit einem eingebauten Standard-Schlüssel weiter.
+            </div>
+          )}
           <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>MapTiler API Key</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input value={maptilerKey} onChange={e => setMaptilerKey(e.target.value)}
@@ -735,10 +757,12 @@ function ServiceApp() {
         </div>
 
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📍 IGC-Import: Start-/Landeplatz &amp; Land</div>
-          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
-            Beim Import einer neuen IGC-Datei übernimmt das Flugbuch Startplatz, Landeplatz und Land automatisch von einem bereits vorhandenen Flug, dessen Koordinaten innerhalb dieses Radius liegen. Findet sich kein Treffer, wird das Land zusätzlich per MapTiler bestimmt (benötigt den Schlüssel oben).
-          </div>
+          <SectionHeader title={<>📍 IGC-Import: Start-/Landeplatz &amp; Land</>} sectionKey="placeRadius" open={!!openInfo.placeRadius} onToggle={toggleInfo} />
+          {openInfo.placeRadius && (
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+              Beim Import einer neuen IGC-Datei übernimmt das Flugbuch Startplatz, Landeplatz und Land automatisch von einem bereits vorhandenen Flug, dessen Koordinaten innerhalb dieses Radius liegen. Findet sich kein Treffer, wird das Land zusätzlich per MapTiler bestimmt (benötigt den Schlüssel oben).
+            </div>
+          )}
           <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Radius (km)</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input value={placeRadius} onChange={e => setPlaceRadius(e.target.value)}
@@ -755,10 +779,12 @@ function ServiceApp() {
         </div>
 
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📍 Umkreissuche (aktueller Standort)</div>
-          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
-            Im Flugbuch lässt sich über das 📍-Symbol bei der Suche nach Flügen filtern, deren Start- oder Landeplatz in der Nähe des aktuellen Standorts (Browser-Geolocation) liegt. Dieser Radius ist der Vorgabewert dafür — pro Suche im Flugbuch selbst weiterhin änderbar.
-          </div>
+          <SectionHeader title="📍 Umkreissuche (aktueller Standort)" sectionKey="nearbyRadius" open={!!openInfo.nearbyRadius} onToggle={toggleInfo} />
+          {openInfo.nearbyRadius && (
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+              Im Flugbuch lässt sich über das 📍-Symbol bei der Suche nach Flügen filtern, deren Start- oder Landeplatz in der Nähe des aktuellen Standorts (Browser-Geolocation) liegt. Dieser Radius ist der Vorgabewert dafür — pro Suche im Flugbuch selbst weiterhin änderbar.
+            </div>
+          )}
           <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Standardradius (km)</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input value={nearbyRadius} onChange={e => setNearbyRadius(e.target.value)}
@@ -775,10 +801,12 @@ function ServiceApp() {
         </div>
 
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>🔄 Updates &amp; Offline-Cache</div>
-          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
-            Die App speichert ihre eigenen Seiten für die Offline-Nutzung zwischen. Standardmässig wird beim Öffnen immer sofort die zuletzt gespeicherte Version angezeigt (auch offline oder bei schwachem Netz sofort da) — ein Update wird dadurch erst beim übernächsten Öffnen sichtbar. Mit dieser Einstellung lädt die App stattdessen bei jedem Öffnen zuerst die neueste Version übers Netz; Updates sind dann sofort sichtbar, aber bei schwachem Empfang (z.B. am Lande-/Startplatz) kann das Laden dadurch spürbar länger dauern.
-          </div>
+          <SectionHeader title={<>🔄 Updates &amp; Offline-Cache</>} sectionKey="cache" open={!!openInfo.cache} onToggle={toggleInfo} />
+          {openInfo.cache && (
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+              Die App speichert ihre eigenen Seiten für die Offline-Nutzung zwischen. Standardmässig wird beim Öffnen immer sofort die zuletzt gespeicherte Version angezeigt (auch offline oder bei schwachem Netz sofort da) — ein Update wird dadurch erst beim übernächsten Öffnen sichtbar. Mit dieser Einstellung lädt die App stattdessen bei jedem Öffnen zuerst die neueste Version übers Netz; Updates sind dann sofort sichtbar, aber bei schwachem Empfang (z.B. am Lande-/Startplatz) kann das Laden dadurch spürbar länger dauern.
+            </div>
+          )}
           <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
             <input type="checkbox" checked={networkFirst} onChange={e => saveNetworkFirst(e.target.checked)}
               style={{ width: 18, height: 18, cursor: "pointer", flexShrink: 0 }} />
@@ -788,10 +816,12 @@ function ServiceApp() {
 
         {fsapiSupported && (
           <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📁 Backup-Ordner (automatisch, dieser PC)</div>
-            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
-              Einmalig festlegen (z.B. dein lokaler Synology-Drive-Sync-Ordner) — künftige Backups landen danach automatisch dort, ganz ohne Dialog. Gilt nur für diesen Browser auf diesem Gerät.
-            </div>
+            <SectionHeader title="📁 Backup-Ordner (automatisch, dieser PC)" sectionKey="backupFolder" open={!!openInfo.backupFolder} onToggle={toggleInfo} />
+            {openInfo.backupFolder && (
+              <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+                Einmalig festlegen (z.B. dein lokaler Synology-Drive-Sync-Ordner) — künftige Backups landen danach automatisch dort, ganz ohne Dialog. Gilt nur für diesen Browser auf diesem Gerät.
+              </div>
+            )}
             {dirName ? (
               <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div style={{ flex: "1 1 auto", background: "rgba(74,222,128,0.1)", border: "1px solid rgba(74,222,128,0.25)", borderRadius: 8, padding: "8px 12px", fontSize: 13, color: "#4ade80" }}>
@@ -840,13 +870,15 @@ function ServiceApp() {
         )}
 
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>☁️ Backup & Restore {dirName ? "(anderer Ort)" : ""}</div>
-          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 16, lineHeight: 1.5 }}>
-            {dirName
-              ? "Zum manuellen Wiederherstellen aus einer Datei außerhalb des oben gewählten Ordners, oder wenn dein Backup-Ordner gerade nicht verfügbar ist."
-              : "Sichert alles auf einmal: Flugbuch, Statistik-Voreinstellungen und Material. Eine wiederhergestellte Sicherung ersetzt die aktuellen Daten in den jeweils gleichen Bereichen (bestehende Einträge mit derselben ID werden überschrieben, alles andere bleibt unangetastet)."}
-            {!fsapiSupported && " Auf diesem Browser läuft „Backup sichern” über den Teilen-/Download-Dialog (die automatische Ordner-Option oben gibt es nur in Chrome/Edge am PC)."}
-          </div>
+          <SectionHeader title={<>☁️ Backup & Restore {dirName ? "(anderer Ort)" : ""}</>} sectionKey="backupRestore" open={!!openInfo.backupRestore} onToggle={toggleInfo} />
+          {openInfo.backupRestore && (
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 16, lineHeight: 1.5 }}>
+              {dirName
+                ? "Zum manuellen Wiederherstellen aus einer Datei außerhalb des oben gewählten Ordners, oder wenn dein Backup-Ordner gerade nicht verfügbar ist."
+                : "Sichert alles auf einmal: Flugbuch, Statistik-Voreinstellungen und Material. Eine wiederhergestellte Sicherung ersetzt die aktuellen Daten in den jeweils gleichen Bereichen (bestehende Einträge mit derselben ID werden überschrieben, alles andere bleibt unangetastet)."}
+              {!fsapiSupported && " Auf diesem Browser läuft „Backup sichern” über den Teilen-/Download-Dialog (die automatische Ordner-Option oben gibt es nur in Chrome/Edge am PC)."}
+            </div>
+          )}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 160px" }}>
               <button onClick={exportBackup} disabled={busy}
@@ -872,10 +904,12 @@ function ServiceApp() {
         </div>
 
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>📤 Exportieren (CSV &amp; IGC)</div>
-          <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 16, lineHeight: 1.5 }}>
-            Erzeugt flugbuch.csv, material.csv, schirme.csv, sitze.csv, geraete.csv und div.csv (je eine Spalte pro Datenbankfeld) sowie eine ZIP-Datei mit den IGC-Dateien aller Flüge — und legt sie am selben Ort ab wie das Backup oben{dirName ? ` (Ordner „${dirName}")` : ""}.
-          </div>
+          <SectionHeader title={<>📤 Exportieren (CSV &amp; IGC)</>} sectionKey="exportCsv" open={!!openInfo.exportCsv} onToggle={toggleInfo} />
+          {openInfo.exportCsv && (
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 16, lineHeight: 1.5 }}>
+              Erzeugt flugbuch.csv, material.csv, schirme.csv, sitze.csv, geraete.csv und div.csv (je eine Spalte pro Datenbankfeld) sowie eine ZIP-Datei mit den IGC-Dateien aller Flüge — und legt sie am selben Ort ab wie das Backup oben{dirName ? ` (Ordner „${dirName}")` : ""}.
+            </div>
+          )}
           <button onClick={exportCsvIgc} disabled={busy}
             style={{ width: "100%", boxSizing: "border-box", background: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: "12px", color: "#fcd34d", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
             {busy ? "⏳ …" : "📤 Exportieren"}
