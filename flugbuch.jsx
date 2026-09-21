@@ -607,6 +607,90 @@ function formatDurationHM(sec) {
   return `${h}h ${String(m).padStart(2,"0")}m`;
 }
 
+// ── Bodentransport (Auto/Bahn) vor/nach dem Flug erkennen & aus dem Track
+// für die Wertberechnung ausklammern ────────────────────────────────────
+// Läuft die IGC-Aufzeichnung schon vor dem Start im Auto (oder danach nach
+// der Landung noch im Fahrzeug weiter) mit, verfälscht dieser Abschnitt
+// alle aus dem Track abgeleiteten Werte (Dauer, Distanz, Max/Ø Speed,
+// Höhengewinn usw.) — siehe Flug vom 24.01.2020. Erkennung ausschliesslich
+// an den TRACK-RÄNDERN (nie mittendrin, damit ein ruhiger Abschnitt
+// innerhalb des Flugs — z.B. wenig Vario im Hangflug — nie fälschlich
+// mitgekappt wird): ein Punkt gilt als Bodentransport, wenn er über ein
+// kurzes Zeitfenster sowohl deutlich schneller unterwegs ist, als ein
+// Gleitschirm typischerweise fliegt, ALS AUCH praktisch die Höhe hält —
+// dieselbe Physik wie bei hasPlausibleDescent weiter unten (Max Speed):
+// ein Gleitschirm sinkt ohne Motor bei diesem Tempo immer spürbar, ein
+// Auto/Zug bewegt sich bei ähnlichem Tempo dagegen praktisch eben. Eine
+// langsame, stark steigende Gondel-/Standseilbahnfahrt wird davon bewusst
+// NICHT erfasst — das liesse sich ohne echte Vergleichsdaten nicht
+// zuverlässig von einem frühen, steilen Thermiksteigen nach dem Start
+// unterscheiden, ein falscher Treffer dort wäre schlimmer als gar keiner.
+const GROUND_TRANSPORT_WINDOW_SEC = 30;   // Zeitfenster pro geprüftem Punkt
+const GROUND_TRANSPORT_SPEED_KMH = 40;    // nachhaltig darüber ist für einen Gleitschirm untypisch
+const GROUND_TRANSPORT_FLAT_VARIO_MS = 0.5; // darunter gilt die Höhe als "eben", kein aktiver Gleitflug/Steigen
+const GROUND_TRANSPORT_MIN_RUN_SEC = 180; // kurze, zufällig "flache" Passagen nicht als Transport werten
+const GROUND_TRANSPORT_MAX_TRIM_SEC = 3*3600; // Sicherheitsgrenze: nie mehr als 3h von einer Seite kappen
+const GROUND_TRANSPORT_MIN_REMAINING_SEC = 180; // bleibt zu wenig übrig, lieber gar nicht kappen
+
+// Geschwindigkeit/Vario für das GROUND_TRANSPORT_WINDOW_SEC-Fenster ab
+// (dir>0) bzw. bis (dir<0) Punkt i — einseitig statt zentriert, damit auch
+// der allererste/letzte Trackpunkt selbst geprüft werden kann.
+function groundTransportWindowStats(track, i, dir) {
+  let j = i;
+  if (dir > 0) { while (j < track.length-1 && (track[j+1].timeSec - track[i].timeSec) < GROUND_TRANSPORT_WINDOW_SEC) j++; }
+  else { while (j > 0 && (track[i].timeSec - track[j-1].timeSec) < GROUND_TRANSPORT_WINDOW_SEC) j--; }
+  const lo = dir > 0 ? i : j, hi = dir > 0 ? j : i;
+  const dt = track[hi].timeSec - track[lo].timeSec;
+  if (dt < GROUND_TRANSPORT_WINDOW_SEC * 0.5) return null; // Fenster zu kurz (Track-Rand) — keine verlässliche Aussage
+  let dist = 0;
+  for (let k = lo; k < hi; k++) dist += haversineDistKm(track[k], track[k+1]) || 0;
+  return { speedKmh: dist / (dt/3600), varioMs: Math.abs(track[hi].gpsAlt - track[lo].gpsAlt) / dt };
+}
+function isGroundTransportPoint(track, i, dir) {
+  const w = groundTransportWindowStats(track, i, dir);
+  return !!w && w.speedKmh > GROUND_TRANSPORT_SPEED_KMH && w.varioMs < GROUND_TRANSPORT_FLAT_VARIO_MS;
+}
+// Läuft von beiden Rändern nach innen, solange der jeweilige Punkt nach
+// obiger Definition Bodentransport ist, und liefert die Indexgrenzen des
+// verbleibenden (echten) Flugteils. Ohne erkannten Bodentransport (oder
+// falls die Sicherheitsnetze greifen) entspricht das Ergebnis dem
+// unveränderten, vollständigen Track.
+function findFlightBoundsExcludingGroundTransport(track) {
+  const full = { startIdx: 0, endIdx: track.length-1, trimmedStartSec: 0, trimmedEndSec: 0 };
+  if (!track || track.length < 5) return full;
+  const t0 = track[0].timeSec, tN = track[track.length-1].timeSec;
+
+  let startIdx = 0;
+  while (startIdx < track.length - 1 && (track[startIdx].timeSec - t0) < GROUND_TRANSPORT_MAX_TRIM_SEC
+      && isGroundTransportPoint(track, startIdx, +1)) startIdx++;
+  let endIdx = track.length - 1;
+  while (endIdx > startIdx && (tN - track[endIdx].timeSec) < GROUND_TRANSPORT_MAX_TRIM_SEC
+      && isGroundTransportPoint(track, endIdx, -1)) endIdx--;
+
+  const trimmedStartSec = track[startIdx].timeSec - t0;
+  const trimmedEndSec = tN - track[endIdx].timeSec;
+  const effStartIdx = trimmedStartSec >= GROUND_TRANSPORT_MIN_RUN_SEC ? startIdx : 0;
+  const effEndIdx = trimmedEndSec >= GROUND_TRANSPORT_MIN_RUN_SEC ? endIdx : track.length - 1;
+  if (effStartIdx === 0 && effEndIdx === track.length - 1) return full;
+  // Sicherheitsnetz: bleibt zu wenig vom Track übrig, lieber gar nicht kappen.
+  if (effEndIdx <= effStartIdx || (track[effEndIdx].timeSec - track[effStartIdx].timeSec) < GROUND_TRANSPORT_MIN_REMAINING_SEC) return full;
+  return {
+    startIdx: effStartIdx, endIdx: effEndIdx,
+    trimmedStartSec: effStartIdx ? trimmedStartSec : 0,
+    trimmedEndSec: effEndIdx < track.length-1 ? trimmedEndSec : 0,
+  };
+}
+// Liefert den Track ohne die erkannten Bodentransport-Abschnitte am Anfang/
+// Ende — für die Wertberechnung (analyzeIGC). Der vollständige, unveränderte
+// Track bleibt weiterhin auf dem Flug gespeichert (Karte/Höhenprofil/Export
+// zeigen also nach wie vor die komplette Aufzeichnung), nur die daraus
+// abgeleiteten STATISTIKEN werden korrigiert.
+function trimGroundTransportTrack(track) {
+  if (!track || track.length < 5) return track;
+  const { startIdx, endIdx } = findFlightBoundsExcludingGroundTransport(track);
+  return (startIdx === 0 && endIdx === track.length-1) ? track : track.slice(startIdx, endIdx+1);
+}
+
 function analyzeIGC(track, tzOffsetHours, dateStr) {
   const tz = tzOffsetHours != null ? tzOffsetHours : estimateTzOffset(track[0], dateStr);
   if (!track.length) return {};
@@ -5762,6 +5846,17 @@ function FlugbuchApp() {
   const [showRowImport, setShowRowImport] = useState(false);
   const [selectMode, setSelectMode] = useState(false);
   const [showImportMenu, setShowImportMenu] = useState(false);
+  // ── TEMPORÄR: Bodentransport (Auto/Bahn) vor/nach dem Flug bei bestehenden
+  // IGC-Flügen nachträglich aus der Wertberechnung ausklammern ────────────
+  // Bestehende, schon importierte Flüge wurden mit dem vollen (ggf. durch
+  // eine Autofahrt verfälschten) Track berechnet — siehe Flug vom 24.01.2020
+  // und trimGroundTransportTrack weiter oben. Nach einmaligem Gebrauch
+  // wieder entfernen: dieser State, der Button in headerIconButtons weiter
+  // unten, das Panel im JSX und runRecalcGroundTransport (Suche nach
+  // "TEMPORÄR").
+  const [showRecalcGroundTransport, setShowRecalcGroundTransport] = useState(false);
+  const [recalcGroundTransportRunning, setRecalcGroundTransportRunning] = useState(false);
+  const [recalcGroundTransportResult, setRecalcGroundTransportResult] = useState(null);
   const [csvColumns, setCsvColumns] = useState(
     CSV_COLUMN_DEFS.map(c => ({ key: c.key, enabled: true }))
   );
@@ -5904,6 +5999,94 @@ function FlugbuchApp() {
       return { ok: false, error: e };
     }
   }, []);
+
+  // TEMPORÄR — siehe showRecalcGroundTransport weiter oben. Liest für jeden
+  // Flug mit gespeicherter IGC-Rohdatei (loadRawIgcFile) den Track erneut
+  // ein, kappt davon erkannten Bodentransport (trimGroundTransportTrack)
+  // und berechnet die rein track-basierten Werte (Dauer, Zeiten, Höhen,
+  // Max.Steigen/-20s/Max.Sinken, Spirale/Wingover, H.Gew., H.Diff.,
+  // Max Speed) mit analyzeIGC neu — IMMER überschrieben, analog zu einem
+  // regulären Re-Import (siehe attachIgcToFlight), da genau diese Werte
+  // bei kontaminiertem Track falsch waren. Distanz/Ø Speed dagegen nur
+  // nachgetragen, wenn beide noch leer sind (computeDistanceSpeedBackfill,
+  // dieselbe Regel wie beim Import — ein manuell/von XContest erfasster
+  // Wert wird nie überschrieben). Der volle, gespeicherte Track selbst
+  // (Karte/Höhenprofil/Export) bleibt unangetastet. Flüge ohne erkannten
+  // Bodentransport (oder ohne gespeicherte Rohdatei) werden übersprungen
+  // und separat gezählt statt stillschweigend ignoriert.
+  const runRecalcGroundTransport = useCallback(async () => {
+    setRecalcGroundTransportRunning(true);
+    setRecalcGroundTransportResult(null);
+    const changed = [];
+    let noFile = 0, noTransport = 0, failed = 0;
+    const nextFlights = [];
+    for (const f of flights) {
+      try {
+        const buf = await loadRawIgcFile(f.id);
+        if (!buf) { noFile++; nextFlights.push(f); continue; }
+        const text = new TextDecoder().decode(new Uint8Array(buf));
+        const { track, date, tzOffsetHours } = parseIGC(text);
+        if (!track || track.length < 5) { failed++; nextFlights.push(f); continue; }
+        const bounds = findFlightBoundsExcludingGroundTransport(track);
+        if (!bounds.trimmedStartSec && !bounds.trimmedEndSec) { noTransport++; nextFlights.push(f); continue; }
+        const trimmedTrack = track.slice(bounds.startIdx, bounds.endIdx+1);
+        const igcData = analyzeIGC(trimmedTrack, tzOffsetHours, date || f.date);
+        const cf = { ...(f.customFields||{}) };
+        // H.Gew.: gleiche Regel wie bei einem regulären (Re-)Import in
+        // attachIgcToFlight — nur nachtragen, wenn noch leer, ein evtl.
+        // manuell korrigierter Wert wird nie überschrieben.
+        if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) cf.hGew = String(igcData.totalGain);
+        cf.hDiff = igcData.hDiff ? String(igcData.hDiff) : cf.hDiff;
+        cf.maxSteigen = String(igcData.maxClimb);
+        cf.maxSteigen20 = String(igcData.maxClimb20);
+        cf.maxSinken = String(igcData.maxSinkRate);
+        cf.spiraleMaxSinken = igcData.spiraleMaxSinken != null ? String(igcData.spiraleMaxSinken) : "";
+        cf.spiraleSinkenSchnitt = igcData.spiraleSinkenSchnitt != null ? String(igcData.spiraleSinkenSchnitt) : "";
+        cf.spiraleAnzahlKreise = igcData.spiraleAnzahlKreise != null ? String(igcData.spiraleAnzahlKreise) : "";
+        cf.spiraleHoehenabbau = igcData.spiraleHoehenabbau != null ? String(igcData.spiraleHoehenabbau) : "";
+        cf.wingoverMaxSinken = igcData.wingoverMaxSinken != null ? String(igcData.wingoverMaxSinken) : "";
+        cf.wingoverSinkenSchnitt = igcData.wingoverSinkenSchnitt != null ? String(igcData.wingoverSinkenSchnitt) : "";
+        cf.wingoverAnzahl = igcData.wingoverAnzahl != null ? String(igcData.wingoverAnzahl) : "";
+        cf.wingoverHoehenabbau = igcData.wingoverHoehenabbau != null ? String(igcData.wingoverHoehenabbau) : "";
+        const backfill = computeDistanceSpeedBackfill(f.totalDist, cf, igcData.scoreDistanceKm, igcData.durationSec);
+        if (backfill.distKm != null) cf.distKm = backfill.distKm;
+        if (backfill.kmh != null) cf.kmh = backfill.kmh;
+        // maxAlt/minAlt/startAlt/endAlt/startPt/endPt/Startzeit/Landezeit:
+        // gleiche "nur nachtragen, wenn noch leer"-Regel wie bei einem
+        // regulären Re-Import (attachIgcToFlight) — diese Felder sind über
+        // InlineField manuell editierbar, ein evtl. bereits von Hand
+        // korrigierter Wert wird hier nie überschrieben. Dauer/Max Speed/
+        // Max.Steigen-Sinken/Spirale-Wingover werden dagegen (wie bei jedem
+        // Re-Import) immer aus dem frischen Track übernommen.
+        const updated = {
+          ...f, customFields: cf,
+          maxAlt: f.maxAlt || igcData.maxAlt, minAlt: f.minAlt || igcData.minAlt,
+          startAlt: f.startAlt || igcData.startAlt, endAlt: f.endAlt || igcData.endAlt,
+          startPt: f.startPt || igcData.startPt, endPt: f.endPt || igcData.endPt,
+          durationSec: igcData.durationSec || f.durationSec, durationStr: igcData.durationStr || f.durationStr,
+          startTime: (f.startTime||"").trim() ? f.startTime : igcData.startTime,
+          endTime: (f.endTime||"").trim() ? f.endTime : igcData.endTime,
+          maxSpeedKmh: igcData.maxSpeedKmh,
+          totalDist: backfill.totalDist != null ? backfill.totalDist : f.totalDist,
+        };
+        const res = await saveFlight(updated);
+        if (!res.ok) { failed++; nextFlights.push(f); continue; }
+        changed.push({
+          id: f.id, name: f.name, site: f.site, date: f.date,
+          trimmedStartSec: bounds.trimmedStartSec, trimmedEndSec: bounds.trimmedEndSec,
+          oldDuration: f.durationStr, newDuration: igcData.durationStr,
+          oldMaxSpeed: f.maxSpeedKmh||0, newMaxSpeed: igcData.maxSpeedKmh,
+        });
+        nextFlights.push(updated);
+      } catch (e) {
+        console.error("Bodentransport-Korrektur fehlgeschlagen für Flug", f?.id, e);
+        failed++; nextFlights.push(f);
+      }
+    }
+    setFlights(nextFlights);
+    setRecalcGroundTransportResult({ changed, noFile, noTransport, failed, total: flights.length });
+    setRecalcGroundTransportRunning(false);
+  }, [flights, saveFlight]);
 
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
@@ -6317,7 +6500,11 @@ function FlugbuchApp() {
     for (const file of igcFiles) {
       const text = await file.text();
       const { track, date, pilot, glider, tzOffsetHours } = parseIGC(text);
-      const igcData = analyzeIGC(track, tzOffsetHours, date);
+      // Werte (Dauer, Distanz, Speed, Höhengewinn usw.) immer aus dem um
+      // erkannten Bodentransport (Auto/Bahn) bereinigten Track berechnen —
+      // siehe trimGroundTransportTrack weiter oben. Der volle, unveränderte
+      // Track bleibt trotzdem auf dem Flug gespeichert (unten `track`).
+      const igcData = analyzeIGC(trimGroundTransportTrack(track), tzOffsetHours, date);
       const baseName = file.name.replace(/\.igc$/i,"");
       parsedList.push({ file, track, date, pilot, glider, igcData, baseName });
     }
@@ -6524,6 +6711,8 @@ function FlugbuchApp() {
     { key:"map", title:"Weltkarte", active:false, onClick:()=>setView("worldmap"), icon:"🗺️" },
     { key:"views", title:"Gespeicherte Darstellungen", active:showViewsMenu, onClick:()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }, icon:"💡" },
     { key:"search", title:"Suchen/Sortieren", active:searchRowOpen, onClick:()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }, icon:"🔍" },
+    // TEMPORÄR — siehe showRecalcGroundTransport weiter oben, nach Gebrauch wieder entfernen.
+    { key:"recalcGroundTransport", title:"Bodentransport aus Flügen entfernen (temporär)", active:showRecalcGroundTransport, onClick:()=>{ setShowRecalcGroundTransport(m=>!m); }, icon:"🚗" },
   ];
   const headerTileStyle = (active, compact) => compact
     ? {width:34,height:34,flexShrink:0,boxSizing:"border-box",display:"flex",alignItems:"center",justifyContent:"center",background:active?"rgba(239,68,68,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${active?"rgba(239,68,68,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:9,color:"#fff",fontSize:16,cursor:"pointer"}
@@ -6673,6 +6862,52 @@ function FlugbuchApp() {
 
       {showCsvColumnConfig && (
         <CsvColumnConfigModal columns={csvColumns} onSave={saveCsvColumns} onClose={()=>setShowCsvColumnConfig(false)} />
+      )}
+
+      {/* TEMPORÄR: Bodentransport (Auto/Bahn) vor/nach dem Flug aus bestehenden
+          IGC-Flügen entfernen — siehe showRecalcGroundTransport weiter oben,
+          nach Gebrauch wieder entfernen (dieses Panel, der Button oben in
+          headerIconButtons, der State und runRecalcGroundTransport). */}
+      {showRecalcGroundTransport && (
+        <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(245,158,11,0.3)",borderRadius:10,padding:12}}>
+          <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:10}}>
+            🚗 Temporäres Werkzeug: prüft bei allen Flügen mit gespeicherter IGC-Rohdatei, ob vor/nach
+            dem Flug eine Autofahrt (o.ä.) aufgezeichnet wurde, und berechnet Dauer/Zeiten/Höhen/
+            Max Speed/Max.Steigen-Sinken/Spirale-Wingover ohne diese Abschnitte neu. Distanz/Ø Speed
+            werden nur nachgetragen, wenn beide noch leer sind. Der gespeicherte Track selbst bleibt
+            unverändert.
+          </div>
+          <button onClick={runRecalcGroundTransport} disabled={recalcGroundTransportRunning}
+            style={{width:"100%",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,padding:"9px 0",color:"#fcd34d",fontSize:13,fontWeight:700,cursor:recalcGroundTransportRunning?"default":"pointer",opacity:recalcGroundTransportRunning?0.6:1}}>
+            {recalcGroundTransportRunning ? "⏳ Prüfe…" : "Alle Flüge auf Bodentransport prüfen/korrigieren"}
+          </button>
+          {recalcGroundTransportResult && (
+            <div style={{marginTop:10}}>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.7)",marginBottom:6}}>
+                {recalcGroundTransportResult.total} Flüge geprüft · {recalcGroundTransportResult.changed.length} korrigiert ·{" "}
+                {recalcGroundTransportResult.noTransport} ohne erkannten Bodentransport · {recalcGroundTransportResult.noFile} ohne gespeicherte IGC-Datei
+                {recalcGroundTransportResult.failed > 0 && ` · ${recalcGroundTransportResult.failed} fehlgeschlagen`}
+              </div>
+              {recalcGroundTransportResult.changed.length > 0 && (
+                <div style={{maxHeight:260,overflowY:"auto",border:"1px solid rgba(255,255,255,0.08)",borderRadius:8}}>
+                  {recalcGroundTransportResult.changed.map(c => (
+                    <div key={c.id} style={{padding:"6px 10px",fontSize:12,borderBottom:"1px solid rgba(255,255,255,0.06)"}}>
+                      <div style={{color:"rgba(232,244,253,0.85)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                        {c.name}{c.site ? ` · ${c.site}` : ""}{c.date ? ` · ${c.date}` : ""}
+                      </div>
+                      <div style={{color:"rgba(232,244,253,0.6)"}}>
+                        {c.trimmedStartSec > 0 && `vorher ${Math.round(c.trimmedStartSec/60)}min · `}
+                        {c.trimmedEndSec > 0 && `nachher ${Math.round(c.trimmedEndSec/60)}min · `}
+                        {c.oldDuration} → <span style={{color:"#fcd34d",fontWeight:700}}>{c.newDuration}</span>
+                        {" · "}{c.oldMaxSpeed} → <span style={{color:"#fcd34d",fontWeight:700}}>{c.newMaxSpeed}</span> km/h
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       {pendingDateDups && (
