@@ -5644,7 +5644,7 @@ function FlugbuchApp() {
   // snapping to the top of the list.
   const listScrollRef = useRef(0);
   useLayoutEffect(() => {
-    if (view === "list") window.scrollTo(0, listScrollRef.current);
+    window.scrollTo(0, view === "list" ? listScrollRef.current : 0);
   }, [view]);
   const [importing, setImporting] = useState(false);
   const [importProgress, setImportProgress] = useState(null);
