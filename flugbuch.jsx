@@ -6000,20 +6000,26 @@ function FlugbuchApp() {
     }
   }, []);
 
-  // TEMPORÄR — siehe showRecalcGroundTransport weiter oben. Liest für jeden
-  // Flug mit gespeicherter IGC-Rohdatei (loadRawIgcFile) den Track erneut
-  // ein, kappt davon erkannten Bodentransport (trimGroundTransportTrack)
-  // und berechnet die rein track-basierten Werte (Dauer, Zeiten, Höhen,
-  // Max.Steigen/-20s/Max.Sinken, Spirale/Wingover, H.Gew., H.Diff.,
-  // Max Speed) mit analyzeIGC neu — IMMER überschrieben, analog zu einem
-  // regulären Re-Import (siehe attachIgcToFlight), da genau diese Werte
-  // bei kontaminiertem Track falsch waren. Distanz/Ø Speed dagegen nur
+  // TEMPORÄR — siehe showRecalcGroundTransport weiter oben. Nutzt für jeden
+  // Flug den bereits gespeicherten Track (fl.track, seit jeher bei jedem
+  // IGC-Import mitgespeichert) — NICHT die separat gesicherte IGC-Rohdatei
+  // (loadRawIgcFile): die gibt es erst seit einer viel späteren Änderung
+  // und fehlt deshalb bei den allermeisten schon länger bestehenden
+  // Flügen, was diese sonst grösstenteils unnötig übersprungen hätte. Nur
+  // wenn ein Flug ausnahmsweise keinen gespeicherten Track hat, wird als
+  // Fallback die Rohdatei versucht. Kappt davon erkannten Bodentransport
+  // (findFlightBoundsExcludingGroundTransport) und berechnet die rein
+  // track-basierten Werte (Dauer, Zeiten, Höhen, Max.Steigen/-20s/
+  // Max.Sinken, Spirale/Wingover, H.Gew., H.Diff., Max Speed) mit
+  // analyzeIGC neu — IMMER überschrieben, analog zu einem regulären
+  // Re-Import (siehe attachIgcToFlight), da genau diese Werte bei
+  // kontaminiertem Track falsch waren. Distanz/Ø Speed dagegen nur
   // nachgetragen, wenn beide noch leer sind (computeDistanceSpeedBackfill,
   // dieselbe Regel wie beim Import — ein manuell/von XContest erfasster
   // Wert wird nie überschrieben). Der volle, gespeicherte Track selbst
-  // (Karte/Höhenprofil/Export) bleibt unangetastet. Flüge ohne erkannten
-  // Bodentransport (oder ohne gespeicherte Rohdatei) werden übersprungen
-  // und separat gezählt statt stillschweigend ignoriert.
+  // (Karte/Höhenprofil/Export) bleibt unangetastet. Flüge ohne (nutzbaren)
+  // Track werden übersprungen und separat gezählt statt stillschweigend
+  // ignoriert.
   const runRecalcGroundTransport = useCallback(async () => {
     setRecalcGroundTransportRunning(true);
     setRecalcGroundTransportResult(null);
@@ -6022,15 +6028,23 @@ function FlugbuchApp() {
     const nextFlights = [];
     for (const f of flights) {
       try {
-        const buf = await loadRawIgcFile(f.id);
-        if (!buf) { noFile++; nextFlights.push(f); continue; }
-        const text = new TextDecoder().decode(new Uint8Array(buf));
-        const { track, date, tzOffsetHours } = parseIGC(text);
-        if (!track || track.length < 5) { failed++; nextFlights.push(f); continue; }
+        let track = f.track;
+        if (!track || track.length < 5) {
+          const buf = await loadRawIgcFile(f.id);
+          if (buf) {
+            const text = new TextDecoder().decode(new Uint8Array(buf));
+            track = parseIGC(text).track;
+          }
+        }
+        if (!track || track.length < 5) { noFile++; nextFlights.push(f); continue; }
         const bounds = findFlightBoundsExcludingGroundTransport(track);
         if (!bounds.trimmedStartSec && !bounds.trimmedEndSec) { noTransport++; nextFlights.push(f); continue; }
         const trimmedTrack = track.slice(bounds.startIdx, bounds.endIdx+1);
-        const igcData = analyzeIGC(trimmedTrack, tzOffsetHours, date || f.date);
+        // Keine Timezone gespeichert (die stand nur in der IGC-Rohdatei,
+        // HFTZN) — analyzeIGC schätzt sie in dem Fall selbst anhand der
+        // Position (estimateTzOffset), genau wie beim ursprünglichen
+        // Import, falls der Logger HFTZN nicht geschrieben hatte.
+        const igcData = analyzeIGC(trimmedTrack, null, f.date);
         const cf = { ...(f.customFields||{}) };
         // H.Gew.: gleiche Regel wie bei einem regulären (Re-)Import in
         // attachIgcToFlight — nur nachtragen, wenn noch leer, ein evtl.
@@ -6871,7 +6885,7 @@ function FlugbuchApp() {
       {showRecalcGroundTransport && (
         <div style={{margin:"8px 16px 0",background:"rgba(255,255,255,0.04)",border:"1px solid rgba(245,158,11,0.3)",borderRadius:10,padding:12}}>
           <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:10}}>
-            🚗 Temporäres Werkzeug: prüft bei allen Flügen mit gespeicherter IGC-Rohdatei, ob vor/nach
+            🚗 Temporäres Werkzeug: prüft bei allen Flügen mit gespeichertem Track, ob vor/nach
             dem Flug eine Autofahrt (o.ä.) aufgezeichnet wurde, und berechnet Dauer/Zeiten/Höhen/
             Max Speed/Max.Steigen-Sinken/Spirale-Wingover ohne diese Abschnitte neu. Distanz/Ø Speed
             werden nur nachgetragen, wenn beide noch leer sind. Der gespeicherte Track selbst bleibt
@@ -6885,7 +6899,7 @@ function FlugbuchApp() {
             <div style={{marginTop:10}}>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.7)",marginBottom:6}}>
                 {recalcGroundTransportResult.total} Flüge geprüft · {recalcGroundTransportResult.changed.length} korrigiert ·{" "}
-                {recalcGroundTransportResult.noTransport} ohne erkannten Bodentransport · {recalcGroundTransportResult.noFile} ohne gespeicherte IGC-Datei
+                {recalcGroundTransportResult.noTransport} ohne erkannten Bodentransport · {recalcGroundTransportResult.noFile} ohne nutzbaren Track
                 {recalcGroundTransportResult.failed > 0 && ` · ${recalcGroundTransportResult.failed} fehlgeschlagen`}
               </div>
               {recalcGroundTransportResult.changed.length > 0 && (
