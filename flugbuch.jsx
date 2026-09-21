@@ -612,29 +612,49 @@ function formatDurationHM(sec) {
 // Läuft die IGC-Aufzeichnung schon vor dem Start im Auto (oder danach nach
 // der Landung noch im Fahrzeug weiter) mit, verfälscht dieser Abschnitt
 // alle aus dem Track abgeleiteten Werte (Dauer, Distanz, Max/Ø Speed,
-// Höhengewinn usw.) — siehe Flug vom 24.01.2020. Erkennung ausschliesslich
-// an den TRACK-RÄNDERN (nie mittendrin, damit ein ruhiger Abschnitt
-// innerhalb des Flugs — z.B. wenig Vario im Hangflug — nie fälschlich
-// mitgekappt wird): ein Punkt gilt als Bodentransport, wenn er über ein
-// kurzes Zeitfenster sowohl deutlich schneller unterwegs ist, als ein
-// Gleitschirm typischerweise fliegt, ALS AUCH praktisch die Höhe hält —
-// dieselbe Physik wie bei hasPlausibleDescent weiter unten (Max Speed):
-// ein Gleitschirm sinkt ohne Motor bei diesem Tempo immer spürbar, ein
-// Auto/Zug bewegt sich bei ähnlichem Tempo dagegen praktisch eben. Eine
-// langsame, stark steigende Gondel-/Standseilbahnfahrt wird davon bewusst
-// NICHT erfasst — das liesse sich ohne echte Vergleichsdaten nicht
-// zuverlässig von einem frühen, steilen Thermiksteigen nach dem Start
-// unterscheiden, ein falscher Treffer dort wäre schlimmer als gar keiner.
+// Höhengewinn usw.) — siehe Flug vom 24.01.2020, dessen reale IGC-Datei zur
+// Herleitung/Prüfung dieser Erkennung verwendet wurde. Deren erste ~43
+// Minuten sind ein praktisch stillstehender GPS-Fix VOR der Abfahrt (Auto
+// parkiert, Höhe/Position bewegen sich kaum) statt einer schnellen Fahrt —
+// ein reiner Geschwindigkeits-über-Schwelle-Test (nur "schnell UND eben")
+// hätte das nicht erfasst. Erkennung ausschliesslich an den TRACK-RÄNDERN
+// (nie mittendrin, damit ein ruhiger Abschnitt innerhalb des Flugs — z.B.
+// wenig Vario im Hangflug — nie fälschlich mitgekappt wird): ein Punkt gilt
+// als Bodentransport, wenn er über ein kurzes Zeitfenster praktisch die
+// Höhe hält (dieselbe Physik wie bei hasPlausibleDescent weiter unten für
+// Max Speed: ohne Motor sinkt/steigt ein Gleitschirm im echten Flug immer
+// spürbar) UND dabei ENTWEDER deutlich schneller unterwegs ist, als ein
+// Gleitschirm typischerweise fliegt (Auto/Zug), ODER praktisch keine
+// Eigenbewegung zeigt (geparkt/wartend) — die dazwischenliegende
+// "Reisegeschwindigkeit" (üblicher Gleitschirm-Trimmspeed, z.B. beim
+// Hang-/Dünensegeln über Minuten praktisch ohne Höhenverlust) zählt bewusst
+// NICHT als Bodentransport, sonst würde echtes, flaches Streckenfliegen
+// mitgekappt (an über 1000 realen IGC-Dateien aus diesem Flugbuch geprüft).
+// Ein einzelner kurzer GPS-Aussetzer/-Sprung (z.B. der übliche "kein Fix"-
+// Drift kurz nach dem Einschalten) darf die Erkennung dabei kurz
+// unterbrechen, ohne die ganze Erkennung abzubrechen — GROUND_TRANSPORT_
+// GAP_TOLERANCE_SEC überbrückt das. Eine langsame, stark steigende Gondel-/
+// Standseilbahnfahrt wird bewusst NICHT erfasst — das liesse sich ohne
+// echte Vergleichsdaten nicht zuverlässig von einem frühen, steilen
+// Thermiksteigen nach dem Start unterscheiden, ein falscher Treffer dort
+// wäre schlimmer als gar keiner.
 const GROUND_TRANSPORT_WINDOW_SEC = 30;   // Zeitfenster pro geprüftem Punkt
-const GROUND_TRANSPORT_SPEED_KMH = 40;    // nachhaltig darüber ist für einen Gleitschirm untypisch
+const GROUND_TRANSPORT_FAST_KMH = 40;     // nachhaltig darüber ist für einen Gleitschirm untypisch (Auto/Zug)
+const GROUND_TRANSPORT_IDLE_KMH = 5;      // nachhaltig darunter ist keine Eigenbewegung (geparkt/wartend)
 const GROUND_TRANSPORT_FLAT_VARIO_MS = 0.5; // darunter gilt die Höhe als "eben", kein aktiver Gleitflug/Steigen
+const GROUND_TRANSPORT_GAP_TOLERANCE_SEC = 20; // kurze Unterbrechung (z.B. GPS-Aussetzer) überbrücken
 const GROUND_TRANSPORT_MIN_RUN_SEC = 180; // kurze, zufällig "flache" Passagen nicht als Transport werten
 const GROUND_TRANSPORT_MAX_TRIM_SEC = 3*3600; // Sicherheitsgrenze: nie mehr als 3h von einer Seite kappen
 const GROUND_TRANSPORT_MIN_REMAINING_SEC = 180; // bleibt zu wenig übrig, lieber gar nicht kappen
 
 // Geschwindigkeit/Vario für das GROUND_TRANSPORT_WINDOW_SEC-Fenster ab
 // (dir>0) bzw. bis (dir<0) Punkt i — einseitig statt zentriert, damit auch
-// der allererste/letzte Trackpunkt selbst geprüft werden kann.
+// der allererste/letzte Trackpunkt selbst geprüft werden kann. Die
+// Geschwindigkeit misst bewusst die direkte (Luftlinien-)Distanz zwischen
+// den beiden Fensterenden statt die Summe der Einzelschritte dazwischen —
+// wie bei computeMaxStraightSpeedKmh weiter unten mittelt das einen
+// einzelnen GPS-Ausreisser innerhalb des Fensters automatisch heraus,
+// statt ihm wie eine aufsummierte Strecke schutzlos ausgesetzt zu sein.
 function groundTransportWindowStats(track, i, dir) {
   let j = i;
   if (dir > 0) { while (j < track.length-1 && (track[j+1].timeSec - track[i].timeSec) < GROUND_TRANSPORT_WINDOW_SEC) j++; }
@@ -642,30 +662,49 @@ function groundTransportWindowStats(track, i, dir) {
   const lo = dir > 0 ? i : j, hi = dir > 0 ? j : i;
   const dt = track[hi].timeSec - track[lo].timeSec;
   if (dt < GROUND_TRANSPORT_WINDOW_SEC * 0.5) return null; // Fenster zu kurz (Track-Rand) — keine verlässliche Aussage
-  let dist = 0;
-  for (let k = lo; k < hi; k++) dist += haversineDistKm(track[k], track[k+1]) || 0;
-  return { speedKmh: dist / (dt/3600), varioMs: Math.abs(track[hi].gpsAlt - track[lo].gpsAlt) / dt };
+  const distKm = haversineDistKm(track[lo], track[hi]) || 0;
+  return { speedKmh: distKm / (dt/3600), varioMs: Math.abs(track[hi].gpsAlt - track[lo].gpsAlt) / dt };
 }
 function isGroundTransportPoint(track, i, dir) {
   const w = groundTransportWindowStats(track, i, dir);
-  return !!w && w.speedKmh > GROUND_TRANSPORT_SPEED_KMH && w.varioMs < GROUND_TRANSPORT_FLAT_VARIO_MS;
+  if (!w || w.varioMs >= GROUND_TRANSPORT_FLAT_VARIO_MS) return false;
+  return w.speedKmh > GROUND_TRANSPORT_FAST_KMH || w.speedKmh < GROUND_TRANSPORT_IDLE_KMH;
 }
-// Läuft von beiden Rändern nach innen, solange der jeweilige Punkt nach
-// obiger Definition Bodentransport ist, und liefert die Indexgrenzen des
-// verbleibenden (echten) Flugteils. Ohne erkannten Bodentransport (oder
-// falls die Sicherheitsnetze greifen) entspricht das Ergebnis dem
-// unveränderten, vollständigen Track.
+// Läuft von einem Rand nach innen (dir=+1 Anfang, dir=-1 Ende) und liefert
+// den Index des letzten noch als Bodentransport erkannten Punkts (-1, wenn
+// gleich der erste Punkt schon nicht passt). Toleriert dabei kurze
+// Unterbrechungen bis GROUND_TRANSPORT_GAP_TOLERANCE_SEC, statt bei der
+// ERSTEN nicht passenden Sekunde sofort abzubrechen — ohne diese Toleranz
+// verhindert z.B. ein einzelner kurzer GPS-Aussetzer kurz nach dem
+// Einschalten (Fenster fällt weder unter die Idle- noch über die
+// Fahrzeug-Schwelle) die Erkennung des gesamten davor/danach liegenden,
+// eindeutigen Bodentransport-Abschnitts.
+function walkGroundTransportBoundary(track, dir) {
+  const n = track.length;
+  const refTime = track[dir > 0 ? 0 : n-1].timeSec;
+  let i = dir > 0 ? 0 : n-1;
+  let lastGoodIdx = -1;
+  while (i >= 0 && i < n && Math.abs(track[i].timeSec - refTime) < GROUND_TRANSPORT_MAX_TRIM_SEC) {
+    if (isGroundTransportPoint(track, i, dir)) { lastGoodIdx = i; i += dir; continue; }
+    const sinceLastGood = lastGoodIdx === -1 ? Math.abs(track[i].timeSec - refTime) : Math.abs(track[i].timeSec - track[lastGoodIdx].timeSec);
+    if (sinceLastGood > GROUND_TRANSPORT_GAP_TOLERANCE_SEC) break;
+    i += dir;
+  }
+  return lastGoodIdx;
+}
+// Liefert die Indexgrenzen des verbleibenden (echten) Flugteils, nach Abzug
+// des von beiden Rändern erkannten Bodentransports. Ohne erkannten
+// Bodentransport (oder falls die Sicherheitsnetze greifen) entspricht das
+// Ergebnis dem unveränderten, vollständigen Track.
 function findFlightBoundsExcludingGroundTransport(track) {
   const full = { startIdx: 0, endIdx: track.length-1, trimmedStartSec: 0, trimmedEndSec: 0 };
   if (!track || track.length < 5) return full;
   const t0 = track[0].timeSec, tN = track[track.length-1].timeSec;
 
-  let startIdx = 0;
-  while (startIdx < track.length - 1 && (track[startIdx].timeSec - t0) < GROUND_TRANSPORT_MAX_TRIM_SEC
-      && isGroundTransportPoint(track, startIdx, +1)) startIdx++;
-  let endIdx = track.length - 1;
-  while (endIdx > startIdx && (tN - track[endIdx].timeSec) < GROUND_TRANSPORT_MAX_TRIM_SEC
-      && isGroundTransportPoint(track, endIdx, -1)) endIdx--;
+  const lastGoodStart = walkGroundTransportBoundary(track, +1);
+  const lastGoodEnd = walkGroundTransportBoundary(track, -1);
+  const startIdx = lastGoodStart === -1 ? 0 : lastGoodStart + 1;
+  const endIdx = lastGoodEnd === -1 ? track.length - 1 : lastGoodEnd - 1;
 
   const trimmedStartSec = track[startIdx].timeSec - t0;
   const trimmedEndSec = tN - track[endIdx].timeSec;
