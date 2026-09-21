@@ -791,6 +791,75 @@ function detectFlightSegments(track) {
   return segments.filter(s => track[s.endIdx].timeSec - track[s.startIdx].timeSec >= GROUND_TRANSPORT_SPLIT_MIN_SEGMENT_SEC);
 }
 
+// Wendet die Bodentransport-Korrektur auf einen bestehenden Flug an —
+// dieselben Feld-Regeln wie bei einem regulären Re-Import (siehe
+// attachIgcToFlight weiter unten): Dauer/Zeiten/Höhen/Max Speed/
+// Max.Steigen-Sinken/Spirale-Wingover werden aus igcData übernommen
+// (Zeiten/Höhen nur, wenn noch leer — über InlineField manuell editierbar,
+// ein evtl. korrigierter Wert wird nie überschrieben), Distanz/Ø Speed nur
+// nachgetragen, wenn beide noch leer sind. Von der TEMPORÄREN
+// runRecalcGroundTransport (siehe showRecalcGroundTransport in
+// FlugbuchApp) für den einfachen Fall UND für "nicht aufteilen" bei einem
+// Split-Kandidaten genutzt.
+function applyGroundTransportFix(f, igcData) {
+  const cf = { ...(f.customFields||{}) };
+  if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) cf.hGew = String(igcData.totalGain);
+  cf.hDiff = igcData.hDiff ? String(igcData.hDiff) : cf.hDiff;
+  cf.maxSteigen = String(igcData.maxClimb);
+  cf.maxSteigen20 = String(igcData.maxClimb20);
+  cf.maxSinken = String(igcData.maxSinkRate);
+  cf.spiraleMaxSinken = igcData.spiraleMaxSinken != null ? String(igcData.spiraleMaxSinken) : "";
+  cf.spiraleSinkenSchnitt = igcData.spiraleSinkenSchnitt != null ? String(igcData.spiraleSinkenSchnitt) : "";
+  cf.spiraleAnzahlKreise = igcData.spiraleAnzahlKreise != null ? String(igcData.spiraleAnzahlKreise) : "";
+  cf.spiraleHoehenabbau = igcData.spiraleHoehenabbau != null ? String(igcData.spiraleHoehenabbau) : "";
+  cf.wingoverMaxSinken = igcData.wingoverMaxSinken != null ? String(igcData.wingoverMaxSinken) : "";
+  cf.wingoverSinkenSchnitt = igcData.wingoverSinkenSchnitt != null ? String(igcData.wingoverSinkenSchnitt) : "";
+  cf.wingoverAnzahl = igcData.wingoverAnzahl != null ? String(igcData.wingoverAnzahl) : "";
+  cf.wingoverHoehenabbau = igcData.wingoverHoehenabbau != null ? String(igcData.wingoverHoehenabbau) : "";
+  const backfill = computeDistanceSpeedBackfill(f.totalDist, cf, igcData.scoreDistanceKm, igcData.durationSec);
+  if (backfill.distKm != null) cf.distKm = backfill.distKm;
+  if (backfill.kmh != null) cf.kmh = backfill.kmh;
+  return {
+    ...f, customFields: cf,
+    maxAlt: f.maxAlt || igcData.maxAlt, minAlt: f.minAlt || igcData.minAlt,
+    startAlt: f.startAlt || igcData.startAlt, endAlt: f.endAlt || igcData.endAlt,
+    startPt: f.startPt || igcData.startPt, endPt: f.endPt || igcData.endPt,
+    durationSec: igcData.durationSec || f.durationSec, durationStr: igcData.durationStr || f.durationStr,
+    startTime: (f.startTime||"").trim() ? f.startTime : igcData.startTime,
+    endTime: (f.endTime||"").trim() ? f.endTime : igcData.endTime,
+    maxSpeedKmh: igcData.maxSpeedKmh,
+    totalDist: backfill.totalDist != null ? backfill.totalDist : f.totalDist,
+  };
+}
+// TEMPORÄR (siehe showRecalcGroundTransport in FlugbuchApp) — baut die
+// customFields für einen NEUEN Flug, der aus einem einzelnen Segment beim
+// Aufteilen (Split) eines bestehenden Flugs entsteht — die reinen
+// Track-Werte werden (anders als applyGroundTransportFix) immer frisch
+// gesetzt, da es noch keinen bestehenden Eintrag für dieses Segment gibt.
+function buildSplitSegmentCustomFields(baseCf, igcData, igcFilename) {
+  return {
+    ...baseCf,
+    igcFilename: igcFilename || "",
+    hGew: igcData.totalGain ? String(igcData.totalGain) : "",
+    hDiff: igcData.hDiff ? String(igcData.hDiff) : "",
+    maxSteigen: igcData.maxClimb != null ? String(igcData.maxClimb) : "",
+    maxSteigen20: igcData.maxClimb20 != null ? String(igcData.maxClimb20) : "",
+    maxSinken: igcData.maxSinkRate != null ? String(igcData.maxSinkRate) : "",
+    spiraleMaxSinken: igcData.spiraleMaxSinken != null ? String(igcData.spiraleMaxSinken) : "",
+    spiraleSinkenSchnitt: igcData.spiraleSinkenSchnitt != null ? String(igcData.spiraleSinkenSchnitt) : "",
+    spiraleAnzahlKreise: igcData.spiraleAnzahlKreise != null ? String(igcData.spiraleAnzahlKreise) : "",
+    spiraleHoehenabbau: igcData.spiraleHoehenabbau != null ? String(igcData.spiraleHoehenabbau) : "",
+    wingoverMaxSinken: igcData.wingoverMaxSinken != null ? String(igcData.wingoverMaxSinken) : "",
+    wingoverSinkenSchnitt: igcData.wingoverSinkenSchnitt != null ? String(igcData.wingoverSinkenSchnitt) : "",
+    wingoverAnzahl: igcData.wingoverAnzahl != null ? String(igcData.wingoverAnzahl) : "",
+    wingoverHoehenabbau: igcData.wingoverHoehenabbau != null ? String(igcData.wingoverHoehenabbau) : "",
+    // Distanz/Ø Speed NICHT vom Ursprungsflug übernehmen (die galten für
+    // den ganzen, jetzt aufgeteilten Flug) — frisch aus dem Segment
+    // rückgerechnet lassen (siehe computeDistanceSpeedBackfill am Aufrufort).
+    distKm: "", kmh: "",
+  };
+}
+
 function analyzeIGC(track, tzOffsetHours, dateStr) {
   const tz = tzOffsetHours != null ? tzOffsetHours : estimateTzOffset(track[0], dateStr);
   if (!track.length) return {};
@@ -5744,16 +5813,16 @@ function SplitFlightDialogRow({ label, stats, highlight }) {
     </div>
   );
 }
-function SplitFlightDialog({ candidate, onKeep, onSplit }) {
+function SplitFlightDialog({ candidate, subtitle, onKeep, onSplit }) {
   const combined = splitDialogRowStats(candidate.combinedIgcData);
   const parts = candidate.segments.map(seg => splitDialogRowStats(seg.igcData));
   return (
     <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.6)",zIndex:300,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
       <div style={{background:"#0a1628",borderRadius:16,padding:"18px 16px",maxWidth:440,width:"100%",maxHeight:"85vh",overflowY:"auto",border:"1px solid rgba(255,255,255,0.1)"}}>
         <div style={{fontSize:15,fontWeight:800,marginBottom:4}}>Mehrere Flüge in einer Datei erkannt</div>
-        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:4}}>{candidate.file.name}</div>
+        <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:4}}>{subtitle || candidate.file?.name}</div>
         <div style={{fontSize:12,color:"rgba(232,244,253,0.5)",marginBottom:14}}>
-          Zwischen den erkannten Abschnitten liegt eine längere Pause (Bodentransport/Warten). Als ein Flug importieren oder in {candidate.segments.length} Flüge aufteilen?
+          Zwischen den erkannten Abschnitten liegt eine längere Pause (Bodentransport/Warten). Als ein Flug behalten oder in {candidate.segments.length} Flüge aufteilen?
         </div>
         <div style={{fontSize:11,fontWeight:700,color:"rgba(232,244,253,0.4)",marginBottom:6,textTransform:"uppercase",letterSpacing:0.5}}>Ohne Split</div>
         <SplitFlightDialogRow label="1 Flug (gesamt)" stats={combined} />
@@ -6020,12 +6089,23 @@ function FlugbuchApp() {
   // Bestehende, schon importierte Flüge wurden mit dem vollen (ggf. durch
   // eine Autofahrt verfälschten) Track berechnet — siehe Flug vom 24.01.2020
   // und trimGroundTransportTrack weiter oben. Nach einmaligem Gebrauch
-  // wieder entfernen: dieser State, der Button in headerIconButtons weiter
-  // unten, das Panel im JSX und runRecalcGroundTransport (Suche nach
-  // "TEMPORÄR").
+  // wieder entfernen: dieser State (inkl. pendingRecalcSplits/
+  // recalcSplitStateRef unten), der Button in headerIconButtons weiter
+  // unten, beide Panels/Dialoge im JSX sowie runRecalcGroundTransport,
+  // resolveRecalcSplit, finishRecalcGroundTransport,
+  // applyGroundTransportFix und buildSplitSegmentCustomFields
+  // (Suche nach "TEMPORÄR").
   const [showRecalcGroundTransport, setShowRecalcGroundTransport] = useState(false);
   const [recalcGroundTransportRunning, setRecalcGroundTransportRunning] = useState(false);
   const [recalcGroundTransportResult, setRecalcGroundTransportResult] = useState(null);
+  // Flüge, bei denen runRecalcGroundTransport laut detectFlightSegments
+  // mehrere mögliche Flüge im Track gefunden hat — eine nach der anderen
+  // über denselben SplitFlightDialog wie beim Import entschieden (siehe
+  // resolveRecalcSplit). recalcSplitStateRef hält währenddessen den bisher
+  // erreichten Zwischenstand (schon korrigierte Flüge, Zähler), damit der
+  // Lauf nach der letzten Entscheidung sauber abgeschlossen werden kann.
+  const [pendingRecalcSplits, setPendingRecalcSplits] = useState(null); // null | [candidate, ...]
+  const recalcSplitStateRef = useRef(null);
   const [csvColumns, setCsvColumns] = useState(
     CSV_COLUMN_DEFS.map(c => ({ key: c.key, enabled: true }))
   );
@@ -6176,25 +6256,31 @@ function FlugbuchApp() {
   // und fehlt deshalb bei den allermeisten schon länger bestehenden
   // Flügen, was diese sonst grösstenteils unnötig übersprungen hätte. Nur
   // wenn ein Flug ausnahmsweise keinen gespeicherten Track hat, wird als
-  // Fallback die Rohdatei versucht. Kappt davon erkannten Bodentransport
-  // (findFlightBoundsExcludingGroundTransport) und berechnet die rein
-  // track-basierten Werte (Dauer, Zeiten, Höhen, Max.Steigen/-20s/
-  // Max.Sinken, Spirale/Wingover, H.Gew., H.Diff., Max Speed) mit
-  // analyzeIGC neu — IMMER überschrieben, analog zu einem regulären
-  // Re-Import (siehe attachIgcToFlight), da genau diese Werte bei
-  // kontaminiertem Track falsch waren. Distanz/Ø Speed dagegen nur
-  // nachgetragen, wenn beide noch leer sind (computeDistanceSpeedBackfill,
-  // dieselbe Regel wie beim Import — ein manuell/von XContest erfasster
-  // Wert wird nie überschrieben). Der volle, gespeicherte Track selbst
-  // (Karte/Höhenprofil/Export) bleibt unangetastet. Flüge ohne (nutzbaren)
-  // Track werden übersprungen und separat gezählt statt stillschweigend
-  // ignoriert.
+  // Fallback die Rohdatei versucht. Enthält der Track laut
+  // detectFlightSegments mehrere mögliche Flüge (z.B. zwei Flüge mit
+  // Bodentransport-Pause dazwischen, siehe Flug vom 24.01.2020), wird
+  // dieser Flug NICHT automatisch angefasst, sondern als Split-Kandidat
+  // zurückgestellt — nach diesem Durchlauf entscheidet derselbe
+  // SplitFlightDialog wie beim Import (siehe resolveRecalcSplit) einen
+  // nach dem anderen. Für alle übrigen Flüge kappt applyGroundTransportFix
+  // erkannten Bodentransport an den Rändern und berechnet die rein
+  // track-basierten Werte neu (Details siehe dort). Der volle, gespeicherte
+  // Track selbst (Karte/Höhenprofil/Export) bleibt unangetastet. Flüge
+  // ohne (nutzbaren) Track werden übersprungen und separat gezählt statt
+  // stillschweigend ignoriert.
+  const finishRecalcGroundTransport = useCallback((resultFlights, changed, noFile, noTransport, failed, total) => {
+    setFlights(resultFlights);
+    setRecalcGroundTransportResult({ changed, noFile, noTransport, failed, total });
+    setRecalcGroundTransportRunning(false);
+  }, []);
+
   const runRecalcGroundTransport = useCallback(async () => {
     setRecalcGroundTransportRunning(true);
     setRecalcGroundTransportResult(null);
     const changed = [];
     let noFile = 0, noTransport = 0, failed = 0;
-    const nextFlights = [];
+    const resultFlights = [];
+    const splitCandidates = [];
     for (const f of flights) {
       try {
         let track = f.track;
@@ -6205,71 +6291,153 @@ function FlugbuchApp() {
             track = parseIGC(text).track;
           }
         }
-        if (!track || track.length < 5) { noFile++; nextFlights.push(f); continue; }
+        if (!track || track.length < 5) { noFile++; resultFlights.push(f); continue; }
+
+        const segments = detectFlightSegments(track);
+        if (segments.length > 1) {
+          const combinedBounds = findFlightBoundsExcludingGroundTransport(track);
+          const combinedIgcData = analyzeIGC(track.slice(combinedBounds.startIdx, combinedBounds.endIdx+1), null, f.date);
+          const segmentDetails = segments.map(seg => {
+            const segTrack = track.slice(seg.startIdx, seg.endIdx+1);
+            const innerBounds = findFlightBoundsExcludingGroundTransport(segTrack);
+            const trimmedSegTrack = segTrack.slice(innerBounds.startIdx, innerBounds.endIdx+1);
+            return { track: trimmedSegTrack, igcData: analyzeIGC(trimmedSegTrack, null, f.date) };
+          });
+          splitCandidates.push({ flight: f, combinedIgcData, segments: segmentDetails });
+          resultFlights.push(f); // Platzhalter — wird über resolveRecalcSplit ggf. ersetzt
+          continue;
+        }
+
         const bounds = findFlightBoundsExcludingGroundTransport(track);
-        if (!bounds.trimmedStartSec && !bounds.trimmedEndSec) { noTransport++; nextFlights.push(f); continue; }
+        if (!bounds.trimmedStartSec && !bounds.trimmedEndSec) { noTransport++; resultFlights.push(f); continue; }
         const trimmedTrack = track.slice(bounds.startIdx, bounds.endIdx+1);
         // Keine Timezone gespeichert (die stand nur in der IGC-Rohdatei,
         // HFTZN) — analyzeIGC schätzt sie in dem Fall selbst anhand der
         // Position (estimateTzOffset), genau wie beim ursprünglichen
         // Import, falls der Logger HFTZN nicht geschrieben hatte.
         const igcData = analyzeIGC(trimmedTrack, null, f.date);
-        const cf = { ...(f.customFields||{}) };
-        // H.Gew.: gleiche Regel wie bei einem regulären (Re-)Import in
-        // attachIgcToFlight — nur nachtragen, wenn noch leer, ein evtl.
-        // manuell korrigierter Wert wird nie überschrieben.
-        if (!(cf.hGew||"").trim() && !isNaN(igcData.totalGain)) cf.hGew = String(igcData.totalGain);
-        cf.hDiff = igcData.hDiff ? String(igcData.hDiff) : cf.hDiff;
-        cf.maxSteigen = String(igcData.maxClimb);
-        cf.maxSteigen20 = String(igcData.maxClimb20);
-        cf.maxSinken = String(igcData.maxSinkRate);
-        cf.spiraleMaxSinken = igcData.spiraleMaxSinken != null ? String(igcData.spiraleMaxSinken) : "";
-        cf.spiraleSinkenSchnitt = igcData.spiraleSinkenSchnitt != null ? String(igcData.spiraleSinkenSchnitt) : "";
-        cf.spiraleAnzahlKreise = igcData.spiraleAnzahlKreise != null ? String(igcData.spiraleAnzahlKreise) : "";
-        cf.spiraleHoehenabbau = igcData.spiraleHoehenabbau != null ? String(igcData.spiraleHoehenabbau) : "";
-        cf.wingoverMaxSinken = igcData.wingoverMaxSinken != null ? String(igcData.wingoverMaxSinken) : "";
-        cf.wingoverSinkenSchnitt = igcData.wingoverSinkenSchnitt != null ? String(igcData.wingoverSinkenSchnitt) : "";
-        cf.wingoverAnzahl = igcData.wingoverAnzahl != null ? String(igcData.wingoverAnzahl) : "";
-        cf.wingoverHoehenabbau = igcData.wingoverHoehenabbau != null ? String(igcData.wingoverHoehenabbau) : "";
-        const backfill = computeDistanceSpeedBackfill(f.totalDist, cf, igcData.scoreDistanceKm, igcData.durationSec);
-        if (backfill.distKm != null) cf.distKm = backfill.distKm;
-        if (backfill.kmh != null) cf.kmh = backfill.kmh;
-        // maxAlt/minAlt/startAlt/endAlt/startPt/endPt/Startzeit/Landezeit:
-        // gleiche "nur nachtragen, wenn noch leer"-Regel wie bei einem
-        // regulären Re-Import (attachIgcToFlight) — diese Felder sind über
-        // InlineField manuell editierbar, ein evtl. bereits von Hand
-        // korrigierter Wert wird hier nie überschrieben. Dauer/Max Speed/
-        // Max.Steigen-Sinken/Spirale-Wingover werden dagegen (wie bei jedem
-        // Re-Import) immer aus dem frischen Track übernommen.
-        const updated = {
-          ...f, customFields: cf,
-          maxAlt: f.maxAlt || igcData.maxAlt, minAlt: f.minAlt || igcData.minAlt,
-          startAlt: f.startAlt || igcData.startAlt, endAlt: f.endAlt || igcData.endAlt,
-          startPt: f.startPt || igcData.startPt, endPt: f.endPt || igcData.endPt,
-          durationSec: igcData.durationSec || f.durationSec, durationStr: igcData.durationStr || f.durationStr,
-          startTime: (f.startTime||"").trim() ? f.startTime : igcData.startTime,
-          endTime: (f.endTime||"").trim() ? f.endTime : igcData.endTime,
-          maxSpeedKmh: igcData.maxSpeedKmh,
-          totalDist: backfill.totalDist != null ? backfill.totalDist : f.totalDist,
-        };
+        const updated = applyGroundTransportFix(f, igcData);
         const res = await saveFlight(updated);
-        if (!res.ok) { failed++; nextFlights.push(f); continue; }
+        if (!res.ok) { failed++; resultFlights.push(f); continue; }
         changed.push({
           id: f.id, name: f.name, site: f.site, date: f.date,
           trimmedStartSec: bounds.trimmedStartSec, trimmedEndSec: bounds.trimmedEndSec,
           oldDuration: f.durationStr, newDuration: igcData.durationStr,
           oldMaxSpeed: f.maxSpeedKmh||0, newMaxSpeed: igcData.maxSpeedKmh,
         });
-        nextFlights.push(updated);
+        resultFlights.push(updated);
       } catch (e) {
         console.error("Bodentransport-Korrektur fehlgeschlagen für Flug", f?.id, e);
-        failed++; nextFlights.push(f);
+        failed++; resultFlights.push(f);
       }
     }
-    setFlights(nextFlights);
-    setRecalcGroundTransportResult({ changed, noFile, noTransport, failed, total: flights.length });
-    setRecalcGroundTransportRunning(false);
-  }, [flights, saveFlight]);
+
+    if (splitCandidates.length) {
+      // Lauf pausiert hier — bereits geänderte Flüge (changed) sind schon
+      // gespeichert, nur die Split-Kandidaten warten noch. Wird erst nach
+      // Entscheidung über alle SplitFlightDialoge (resolveRecalcSplit)
+      // mit finishRecalcGroundTransport abgeschlossen.
+      recalcSplitStateRef.current = { resultFlights, changed, noFile, noTransport, failed, total: flights.length, splitCandidates };
+      setPendingRecalcSplits(splitCandidates);
+      setRecalcGroundTransportRunning(false);
+      return;
+    }
+    finishRecalcGroundTransport(resultFlights, changed, noFile, noTransport, failed, flights.length);
+  }, [flights, saveFlight, finishRecalcGroundTransport]);
+
+  // Eine SplitFlightDialog-Entscheidung für den JEWEILS ERSTEN offenen
+  // Split-Kandidaten aus runRecalcGroundTransport anwenden. "keep": der
+  // bestehende Flug bleibt derselbe Eintrag (ID/Nummer/Kommentar/Bewertung
+  // bleiben), nur die Werte werden wie im einfachen Fall über
+  // applyGroundTransportFix auf den Gesamt-Track (kombiniert, nur Ränder
+  // gekappt) korrigiert. "split": der bestehende Flug wird gelöscht und
+  // durch je einen neuen Flug pro erkanntem Abschnitt ersetzt — Site/Land/
+  // Schirm/Pilot/Kommentar/Bewertung/Notizen werden vom Ursprungsflug auf
+  // ALLE neuen Teile übernommen (eher doppelt als verloren, von Hand
+  // nachträglich bereinigbar), Distanz/Ø Speed dagegen frisch aus dem
+  // jeweiligen Abschnitt berechnet. Eine evtl. gespeicherte IGC-Rohdatei
+  // wird vor dem Löschen des Ursprungsflugs gesichert und auf alle neuen
+  // Teile kopiert.
+  const resolveRecalcSplit = useCallback(async (choice) => {
+    const state = recalcSplitStateRef.current;
+    if (!state || !state.splitCandidates.length) return;
+    const [candidate, ...restCandidates] = state.splitCandidates;
+    let resultFlights = state.resultFlights;
+    let changed = state.changed;
+    let failed = state.failed;
+
+    if (choice === "keep") {
+      const updated = applyGroundTransportFix(candidate.flight, candidate.combinedIgcData);
+      const res = await saveFlight(updated);
+      if (res.ok) {
+        resultFlights = resultFlights.map(f => f.id === candidate.flight.id ? updated : f);
+        changed = [...changed, {
+          id: candidate.flight.id, name: candidate.flight.name, site: candidate.flight.site, date: candidate.flight.date,
+          trimmedStartSec: 0, trimmedEndSec: 0,
+          oldDuration: candidate.flight.durationStr, newDuration: candidate.combinedIgcData.durationStr,
+          oldMaxSpeed: candidate.flight.maxSpeedKmh||0, newMaxSpeed: candidate.combinedIgcData.maxSpeedKmh,
+        }];
+      } else failed++;
+    } else {
+      try {
+        const rawBuf = await loadRawIgcFile(candidate.flight.id); // vor dem Löschen sichern
+        let maxNr = resultFlights.reduce((m, f) => {
+          const n = parseInt((f.name||"").match(/\d+/)?.[0]||"0", 10);
+          return n > m ? n : m;
+        }, 0);
+        const origIgcFilename = candidate.flight.customFields?.igcFilename;
+        const newFlights = [];
+        for (let i = 0; i < candidate.segments.length; i++) {
+          const seg = candidate.segments[i];
+          maxNr += 1;
+          const cf = buildSplitSegmentCustomFields(candidate.flight.customFields, seg.igcData,
+            origIgcFilename ? `${origIgcFilename} (Teil ${i+1})` : "");
+          const backfill = computeDistanceSpeedBackfill(0, cf, seg.igcData.scoreDistanceKm, seg.igcData.durationSec);
+          if (backfill.distKm != null) cf.distKm = backfill.distKm;
+          if (backfill.kmh != null) cf.kmh = backfill.kmh;
+          const newF = {
+            ...candidate.flight, // Site/Land/Schirm/Pilot/Kommentar/Bewertung/Notizen vom Ursprungsflug übernehmen
+            id: `split_${candidate.flight.id}_${i+1}_${Date.now()}`,
+            name: String(maxNr),
+            track: seg.track,
+            customFields: cf,
+            maxAlt: seg.igcData.maxAlt, minAlt: seg.igcData.minAlt,
+            startAlt: seg.igcData.startAlt, endAlt: seg.igcData.endAlt,
+            startPt: seg.igcData.startPt, endPt: seg.igcData.endPt,
+            durationSec: seg.igcData.durationSec, durationStr: seg.igcData.durationStr,
+            startTime: seg.igcData.startTime, endTime: seg.igcData.endTime,
+            maxSpeedKmh: seg.igcData.maxSpeedKmh,
+            totalDist: backfill.totalDist || 0,
+          };
+          const res = await saveFlight(newF);
+          if (!res.ok) { failed++; continue; }
+          if (rawBuf) await storeRawIgcFile(newF.id, { arrayBuffer: async () => rawBuf });
+          newFlights.push(newF);
+        }
+        await window.storage.delete(`flight:${candidate.flight.id}`);
+        await deleteRawIgcFile(candidate.flight.id);
+        resultFlights = [...newFlights, ...resultFlights.filter(f => f.id !== candidate.flight.id)];
+        changed = [...changed, ...newFlights.map(nf => ({
+          id: nf.id, name: nf.name, site: nf.site, date: nf.date,
+          trimmedStartSec: 0, trimmedEndSec: 0,
+          oldDuration: candidate.flight.durationStr, newDuration: nf.durationStr,
+          oldMaxSpeed: candidate.flight.maxSpeedKmh||0, newMaxSpeed: nf.maxSpeedKmh,
+        }))];
+      } catch (e) {
+        console.error("Aufteilen fehlgeschlagen für Flug", candidate.flight?.id, e);
+        failed++;
+      }
+    }
+
+    if (restCandidates.length) {
+      recalcSplitStateRef.current = { ...state, resultFlights, changed, failed, splitCandidates: restCandidates };
+      setPendingRecalcSplits(restCandidates);
+      return;
+    }
+    recalcSplitStateRef.current = null;
+    setPendingRecalcSplits(null);
+    finishRecalcGroundTransport(resultFlights, changed, state.noFile, state.noTransport, failed, state.total);
+  }, [saveFlight, finishRecalcGroundTransport]);
 
   const addNewFlight = useCallback(async () => {
     // Next sequential number = max existing numeric name + 1
@@ -7136,8 +7304,10 @@ function FlugbuchApp() {
             🚗 Temporäres Werkzeug: prüft bei allen Flügen mit gespeichertem Track, ob vor/nach
             dem Flug eine Autofahrt (o.ä.) aufgezeichnet wurde, und berechnet Dauer/Zeiten/Höhen/
             Max Speed/Max.Steigen-Sinken/Spirale-Wingover ohne diese Abschnitte neu. Distanz/Ø Speed
-            werden nur nachgetragen, wenn beide noch leer sind. Der gespeicherte Track selbst bleibt
-            unverändert.
+            werden nur nachgetragen, wenn beide noch leer sind. Enthält ein Flug laut Track mehrere
+            mögliche Flüge (Pause dazwischen), wird danach für jeden einzeln per Dialog gefragt, ob
+            er in mehrere Flüge aufgeteilt werden soll. Der gespeicherte Track selbst bleibt
+            ansonsten unverändert.
           </div>
           <button onClick={runRecalcGroundTransport} disabled={recalcGroundTransportRunning}
             style={{width:"100%",background:"rgba(245,158,11,0.15)",border:"1px solid rgba(245,158,11,0.4)",borderRadius:8,padding:"9px 0",color:"#fcd34d",fontSize:13,fontWeight:700,cursor:recalcGroundTransportRunning?"default":"pointer",opacity:recalcGroundTransportRunning?0.6:1}}>
@@ -7176,6 +7346,15 @@ function FlugbuchApp() {
         <SplitFlightDialog candidate={pendingSplitDecisions[0]}
           onSplit={()=>resolveSplitDecision("split")}
           onKeep={()=>resolveSplitDecision("keep")} />
+      )}
+
+      {/* TEMPORÄR — siehe showRecalcGroundTransport weiter oben, nach Gebrauch
+          zusammen mit dem Rest des Werkzeugs wieder entfernen. */}
+      {pendingRecalcSplits && pendingRecalcSplits.length > 0 && (
+        <SplitFlightDialog candidate={pendingRecalcSplits[0]}
+          subtitle={`Flug ${pendingRecalcSplits[0].flight.name}${pendingRecalcSplits[0].flight.site?" · "+pendingRecalcSplits[0].flight.site:""} · ${pendingRecalcSplits[0].flight.date}`}
+          onSplit={()=>resolveRecalcSplit("split")}
+          onKeep={()=>resolveRecalcSplit("keep")} />
       )}
 
       {pendingDateDups && (
