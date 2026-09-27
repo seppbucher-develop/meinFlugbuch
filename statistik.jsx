@@ -18,6 +18,16 @@ const STICKY_BG_HEADER = "#111a2b"; // rgba(255,255,255,0.05) über #040e20
 const STICKY_BG_ROW = "#040e20";    // unveränderte Zeile (Seitenhintergrund)
 const STICKY_BG_TOTAL = "#0e1e32";  // rgba(125,211,252,0.08) über #040e20
 
+// Style-Fragment für die Kopfzeile der Pivot-Tabellen: bleibt beim
+// vertikalen Scrollen (Tabellen-Container mit overflowY: auto + maxHeight)
+// oben sichtbar. zIndex muss über der sticky-Spalte der Datenzeilen liegen,
+// sonst würde deren linke Spalte beim Scrollen über der Kopfzeile landen
+// (die Kopfzeile kommt im DOM zuerst, positionierte Elemente ohne höheren
+// zIndex würden sonst darunter gemalt).
+function stickyHeaderRow() {
+  return { position: "sticky", top: 0, zIndex: 3 };
+}
+
 function formatMinutes(min) {
   const m = Math.round(min);
   const h = Math.floor(m / 60), rem = m % 60;
@@ -184,8 +194,8 @@ function MonthPivotTable({ flights }) {
   const minWidth = 620;
   return (
     <div style={{ padding: "0 16px" }}>
-      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
-        <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
+      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto", overflowY: "auto", maxHeight: "60vh" }}>
+        <div style={{ ...stickyHeaderRow(), display: "grid", gridTemplateColumns: cols, background: STICKY_BG_HEADER, borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
           <div style={{ ...stickyCol(STICKY_BG_HEADER), padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Jahr</div>
           {MONATE.map(m => (
             <div key={m} style={{ padding: "3px 3px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{m}</div>
@@ -248,37 +258,42 @@ function computeReisePivot(flights) {
 
 function ReisePivotTable({ flights }) {
   const pivot = React.useMemo(() => computeReisePivot(flights), [flights]);
-  const cols = `1.1fr repeat(${pivot.yearList.length}, 0.8fr) 0.9fr`;
-  const minWidth = 150 + pivot.yearList.length * 70 + 80;
+  // minmax(0, …fr) statt fester fr-Werte: Spalten dürfen unter ihre
+  // Inhaltsbreite schrumpfen (Grid-Spalten haben sonst implizit min-width:
+  // auto), damit die Tabelle bei schmalen Bildschirmen in die verfügbare
+  // Breite passt, statt eine feste minWidth zu erzwingen und seitwärts
+  // scrollen zu müssen — Zellinhalte kürzen stattdessen per Ellipsis.
+  const cols = `minmax(0,1.1fr) repeat(${pivot.yearList.length}, minmax(0,0.8fr)) minmax(0,0.9fr)`;
+  const cellStyle = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
   return (
     <div style={{ padding: "0 16px" }}>
-      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
-        <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
-          <div style={{ ...stickyCol(STICKY_BG_HEADER), padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Reise</div>
+      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowY: "auto", maxHeight: "60vh" }}>
+        <div style={{ ...stickyHeaderRow(), display: "grid", gridTemplateColumns: cols, background: STICKY_BG_HEADER, borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+          <div style={{ ...stickyCol(STICKY_BG_HEADER), ...cellStyle, padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Reise</div>
           {pivot.yearList.map(y => (
-            <div key={y} style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{y}</div>
+            <div key={y} style={{ ...cellStyle, padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{y}</div>
           ))}
-          <div style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
+          <div style={{ ...cellStyle, padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
         </div>
         {pivot.rows.length === 0 && (
-          <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)", minWidth }}>Keine Flüge für diese Filterauswahl.</div>
+          <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>Keine Flüge für diese Filterauswahl.</div>
         )}
         {pivot.rows.map(r => (
-          <div key={r.reise} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth }}>
-            <div style={{ ...stickyCol(STICKY_BG_ROW), padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reise}</div>
+          <div key={r.reise} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            <div style={{ ...stickyCol(STICKY_BG_ROW), ...cellStyle, padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.reise}</div>
             {r.minutesByYear.map((min, i) => (
-              <div key={i} style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? Math.round(min) : "·"}</div>
+              <div key={i} style={{ ...cellStyle, padding: "3px 6px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? Math.round(min) : "·"}</div>
             ))}
-            <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{Math.round(r.total)}</div>
+            <div style={{ ...cellStyle, padding: "3px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{Math.round(r.total)}</div>
           </div>
         ))}
         {pivot.rows.length > 0 && (
-          <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)", minWidth }}>
-            <div style={{ ...stickyCol(STICKY_BG_TOTAL), padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+          <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)" }}>
+            <div style={{ ...stickyCol(STICKY_BG_TOTAL), ...cellStyle, padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
             {pivot.yearTotals.map((min, i) => (
-              <div key={i} style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? Math.round(min) : "·"}</div>
+              <div key={i} style={{ ...cellStyle, padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? Math.round(min) : "·"}</div>
             ))}
-            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{Math.round(pivot.grandTotal)}</div>
+            <div style={{ ...cellStyle, padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{Math.round(pivot.grandTotal)}</div>
           </div>
         )}
       </div>
@@ -387,6 +402,51 @@ function MaxStatsSection({ flights }) {
         })}
       </div>
       {openStat && <TopFlightsModal stat={openStat} ranked={ranked[openStat.id]} onClose={() => setOpenStatId(null)} />}
+    </div>
+  );
+}
+
+// Jahres-Pivot der "Übersicht"-Ansicht: Zeilen = Jahre, Spalten = Flüge /
+// Tage / Flüge-pro-Tag / Minuten / Schnitt. minmax(0, …fr) statt fester
+// fr-Werte lässt die Spalten unter ihre Inhaltsbreite schrumpfen (Grid-
+// Spalten haben sonst implizit min-width: auto), damit die Tabelle auch auf
+// schmalen Bildschirmen (z.B. S25 Ultra) ohne horizontales Scrollen in die
+// verfügbare Breite passt — Zellinhalte kürzen stattdessen per Ellipsis.
+function UebersichtPivotTable({ pivot }) {
+  const cols = "minmax(0,0.7fr) minmax(0,0.55fr) minmax(0,0.55fr) minmax(0,0.75fr) minmax(0,1.05fr) minmax(0,0.95fr)";
+  const cellStyle = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+  return (
+    <div style={{ padding: "0 16px" }}>
+      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowY: "auto", maxHeight: "60vh" }}>
+        <div style={{ ...stickyHeaderRow(), display: "grid", gridTemplateColumns: cols, background: STICKY_BG_HEADER, borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+          {["Jahr", "Flüge", "Tage", "Flüge/Tag", "Minuten", "Schnitt"].map((h, i) => (
+            <div key={h} style={{ ...(i === 0 ? stickyCol(STICKY_BG_HEADER) : {}), ...cellStyle, padding: "3px 4px", fontSize: 10, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.3, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
+          ))}
+        </div>
+        {pivot.rows.length === 0 && (
+          <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>Keine Flüge für diese Filterauswahl.</div>
+        )}
+        {pivot.rows.map(r => (
+          <div key={r.year} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            <div style={{ ...stickyCol(STICKY_BG_ROW), ...cellStyle, padding: "3px 4px", fontSize: 12, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, textAlign: "right" }}>{r.flights}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, textAlign: "right" }}>{r.days}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{r.days ? (r.flights / r.days).toFixed(1) : "—"}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, textAlign: "right" }}>{formatMinutes(r.minutes)}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{formatMinutes(r.minutes / r.flights)}</div>
+          </div>
+        ))}
+        {pivot.rows.length > 0 && (
+          <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)" }}>
+            <div style={{ ...stickyCol(STICKY_BG_TOTAL), ...cellStyle, padding: "3px 4px", fontSize: 12, fontWeight: 800 }}>Gesamt</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, fontWeight: 800, textAlign: "right" }}>{pivot.total.flights}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, fontWeight: 800, textAlign: "right" }}>{pivot.total.days ? (pivot.total.flights / pivot.total.days).toFixed(1) : "—"}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, fontWeight: 800, textAlign: "right" }}>{formatMinutes(pivot.total.minutes)}</div>
+            <div style={{ ...cellStyle, padding: "3px 4px", fontSize: 12, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes / pivot.total.flights)}</div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -607,39 +667,7 @@ function StatistikApp() {
       {view === "uebersicht" && (
         <>
           <MaxStatsSection flights={filtered} />
-
-          <div style={{ padding: "0 16px" }}>
-            <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto" }}>
-              <div style={{ display: "grid", gridTemplateColumns: "0.8fr 0.8fr 0.8fr 0.9fr 1.1fr 0.9fr", background: "rgba(255,255,255,0.05)", borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth: 400 }}>
-                {["Jahr", "Flüge", "Tage", "Flüge/Tag", "Minuten", "Schnitt"].map((h, i) => (
-                  <div key={h} style={{ ...(i === 0 ? stickyCol(STICKY_BG_HEADER) : {}), padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
-                ))}
-              </div>
-              {pivot.rows.length === 0 && (
-                <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>Keine Flüge für diese Filterauswahl.</div>
-              )}
-              {pivot.rows.map(r => (
-                <div key={r.year} style={{ display: "grid", gridTemplateColumns: "0.8fr 0.8fr 0.8fr 0.9fr 1.1fr 0.9fr", borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth: 400 }}>
-                  <div style={{ ...stickyCol(STICKY_BG_ROW), padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.year}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right" }}>{r.flights}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right" }}>{r.days}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{r.days ? (r.flights / r.days).toFixed(1) : "—"}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right" }}>{formatMinutes(r.minutes)}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: "rgba(232,244,253,0.7)" }}>{formatMinutes(r.minutes / r.flights)}</div>
-                </div>
-              ))}
-              {pivot.rows.length > 0 && (
-                <div style={{ display: "grid", gridTemplateColumns: "0.8fr 0.8fr 0.8fr 0.9fr 1.1fr 0.9fr", background: "rgba(125,211,252,0.08)", minWidth: 400 }}>
-                  <div style={{ ...stickyCol(STICKY_BG_TOTAL), padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.flights}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{pivot.total.days ? (pivot.total.flights / pivot.total.days).toFixed(1) : "—"}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{formatMinutes(pivot.total.minutes)}</div>
-                  <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes / pivot.total.flights)}</div>
-                </div>
-              )}
-            </div>
-          </div>
+          <UebersichtPivotTable pivot={pivot} />
         </>
       )}
 
