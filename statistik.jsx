@@ -258,42 +258,43 @@ function computeReisePivot(flights) {
 
 function ReisePivotTable({ flights }) {
   const pivot = React.useMemo(() => computeReisePivot(flights), [flights]);
-  // minmax(0, …fr) statt fester fr-Werte: Spalten dürfen unter ihre
-  // Inhaltsbreite schrumpfen (Grid-Spalten haben sonst implizit min-width:
-  // auto), damit die Tabelle bei schmalen Bildschirmen in die verfügbare
-  // Breite passt, statt eine feste minWidth zu erzwingen und seitwärts
-  // scrollen zu müssen — Zellinhalte kürzen stattdessen per Ellipsis.
-  const cols = `minmax(0,1.1fr) repeat(${pivot.yearList.length}, minmax(0,0.8fr)) minmax(0,0.9fr)`;
-  const cellStyle = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+  // Feste fr-Spaltenbreiten + minWidth (statt minmax(0, …fr) wie in der
+  // Übersicht): die Spaltenzahl ist hier datengetrieben (ein Jahr pro
+  // Spalte) und bei vielen Jahren gäbe ein Schrumpfen-auf-Bildschirmbreite
+  // nur noch unlesbare, auf ein paar Pixel gequetschte Ellipsis-Werte.
+  // Stattdessen bleiben die Spalten lesbar breit und die Tabelle scrollt
+  // horizontal (erste Spalte bleibt dabei sticky, siehe stickyCol).
+  const cols = `1.1fr repeat(${pivot.yearList.length}, 0.8fr) 0.9fr`;
+  const minWidth = 150 + pivot.yearList.length * 70 + 80;
   return (
     <div style={{ padding: "0 16px" }}>
-      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowY: "auto", maxHeight: "60vh" }}>
-        <div style={{ ...stickyHeaderRow(), display: "grid", gridTemplateColumns: cols, background: STICKY_BG_HEADER, borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-          <div style={{ ...stickyCol(STICKY_BG_HEADER), ...cellStyle, padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Reise</div>
+      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden", overflowX: "auto", overflowY: "auto", maxHeight: "60vh" }}>
+        <div style={{ ...stickyHeaderRow(), display: "grid", gridTemplateColumns: cols, background: STICKY_BG_HEADER, borderBottom: "1px solid rgba(255,255,255,0.1)", minWidth }}>
+          <div style={{ ...stickyCol(STICKY_BG_HEADER), padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5 }}>Reise</div>
           {pivot.yearList.map(y => (
-            <div key={y} style={{ ...cellStyle, padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{y}</div>
+            <div key={y} style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>{y}</div>
           ))}
-          <div style={{ ...cellStyle, padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
+          <div style={{ padding: "3px 6px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: "right" }}>Total</div>
         </div>
         {pivot.rows.length === 0 && (
-          <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>Keine Flüge für diese Filterauswahl.</div>
+          <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)", minWidth }}>Keine Flüge für diese Filterauswahl.</div>
         )}
         {pivot.rows.map(r => (
-          <div key={r.reise} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-            <div style={{ ...stickyCol(STICKY_BG_ROW), ...cellStyle, padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{r.reise}</div>
+          <div key={r.reise} style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", minWidth }}>
+            <div style={{ ...stickyCol(STICKY_BG_ROW), padding: "3px 6px", fontSize: 13, fontWeight: 700, color: "#7dd3fc", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.reise}</div>
             {r.minutesByYear.map((min, i) => (
-              <div key={i} style={{ ...cellStyle, padding: "3px 6px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? Math.round(min) : "·"}</div>
+              <div key={i} style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", color: min ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{min ? Math.round(min) : "·"}</div>
             ))}
-            <div style={{ ...cellStyle, padding: "3px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{Math.round(r.total)}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, textAlign: "right", fontWeight: 700, color: "rgba(232,244,253,0.8)" }}>{Math.round(r.total)}</div>
           </div>
         ))}
         {pivot.rows.length > 0 && (
-          <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)" }}>
-            <div style={{ ...stickyCol(STICKY_BG_TOTAL), ...cellStyle, padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
+          <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)", minWidth }}>
+            <div style={{ ...stickyCol(STICKY_BG_TOTAL), padding: "3px 6px", fontSize: 13, fontWeight: 800 }}>Gesamt</div>
             {pivot.yearTotals.map((min, i) => (
-              <div key={i} style={{ ...cellStyle, padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? Math.round(min) : "·"}</div>
+              <div key={i} style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right" }}>{min ? Math.round(min) : "·"}</div>
             ))}
-            <div style={{ ...cellStyle, padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{Math.round(pivot.grandTotal)}</div>
+            <div style={{ padding: "3px 6px", fontSize: 13, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{Math.round(pivot.grandTotal)}</div>
           </div>
         )}
       </div>
