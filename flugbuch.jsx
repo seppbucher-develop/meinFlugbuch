@@ -3292,7 +3292,7 @@ function createFlightFromPDF(nr, p) {
     totalDist: parseFloat(p.dk||0)||0,
     thermalCount: 0, maxClimb: +(p.mst||0),
     track, startPt, endPt,
-    comment:"", rating:0,
+    comment:"",
     notes: p.be||"",
     customFields: {
       landung: p.la||"",
@@ -3700,7 +3700,6 @@ function flightFieldValue(f, field){
     case "endlat": return f.endPt?.lat||0;
     case "endlon": return f.endPt?.lon||0;
     case "speed": case "kmh": return parseFloat(cf.kmh||0)||0;
-    case "rating": case "bewertung": return f.rating||0;
     default: return "";
   }
 }
@@ -3739,7 +3738,7 @@ function evalToken(f, tok){
       "startalt","endalt","hdiff","maxsteigen","maxsteigen20","maxsinken","hgew","entfernungsl",
       "spiralemaxsinken","spiralesinkenschnitt","spiralekreise","spiraleanzahlkreise","spiralehoehenabbau",
       "wingovermaxsinken","wingoversinkenschnitt","wingoveranzahl","wingovers","wingoverhoehenabbau",
-      "speed","kmh","rating","bewertung","jahr","year","startlat","startlon","endlat","endlon"];
+      "speed","kmh","jahr","year","startlat","startlon","endlat","endlon"];
     const dateFields=["datum","date"];
     const timeFields=["startzeit","starttime","landezeit","endtime"];
 
@@ -3832,7 +3831,6 @@ const SORT_OPTIONS = [
   { id: "wingoverSinkenSchnitt", label: "Wingover Ø Sinken" },
   { id: "wingoverAnzahl", label: "Anzahl Wingover" },
   { id: "wingoverHoehenabbau", label: "Wingover Höhenabbau" },
-  { id: "rating",   label: "Bewertung" },
 ];
 function parseDateToTs(d, timeStr) {
   if (!d) return 0;
@@ -3885,7 +3883,6 @@ function sortFieldValue(f, sortId) {
     case "pilot":    return (f.pilot || "").toLowerCase();
     case "reise":    return (cf.reise || "").toLowerCase();
     case "speed":    return parseFloat(cf.kmh || 0) || 0;
-    case "rating":   return f.rating || 0;
     case "jahr":     return f.year || 0;
     default:         return 0;
   }
@@ -3906,7 +3903,7 @@ function sortFlights(flights, sortId, dir) {
 // wird nach einem davon sortiert, muss kein zusätzliches Feld eingeblendet
 // werden, weil es schon auf der Zeile steht.
 const FLIGHT_ROW_VISIBLE_SORT_IDS = new Set([
-  "date", "site", "landung", "reise", "glider", "maxSpeed", "dist", "duration", "rating",
+  "date", "site", "landung", "reise", "glider", "maxSpeed", "dist", "duration",
 ]);
 
 // Formatiert den Wert des aktuell gewählten Sortierfelds für die Anzeige in
@@ -3973,7 +3970,6 @@ function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSele
       {f.glider && <span style={{fontSize:11,color:"#a8d8f5",overflow:"hidden",textOverflow:"ellipsis",minWidth:0,flexShrink:2}}>· {f.glider}</span>}
       <span style={{flex:1}} />
       <div style={{textAlign:"right",flexShrink:0,display:"flex",alignItems:"center",gap:10}}>
-        {f.rating>0 && <span style={{fontSize:11,fontWeight:600,whiteSpace:"nowrap",flexShrink:0}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
         {sortExtra && <span style={{fontSize:11,color:"#a8d8f5"}}>{sortExtra}</span>}
         {speedText && <span style={{fontSize:11,color:"#a8d8f5"}}>{speedText}</span>}
         {distText && <span style={{fontSize:11,color:"#a8d8f5"}}>{distText}</span>}
@@ -4045,7 +4041,6 @@ const SEARCH_FIELDS = [
   { id: "startlon",  label: "Start Lon",      type: "number" },
   { id: "endlat",    label: "Landung Lat",    type: "number" },
   { id: "endlon",    label: "Landung Lon",    type: "number" },
-  { id: "rating",    label: "Bewertung",      type: "number" },
   { id: "naehe",     label: "In der Nähe (Standort)", type: "geo" },
   { id: "igc",       label: "IGC-Track",      type: "bool" },
   { id: "training",  label: "Training",       type: "bool" },
@@ -4082,7 +4077,6 @@ const TILE_FIELD_OPTIONS = [
   { key: "wingoverSinkenSchnitt", label: "Wingover Ø Sinken", icon: "🪽", get: fl => fl.customFields?.wingoverSinkenSchnitt ? fmt1(fl.customFields.wingoverSinkenSchnitt)+" m/s" : "—" },
   { key: "wingoverAnzahl", label: "Anzahl Wingover", icon: "🪽", get: fl => fl.customFields?.wingoverAnzahl || "—" },
   { key: "wingoverHoehenabbau", label: "Wingover Höhenabbau", icon: "🪽", get: fl => fl.customFields?.wingoverHoehenabbau ? fl.customFields.wingoverHoehenabbau+" m" : "—" },
-  { key: "rating",    label: "Bewertung",     icon: "⭐️", get: fl => fl.rating ? "★".repeat(fl.rating) : "—" },
 ];
 const DEFAULT_TILE_KEYS = ["duration","maxAlt","distanz","startAlt","endAlt","hDiff","maxSinken","maxSteigen","speed"];
 
@@ -5124,17 +5118,8 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
           <EditableTitle value={fl.name} onSave={v=>setConfirmNameChange(v)} />
           <div style={{fontSize:13,color:"rgba(232,244,253,0.5)",marginBottom:12}}>{fl.startTime}{fl.endTime?" – "+fl.endTime:""}</div>
 
-          {/* Rating inline */}
-          <div style={{display:"flex",gap:6,marginBottom:14,alignItems:"center",flexWrap:"wrap"}}>
-            <div style={{display:"flex",gap:6,marginRight:4}}>
-              {[1,2,3,4,5].map(s=>(
-                <span key={s} onClick={()=>saveField({rating: (fl.rating||0)===s ? 0 : s})}
-                  style={{fontSize:24,cursor:"pointer",color:s<=(fl.rating||0)?"#f59e0b":"rgba(232,244,253,0.2)"}}>★</span>
-              ))}
-            </div>
-            <div style={{display:"flex",gap:6,alignItems:"center",flexWrap:"wrap",marginLeft:"auto",justifyContent:"flex-end"}}>
-              {fl.track?.length>1&&<span style={{background:"rgba(30,64,175,0.22)",color:"#60a5fa",borderRadius:20,padding:"2px 10px",fontSize:10,fontWeight:700,flexShrink:0}}>IGC</span>}
-            </div>
+          <div style={{display:"flex",gap:6,marginBottom:14,alignItems:"center",flexWrap:"wrap",justifyContent:"flex-end"}}>
+            {fl.track?.length>1&&<span style={{background:"rgba(30,64,175,0.22)",color:"#60a5fa",borderRadius:20,padding:"2px 10px",fontSize:10,fontWeight:700,flexShrink:0}}>IGC</span>}
           </div>
 
           {/* Notizen — kein Feld-Label mehr, Text über die volle Breite und linksbündig (statt des generischen label:value-Rechts-Layouts von InlineField). */}
@@ -5500,7 +5485,7 @@ function SidebarList({ flights, selectedId, onSelect, longestId }) {
   );
 }
 
-const SIDEBAR_ROW_VISIBLE_SORT_IDS = new Set(["date", "site", "rating"]);
+const SIDEBAR_ROW_VISIBLE_SORT_IDS = new Set(["date", "site"]);
 
 function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef, sortId }) {
   const sortExtra = !SIDEBAR_ROW_VISIBLE_SORT_IDS.has(sortId) ? sortFieldDisplay(f, sortId) : null;
@@ -5510,7 +5495,6 @@ function SidebarFlightRow({ f, selectedId, longestId, onSelect, registerRef, sor
       <div style={{display:"flex",alignItems:"center",gap:6}}>
         {f.id===longestId && <span style={{fontSize:11}}>🏆</span>}
         <span style={{fontSize:11,color:"#a8d8f5"}}>{f.date}</span>
-        {f.rating>0 && <span style={{fontSize:11}}><span style={{color:"#fde047"}}>{f.rating}</span><span style={{fontSize:"0.85em"}}>⭐️</span></span>}
       </div>
       <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{f.site}</div>
       {sortExtra && <div style={{fontSize:11,color:"#a8d8f5",marginTop:2}}>{sortExtra}</div>}
@@ -6193,7 +6177,7 @@ function FlugbuchApp() {
       year: yyyy, month: mm,
       startTime: "", endTime: "",
       site: "", glider: "", pilot: "",
-      comment: "", notes: "", rating: 0,
+      comment: "", notes: "",
       durationStr: "", durationSec: 0,
       totalDist: 0, maxAlt: 0, startAlt: 0, endAlt: 0,
       startPt: null, endPt: null, track: [],
@@ -6485,7 +6469,7 @@ function FlugbuchApp() {
           const { name: cleanedGlider, schirmId } = await resolveSchirmForGlider(glider, overrideMap);
           const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr), pdfOnly:false,
             date:dateStr, rawDate:date, year:yr, month:mo, pilot:pilot||"",site:inferred.site||"",glider:cleanedGlider||"",
-            startTime:"", endTime:"", comment:"", rating:0, notes:"", track,
+            startTime:"", endTime:"", comment:"", notes:"", track,
             customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,schirmId:schirmId||"",
               // Typ direkt beim Import setzen (wie beim manuellen Neuanlegen
               // eines Flugs) — vorher wurde "GS" erst beim ersten Öffnen der
@@ -6824,15 +6808,6 @@ function FlugbuchApp() {
                 style={{width:"100%",background:"rgba(255,255,255,0.07)",border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:"10px 13px",color:"#e8f4fd",fontSize:14,boxSizing:"border-box"}} />
             </div>
           ))}
-          <div style={{marginBottom:12}}>
-            <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",marginBottom:6}}>Bewertung</div>
-            <div style={{display:"flex",gap:6}}>
-              {[1,2,3,4,5].map(s=>(
-                <button key={s} onClick={()=>setEditData(d=>({...d,rating:(d.rating||0)===s?0:s}))}
-                  style={{fontSize:22,background:"none",border:"none",cursor:"pointer",color:s<=(editData.rating||0)?"#f59e0b":"rgba(232,244,253,0.2)"}}>★</button>
-              ))}
-            </div>
-          </div>
           <div style={{marginBottom:16}}>
             <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",marginBottom:4}}>Notizen</div>
             <textarea value={editData.notes||""} onChange={e=>setEditData(d=>({...d,notes:e.target.value}))} rows={2}
@@ -7072,7 +7047,7 @@ function FlugbuchApp() {
             const { name: cleanedGlider, schirmId } = await resolveSchirmForGlider(item.glider);
             const newF = { id:`igc_${baseName}_${Date.now()}`, name:String(maxNr+1), pdfOnly:false,
               date:item.date, rawDate:item.date, year:yr, month:mo, pilot:item.pilot||"",site:inferred.site||"",glider:cleanedGlider||"",
-              startTime:"", endTime:"", comment:"", rating:0, notes:"", track:item.track,
+              startTime:"", endTime:"", comment:"", notes:"", track:item.track,
               customFields:{landung:inferred.landung||"",land:inferred.land||"",igcFilename:baseName,schirmId:schirmId||"",
                 // Siehe processIGCFiles weiter oben — Typ direkt beim Import
                 // setzen statt erst beim ersten Öffnen der Detailansicht.
@@ -7222,7 +7197,6 @@ function FlugbuchApp() {
             if (d.date) patch.date = d.date;
             if (d.site) patch.site = d.site;
             if (d.glider) patch.glider = d.glider;
-            if (d.rating) patch.rating = d.rating;
             if (d.notes) patch.notes = d.notes;
             const cfPatch = {};
             if (d.landung) cfPatch.landung = d.landung;
@@ -7272,16 +7246,6 @@ function FlugbuchApp() {
                   <option value="__CLEAR__" style={{background:"#14253a"}}>Leer (keine Reise)</option>
                   {reisenNames.map(n => <option key={n} value={n} style={{background:"#14253a"}}>{n}</option>)}
                 </select>
-              </div>
-              <div style={{marginBottom:12}}>
-                <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",marginBottom:6}}>Bewertung</div>
-                <div style={{display:"flex",gap:6}}>
-                  {[1,2,3,4,5].map(s=>(
-                    <button key={s} onClick={()=>setBulkEditData(d=>({...d,rating:(d.rating||0)===s?0:s}))}
-                      style={{fontSize:22,background:"none",border:"none",cursor:"pointer",color:s<=(bulkEditData.rating||0)?"#f59e0b":"rgba(232,244,253,0.2)"}}>★</button>
-                  ))}
-                  {bulkEditData.rating>0 && <span style={{fontSize:11,color:"rgba(232,244,253,0.4)",alignSelf:"center",marginLeft:6}}>wird auf alle übertragen</span>}
-                </div>
               </div>
               <div style={{marginBottom:18}}>
                 <div style={{fontSize:11,color:"rgba(232,244,253,0.4)",marginBottom:4}}>Notizen</div>
@@ -7387,7 +7351,7 @@ function FlugbuchApp() {
             <div><b>UND</b> / <b>ODER</b> — z.B. <code>Fiesch ODER Rigi</code></div>
             <div><b>+wort</b> muss / <b>-wort</b> darf nicht — z.B. <code>2026 -tandem</code></div>
             <div><b>feld:wert</b> — <code>site:Fiesch</code>, <code>schirm:Wisp</code>, <code>pilot:…</code></div>
-            <div><b>feld&gt;wert</b> / <b>&lt;</b> / <b>&gt;=</b> — <code>dauer&gt;2</code> (h), <code>dist&gt;30</code> (km), <code>höhe&gt;3000</code> (m), <code>rating&gt;=4</code>, <code>jahr&gt;2020</code></div>
+            <div><b>feld&gt;wert</b> / <b>&lt;</b> / <b>&gt;=</b> — <code>dauer&gt;2</code> (h), <code>dist&gt;30</code> (km), <code>höhe&gt;3000</code> (m), <code>jahr&gt;2020</code></div>
             <div style={{marginTop:4,opacity:0.7}}>Kombinierbar: <code>site:Fiesch UND dauer&gt;2 -tandem</code></div>
           </div>
         )}
