@@ -892,7 +892,11 @@ function StatistikApp() {
         }
       } catch (e) { /* noch nichts gespeichert, oder Storage nicht verfügbar */ }
       setView(loadedView);
-      applyFilterSet(filtersMapRef.current[loadedView]);
+      // Fallback nötig für Ansichten ohne eigenen Filtersatz (aktuell nur
+      // "reiseanalyse") — filtersMapRef.current kennt nur uebersicht/monat/
+      // reise, ein direkter Zugriff wäre dort sonst undefined und ließe
+      // applyFilterSet abstürzen (f.typ etc. auf undefined).
+      applyFilterSet(filtersMapRef.current[loadedView] || emptyFilterSet());
       setSettingsLoaded(true);
     })();
   }, []);
