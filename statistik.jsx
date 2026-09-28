@@ -608,6 +608,7 @@ async function fetchPistachioTrips(accessToken, calendars) {
   const colorCounts = {};
   const calendarStats = [];
   const sampleHints = [];
+  let rawDumpCount = 0;
   let scanned = 0;
   for (const cal of calendars) {
     const calPistachio = isPistachioHex(cal.backgroundColor);
@@ -625,11 +626,18 @@ async function fetchPistachioTrips(accessToken, calendars) {
       const cid = ev.colorId || "none";
       colorCounts[cid] = (colorCounts[cid] || 0) + 1;
       if (TRIP_TITLE_HINT_REGEX.test(ev.summary || "") && sampleHints.length < 20) {
+        // Für die ersten beiden Treffer zusätzlich die KOMPLETTE Rohantwort
+        // mitschicken (nicht nur colorId) — falls Google die Farbe über ein
+        // anderes Feld transportiert (z.B. extendedProperties, eventType,
+        // source), das colorId allein nicht zeigt.
+        const includeRaw = rawDumpCount < 2;
+        if (includeRaw) rawDumpCount++;
         sampleHints.push({
           title: ev.summary || "(ohne Titel)",
           start: ev.start?.date || ev.start?.dateTime || "?",
           colorIdRaw: ev.colorId === undefined ? "(Feld fehlt komplett)" : JSON.stringify(ev.colorId),
           calendar: cal.summary || cal.id,
+          raw: includeRaw ? JSON.stringify(ev, null, 1).slice(0, 2500) : null,
         });
       }
       const isTrip = ev.colorId === PISTACHIO_EVENT_COLOR_ID || (!ev.colorId && calPistachio);
@@ -786,6 +794,11 @@ function ColorDiagnostics({ diagnostics }) {
             <div key={i} style={{ padding: "4px 0", borderBottom: i < diagnostics.sampleHints.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none" }}>
               <div>{h.title} — {h.start}</div>
               <div style={{ color: "rgba(232,244,253,0.55)" }}>Kalender: {h.calendar} · colorId von Google: {h.colorIdRaw}</div>
+              {h.raw && (
+                <pre style={{ marginTop: 6, marginBottom: 4, padding: 8, background: "rgba(0,0,0,0.35)", borderRadius: 6, fontSize: 10, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 260, overflowY: "auto", color: "rgba(232,244,253,0.85)" }}>
+                  {h.raw}
+                </pre>
+              )}
             </div>
           ))}
         </>
