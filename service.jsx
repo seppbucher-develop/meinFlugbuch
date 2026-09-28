@@ -221,6 +221,12 @@ function ServiceApp() {
   const [googleClientId, setGoogleClientId] = React.useState("");
   const [googleClientIdSaved, setGoogleClientIdSaved] = React.useState(false);
   const [googleCalendarId, setGoogleCalendarId] = React.useState("");
+  // Google nutzt bei diesem Konto statt des alten, öffentlich dokumentierten
+  // colorId-Felds ein neueres, undokumentiertes "Event Label"-System
+  // (eventLabelId, eine feste UUID pro benannter Farbe) — die Reiseanalyse
+  // zeigt beim Sync eine Diagnose, die diese UUID für "Pistazie" anhand der
+  // Termin-Titel erkennen lässt; hier eingetragen, greift sie fest.
+  const [googlePistachioLabelId, setGooglePistachioLabelId] = React.useState("");
   React.useEffect(() => {
     (async () => {
       try {
@@ -228,20 +234,25 @@ function ServiceApp() {
         if (r && r.value) { setGoogleClientId(r.value); setGoogleClientIdSaved(true); }
         const c = await window.storage.get("settings:googleCalendarId");
         if (c && c.value) setGoogleCalendarId(c.value);
+        const l = await window.storage.get("settings:googlePistachioLabelId");
+        if (l && l.value) setGooglePistachioLabelId(l.value);
       } catch {}
     })();
   }, []);
   const saveGoogleCalendarSettings = async () => {
     const trimmedId = googleClientId.trim();
     const trimmedCal = googleCalendarId.trim();
+    const trimmedLabel = googlePistachioLabelId.trim();
     try {
       if (trimmedId) await window.storage.set("settings:googleClientId", trimmedId);
       else await window.storage.delete("settings:googleClientId");
       if (trimmedCal) await window.storage.set("settings:googleCalendarId", trimmedCal);
       else await window.storage.delete("settings:googleCalendarId");
+      if (trimmedLabel) await window.storage.set("settings:googlePistachioLabelId", trimmedLabel);
+      else await window.storage.delete("settings:googlePistachioLabelId");
       await window.storage.set("settings:backupDirty", "1");
       setGoogleClientIdSaved(!!trimmedId);
-      setMsg({ type: "ok", text: trimmedId ? "✓ Google-Client-ID gespeichert." : "✓ Google-Client-ID entfernt." });
+      setMsg({ type: "ok", text: trimmedId ? "✓ Google-Kalender-Einstellungen gespeichert." : "✓ Google-Client-ID entfernt." });
     } catch (e) {
       setMsg({ type: "error", text: "Fehler beim Speichern: " + (e.message || String(e)) });
     }
@@ -809,9 +820,15 @@ function ServiceApp() {
               style={{ flex: "1 1 220px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
           </div>
           <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Kalender-ID (optional, leer = alle Kalender durchsuchen)</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
             <input value={googleCalendarId} onChange={e => setGoogleCalendarId(e.target.value)}
               placeholder="primary"
+              style={{ flex: "1 1 220px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Pistazie-Label-ID (optional — aus der Diagnose in der Reiseanalyse ablesen, falls dein Konto das neuere Google-Farbsystem statt colorId nutzt)</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input value={googlePistachioLabelId} onChange={e => setGooglePistachioLabelId(e.target.value)}
+              placeholder="z.B. 07bceb0d-6858-413d-bea9-48c8b5179014"
               style={{ flex: "1 1 220px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
             <button onClick={saveGoogleCalendarSettings}
               style={{ flexShrink: 0, background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 10, padding: "10px 16px", color: "#4ade80", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>

@@ -603,11 +603,18 @@ const TRIP_TITLE_HINT_REGEX = /reise|urlaub|tour|trip|ferien|holiday|vacation|ba
 // zusätzlich Diagnosedaten zurück (geprüfte Kalender, Farbverteilung ihrer
 // Termine, plus eine Rohdaten-Stichprobe möglicher Reise-Termine) für den
 // Fall, dass gar nichts gefunden wird.
-async function fetchPistachioTrips(accessToken, calendars) {
+async function fetchPistachioTrips(accessToken, calendars, pistachioLabelId) {
   const trips = [];
   const colorCounts = {};
   const calendarStats = [];
   const sampleHints = [];
+  // Googles neueres, undokumentiertes "Event Label"-System (eventLabelId,
+  // eine feste UUID pro benannter Farbe wie "Pistazie") — hat bei diesem
+  // Konto das alte colorId-Feld komplett abgelöst, siehe Kommentar an
+  // PISTACHIO_EVENT_COLOR_ID. labelCounts gruppiert alle Termine nach ihrer
+  // eventLabelId (inkl. Titel-Stichprobe), damit sich die richtige UUID für
+  // "Pistazie" anhand bekannter Reise-Titel identifizieren lässt.
+  const labelCounts = {};
   let rawDumpCount = 0;
   let scanned = 0;
   for (const cal of calendars) {
@@ -625,6 +632,10 @@ async function fetchPistachioTrips(accessToken, calendars) {
       scanned++; calScanned++;
       const cid = ev.colorId || "none";
       colorCounts[cid] = (colorCounts[cid] || 0) + 1;
+      const lid = ev.eventLabelId || "none";
+      if (!labelCounts[lid]) labelCounts[lid] = { count: 0, titles: [] };
+      labelCounts[lid].count++;
+      if (labelCounts[lid].titles.length < 4 && ev.summary) labelCounts[lid].titles.push(ev.summary);
       if (TRIP_TITLE_HINT_REGEX.test(ev.summary || "") && sampleHints.length < 20) {
         // Für die ersten beiden Treffer zusätzlich die KOMPLETTE Rohantwort
         // mitschicken (nicht nur colorId) — falls Google die Farbe über ein
@@ -640,7 +651,9 @@ async function fetchPistachioTrips(accessToken, calendars) {
           raw: includeRaw ? JSON.stringify(ev, null, 1).slice(0, 2500) : null,
         });
       }
-      const isTrip = ev.colorId === PISTACHIO_EVENT_COLOR_ID || (!ev.colorId && calPistachio);
+      const isTrip = (pistachioLabelId && ev.eventLabelId === pistachioLabelId)
+        || ev.colorId === PISTACHIO_EVENT_COLOR_ID
+        || (!ev.colorId && calPistachio);
       if (!isTrip) continue;
       const startDate = ev.start?.date || (ev.start?.dateTime || "").slice(0, 10);
       const endDate = ev.end?.date || (ev.end?.dateTime || "").slice(0, 10);
@@ -649,7 +662,7 @@ async function fetchPistachioTrips(accessToken, calendars) {
     }
     calendarStats.push({ id: cal.id, name: cal.summary || cal.id, backgroundColor: cal.backgroundColor, pistachio: calPistachio, events: calScanned });
   }
-  return { trips, scanned, colorCounts, calendarStats, sampleHints };
+  return { trips, scanned, colorCounts, calendarStats, sampleHints, labelCounts };
 }
 
 // Jahres-Pivot: Reisetage + Flugminuten je Jahr (ab REISEANALYSE_START_YEAR,
@@ -804,6 +817,19 @@ function ColorDiagnostics({ diagnostics }) {
         </>
       )}
 
+      {diagnostics.labelCounts && Object.keys(diagnostics.labelCounts).length > 0 && (
+        <>
+          <div style={{ margin: "10px 0 4px", fontWeight: 700, color: "#fcd34d" }}>Termine gruppiert nach Google-Label-ID (neueres Farbsystem — anhand der Titel erkennst du, welche Gruppe "Pistazie" ist):</div>
+          {Object.entries(diagnostics.labelCounts).sort((a, b) => b[1].count - a[1].count).map(([lid, info]) => (
+            <div key={lid} style={{ padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+              <div style={{ fontFamily: "monospace", fontSize: 10, color: "rgba(232,244,253,0.5)" }}>{lid === "none" ? "(kein Label)" : lid}</div>
+              <div>{info.count} Termine — z.B. {info.titles.join(", ") || "—"}</div>
+            </div>
+          ))}
+          <div style={{ marginTop: 6 }}>Steht eine bekannte Reise (z.B. "Baltikum", "Dreiländer Tour") bei einer Label-ID mit erkennbar reise-typischen Titeln? Bitte diese ID melden, dann trage ich sie als "Pistazie"-Erkennung fest.</div>
+        </>
+      )}
+
       <div style={{ marginTop: 10 }}>Ist eine deiner Reisen oben als Kalender oder Farbe zu sehen, aber trotzdem nicht erfasst? Bitte melden, dann passe ich die Erkennung an.</div>
     </div>
   );
@@ -812,6 +838,7 @@ function ColorDiagnostics({ diagnostics }) {
 function ReiseanalyseSection({ flights }) {
   const [clientId, setClientId] = React.useState("");
   const [calendarId, setCalendarId] = React.useState("primary");
+  const [pistachioLabelId, setPistachioLabelId] = React.useState("");
   const [settingsLoaded, setSettingsLoaded] = React.useState(false);
   const [trips, setTrips] = React.useState([]);
   const [fetchedAt, setFetchedAt] = React.useState(null);
@@ -823,13 +850,15 @@ function ReiseanalyseSection({ flights }) {
   React.useEffect(() => {
     (async () => {
       try {
-        const [ci, cal, cache] = await Promise.all([
+        const [ci, cal, lbl, cache] = await Promise.all([
           window.storage.get("settings:googleClientId"),
           window.storage.get("settings:googleCalendarId"),
+          window.storage.get("settings:googlePistachioLabelId"),
           window.storage.get("reiseanalyse:tripsCache"),
         ]);
         if (ci?.value) setClientId(ci.value);
         if (cal?.value) setCalendarId(cal.value);
+        if (lbl?.value) setPistachioLabelId(lbl.value);
         if (cache?.value) {
           try {
             const parsed = JSON.parse(cache.value);
@@ -869,10 +898,10 @@ function ReiseanalyseSection({ flights }) {
       const calendars = trimmedCalendarId && trimmedCalendarId !== "primary"
         ? [{ id: trimmedCalendarId, summary: trimmedCalendarId, backgroundColor: null }]
         : await fetchCalendarList(accessToken);
-      const { trips: fetchedTrips, scanned, colorCounts, calendarStats, sampleHints } = await fetchPistachioTrips(accessToken, calendars);
+      const { trips: fetchedTrips, scanned, colorCounts, calendarStats, sampleHints, labelCounts } = await fetchPistachioTrips(accessToken, calendars, pistachioLabelId.trim());
       const iso = new Date().toISOString();
       setTrips(fetchedTrips);
-      setDiagnostics({ scanned, colorCounts, calendarStats, sampleHints });
+      setDiagnostics({ scanned, colorCounts, calendarStats, sampleHints, labelCounts });
       setFetchedAt(iso);
       await window.storage.set("reiseanalyse:tripsCache", JSON.stringify({ fetchedAt: iso, calendarId, trips: fetchedTrips }));
     } catch (e) {
