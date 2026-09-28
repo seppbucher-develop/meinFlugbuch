@@ -1,0 +1,43 @@
+name: Repo-Backup spiegeln
+
+# Spiegelt das komplette Repository (alle Branches, Tags und der volle
+# Commit-Verlauf) in ein zweites, separates GitHub-Repo. Läuft wöchentlich
+# und zusätzlich nach jedem Push auf master, damit das Backup nie weit
+# hinterherhinkt.
+#
+# Voraussetzungen (einmalig einzurichten):
+#  1. Ein leeres, privates Ziel-Repo auf GitHub anlegen (z.B. meinFlugbuch-backup).
+#  2. Ein Personal Access Token (klassisch oder fine-grained) mit
+#     Schreibrechten auf genau dieses Ziel-Repo erzeugen.
+#  3. In diesem Repo unter Settings > Secrets and variables > Actions
+#     zwei Secrets anlegen:
+#       - BACKUP_TOKEN: das Personal Access Token aus Schritt 2
+#       - BACKUP_REPO:  Ziel-Repo im Format "owner/repo-name"
+
+on:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "0 3 * * 1" # jeden Montag, 03:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Code inkl. voller Historie auschecken
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: In Ziel-Repo spiegeln
+        env:
+          BACKUP_TOKEN: ${{ secrets.BACKUP_TOKEN }}
+          BACKUP_REPO: ${{ secrets.BACKUP_REPO }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BACKUP_TOKEN:-}" ] || [ -z "${BACKUP_REPO:-}" ]; then
+            echo "BACKUP_TOKEN und/oder BACKUP_REPO Secret fehlt - siehe Kommentar oben in dieser Datei." >&2
+            exit 1
+          fi
+          git push --mirror "https://x-access-token:${BACKUP_TOKEN}@github.com/${BACKUP_REPO}.git"
