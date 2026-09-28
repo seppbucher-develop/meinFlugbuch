@@ -482,24 +482,6 @@ function isPistachioHex(hex) {
   return !!hex && PISTACHIO_HEX.includes(hex.toLowerCase());
 }
 
-// Die 11 fest vorgegebenen Google-Kalender-Terminfarben (colorId 1–11,
-// alte Palette, siehe Calendar-API-Doku) — nur zur Diagnose, wenn kein
-// pistazienfarbiger Termin gefunden wird: zeigt dem Nutzer, welche Farbe
-// seine Termine tatsächlich tragen.
-const EVENT_COLORS = {
-  "1": { name: "Lavendel", hex: "#7986cb" },
-  "2": { name: "Salbei", hex: "#33b679" },
-  "3": { name: "Traube", hex: "#8e24aa" },
-  "4": { name: "Flamingo", hex: "#e67c73" },
-  "5": { name: "Banane", hex: "#f6bf26" },
-  "6": { name: "Mandarine", hex: "#f4511e" },
-  "7": { name: "Pfau", hex: "#039be5" },
-  "8": { name: "Graphit", hex: "#616161" },
-  "9": { name: "Blaubeere", hex: "#3f51b5" },
-  "10": { name: "Basil", hex: "#0b8043" },
-  "11": { name: "Tomate", hex: "#d50000" },
-};
-
 // Holt alle Kalender, auf die der Nutzer lesend zugreifen kann (eigene und
 // mit ihm geteilte, ohne reine Verfügbarkeits-Kalender ohne Termindetails).
 async function fetchCalendarList(accessToken) {
@@ -589,68 +571,24 @@ async function fetchCalendarEvents(accessToken, calendarId) {
   return events;
 }
 
-// Termin-Titel, die typischerweise auf eine Reise hindeuten — rein für die
-// Diagnose unten: zeigt den ROHEN colorId-Wert genau dieser Termine an
-// (statt nur aggregierter Zahlen), damit sich ein Auswertungsfehler hier im
-// Code von einem echten "Google liefert keinen colorId" unterscheiden
-// lässt, ohne dass der Nutzer selbst API-Antworten inspizieren müsste.
-const TRIP_TITLE_HINT_REGEX = /reise|urlaub|tour|trip|ferien|holiday|vacation|baltikum|spanien|dreil[aä]nder/i;
-
 // Sammelt alle pistazienfarbigen Termine über die angegebenen Kalender
-// hinweg — "pistazienfarben" heißt: der Termin trägt selbst diese Farbe,
-// ODER er trägt gar keine eigene Farbe und der Kalender, auf dem er liegt,
-// ist selbst pistazienfarben (siehe Kommentar oben an der Konstante). Liefert
-// zusätzlich Diagnosedaten zurück (geprüfte Kalender, Farbverteilung ihrer
-// Termine, plus eine Rohdaten-Stichprobe möglicher Reise-Termine) für den
-// Fall, dass gar nichts gefunden wird.
+// hinweg — "pistazienfarben" heißt: der Termin trägt Googles neuere
+// eventLabelId (siehe settings:googlePistachioLabelId) ODER die alte
+// colorId "10" ODER er trägt gar keine eigene Farbe und der Kalender, auf
+// dem er liegt, ist selbst pistazienfarben (siehe Kommentar an
+// PISTACHIO_HEX).
 async function fetchPistachioTrips(accessToken, calendars, pistachioLabelId) {
   const trips = [];
-  const colorCounts = {};
-  const calendarStats = [];
-  const sampleHints = [];
-  // Googles neueres, undokumentiertes "Event Label"-System (eventLabelId,
-  // eine feste UUID pro benannter Farbe wie "Pistazie") — hat bei diesem
-  // Konto das alte colorId-Feld komplett abgelöst, siehe Kommentar an
-  // PISTACHIO_EVENT_COLOR_ID. labelCounts gruppiert alle Termine nach ihrer
-  // eventLabelId (inkl. Titel-Stichprobe), damit sich die richtige UUID für
-  // "Pistazie" anhand bekannter Reise-Titel identifizieren lässt.
-  const labelCounts = {};
-  let rawDumpCount = 0;
-  let scanned = 0;
   for (const cal of calendars) {
     const calPistachio = isPistachioHex(cal.backgroundColor);
     let events;
     try {
       events = await fetchCalendarEvents(accessToken, cal.id);
-    } catch (e) {
-      calendarStats.push({ id: cal.id, name: cal.summary || cal.id, backgroundColor: cal.backgroundColor, pistachio: calPistachio, events: 0, error: e.message || String(e) });
+    } catch {
       continue;
     }
-    let calScanned = 0;
     for (const ev of events) {
       if (ev.status === "cancelled") continue;
-      scanned++; calScanned++;
-      const cid = ev.colorId || "none";
-      colorCounts[cid] = (colorCounts[cid] || 0) + 1;
-      const lid = ev.eventLabelId || "none";
-      if (!labelCounts[lid]) labelCounts[lid] = { count: 0, titles: [] };
-      labelCounts[lid].count++;
-      if (labelCounts[lid].titles.length < 4 && ev.summary) labelCounts[lid].titles.push(ev.summary);
-      if (TRIP_TITLE_HINT_REGEX.test(ev.summary || "") && sampleHints.length < 20) {
-        // Für die ersten beiden Treffer zusätzlich die KOMPLETTE Rohantwort
-        // mitschicken (nicht nur colorId) — falls Google die Farbe über ein
-        // anderes Feld transportiert (z.B. extendedProperties, eventType,
-        // source), das colorId allein nicht zeigt.
-        const includeRaw = rawDumpCount < 2;
-        if (includeRaw) rawDumpCount++;
-        sampleHints.push({
-          title: ev.summary || "(ohne Titel)",
-          start: ev.start?.date || ev.start?.dateTime || "?",
-          colorIdRaw: ev.colorId === undefined ? "(Feld fehlt komplett)" : JSON.stringify(ev.colorId),
-          calendar: cal.summary || cal.id,
-          raw: includeRaw ? JSON.stringify(ev, null, 1).slice(0, 2500) : null,
-        });
-      }
       const isTrip = (pistachioLabelId && ev.eventLabelId === pistachioLabelId)
         || ev.colorId === PISTACHIO_EVENT_COLOR_ID
         || (!ev.colorId && calPistachio);
@@ -660,9 +598,8 @@ async function fetchPistachioTrips(accessToken, calendars, pistachioLabelId) {
       if (!startDate || !endDate) continue;
       trips.push({ id: `${cal.id}:${ev.id}`, title: ev.summary || "(ohne Titel)", startDate, endDate, allDay: !!ev.start?.date });
     }
-    calendarStats.push({ id: cal.id, name: cal.summary || cal.id, backgroundColor: cal.backgroundColor, pistachio: calPistachio, events: calScanned });
   }
-  return { trips, scanned, colorCounts, calendarStats, sampleHints, labelCounts };
+  return trips;
 }
 
 // Jahres-Pivot: Reisetage + Flugminuten je Jahr (ab REISEANALYSE_START_YEAR,
@@ -764,77 +701,6 @@ function ReiseDrilldownModal({ row, onClose }) {
   );
 }
 
-// Zeigt, welche Kalender durchsucht wurden (mit ihrer eigenen Farbe) und
-// welche Terminfarben darin tatsächlich vorkommen — hilft, eine falsche
-// Annahme über PISTACHIO_EVENT_COLOR_ID/PISTACHIO_HEX zu erkennen, und
-// macht sichtbar, wenn Termine gar keine eigene Farbe tragen (dann zählt
-// nur die Farbe des jeweiligen Kalenders).
-function ColorDiagnostics({ diagnostics }) {
-  const entries = Object.entries(diagnostics.colorCounts).sort((a, b) => b[1] - a[1]);
-  return (
-    <div style={{ background: "rgba(250,204,21,0.08)", border: "1px solid rgba(250,204,21,0.25)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "rgba(232,244,253,0.75)", marginBottom: 12 }}>
-      <div style={{ fontWeight: 700, color: "#fcd34d", marginBottom: 6 }}>
-        Keine pistazienfarbigen Termine gefunden — {diagnostics.scanned} Termine ab {REISEANALYSE_START_YEAR} in {diagnostics.calendarStats.length} Kalender{diagnostics.calendarStats.length === 1 ? "" : "n"} geprüft.
-      </div>
-
-      <div style={{ marginBottom: 4, fontWeight: 700 }}>Durchsuchte Kalender:</div>
-      {diagnostics.calendarStats.map(c => (
-        <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
-          <span style={{ width: 12, height: 12, borderRadius: "50%", background: c.backgroundColor || "#999", flexShrink: 0, border: c.pistachio ? "2px solid #fcd34d" : "1px solid rgba(255,255,255,0.3)" }} />
-          <span>{c.name} — {c.error ? `Fehler: ${c.error}` : `${c.events} Termine`}{c.pistachio ? " · Kalenderfarbe ≈ Pistazie" : ""}</span>
-        </div>
-      ))}
-
-      {entries.length > 0 && (
-        <>
-          <div style={{ margin: "10px 0 4px", fontWeight: 700 }}>Tatsächlich vorkommende Termin-Farbcodes (alte Terminfarbpalette, falls einzeln gesetzt):</div>
-          {entries.map(([cid, count]) => {
-            const info = cid === "none" ? { name: "keine eigene Termin-Farbe (übernimmt Kalenderfarbe oben)", hex: "#999" } : (EVENT_COLORS[cid] || { name: `unbekannter Code ${cid}`, hex: "#999" });
-            return (
-              <div key={cid} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
-                <span style={{ width: 12, height: 12, borderRadius: "50%", background: info.hex, flexShrink: 0, border: "1px solid rgba(255,255,255,0.3)" }} />
-                <span>{info.name} — {count}×</span>
-              </div>
-            );
-          })}
-        </>
-      )}
-
-      {diagnostics.sampleHints.length > 0 && (
-        <>
-          <div style={{ margin: "10px 0 4px", fontWeight: 700, color: "#fcd34d" }}>Rohdaten möglicher Reise-Termine (direkt von Google, zum Abgleich):</div>
-          {diagnostics.sampleHints.map((h, i) => (
-            <div key={i} style={{ padding: "4px 0", borderBottom: i < diagnostics.sampleHints.length - 1 ? "1px solid rgba(255,255,255,0.08)" : "none" }}>
-              <div>{h.title} — {h.start}</div>
-              <div style={{ color: "rgba(232,244,253,0.55)" }}>Kalender: {h.calendar} · colorId von Google: {h.colorIdRaw}</div>
-              {h.raw && (
-                <pre style={{ marginTop: 6, marginBottom: 4, padding: 8, background: "rgba(0,0,0,0.35)", borderRadius: 6, fontSize: 10, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 260, overflowY: "auto", color: "rgba(232,244,253,0.85)" }}>
-                  {h.raw}
-                </pre>
-              )}
-            </div>
-          ))}
-        </>
-      )}
-
-      {diagnostics.labelCounts && Object.keys(diagnostics.labelCounts).length > 0 && (
-        <>
-          <div style={{ margin: "10px 0 4px", fontWeight: 700, color: "#fcd34d" }}>Termine gruppiert nach Google-Label-ID (neueres Farbsystem — anhand der Titel erkennst du, welche Gruppe "Pistazie" ist):</div>
-          {Object.entries(diagnostics.labelCounts).sort((a, b) => b[1].count - a[1].count).map(([lid, info]) => (
-            <div key={lid} style={{ padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-              <div style={{ fontFamily: "monospace", fontSize: 10, color: "rgba(232,244,253,0.5)" }}>{lid === "none" ? "(kein Label)" : lid}</div>
-              <div>{info.count} Termine — z.B. {info.titles.join(", ") || "—"}</div>
-            </div>
-          ))}
-          <div style={{ marginTop: 6 }}>Steht eine bekannte Reise (z.B. "Baltikum", "Dreiländer Tour") bei einer Label-ID mit erkennbar reise-typischen Titeln? Bitte diese ID melden, dann trage ich sie als "Pistazie"-Erkennung fest.</div>
-        </>
-      )}
-
-      <div style={{ marginTop: 10 }}>Ist eine deiner Reisen oben als Kalender oder Farbe zu sehen, aber trotzdem nicht erfasst? Bitte melden, dann passe ich die Erkennung an.</div>
-    </div>
-  );
-}
-
 function ReiseanalyseSection({ flights }) {
   const [clientId, setClientId] = React.useState("");
   const [calendarId, setCalendarId] = React.useState("primary");
@@ -845,7 +711,6 @@ function ReiseanalyseSection({ flights }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
   const [openYear, setOpenYear] = React.useState(null);
-  const [diagnostics, setDiagnostics] = React.useState(null); // {scanned, colorCounts} des letzten Sync
 
   React.useEffect(() => {
     (async () => {
@@ -898,10 +763,9 @@ function ReiseanalyseSection({ flights }) {
       const calendars = trimmedCalendarId && trimmedCalendarId !== "primary"
         ? [{ id: trimmedCalendarId, summary: trimmedCalendarId, backgroundColor: null }]
         : await fetchCalendarList(accessToken);
-      const { trips: fetchedTrips, scanned, colorCounts, calendarStats, sampleHints, labelCounts } = await fetchPistachioTrips(accessToken, calendars, pistachioLabelId.trim());
+      const fetchedTrips = await fetchPistachioTrips(accessToken, calendars, pistachioLabelId.trim());
       const iso = new Date().toISOString();
       setTrips(fetchedTrips);
-      setDiagnostics({ scanned, colorCounts, calendarStats, sampleHints, labelCounts });
       setFetchedAt(iso);
       await window.storage.set("reiseanalyse:tripsCache", JSON.stringify({ fetchedAt: iso, calendarId, trips: fetchedTrips }));
     } catch (e) {
@@ -936,7 +800,6 @@ function ReiseanalyseSection({ flights }) {
           {error}
         </div>
       )}
-      {diagnostics && trips.length === 0 && <ColorDiagnostics diagnostics={diagnostics} />}
       <ReiseanalysePivotTable pivot={pivot} onOpenYear={setOpenYear} />
       {openRow && <ReiseDrilldownModal row={openRow} onClose={() => setOpenYear(null)} />}
     </div>
