@@ -6234,53 +6234,6 @@ function FlugbuchApp() {
     try { await window.storage.set("customFieldDefs", JSON.stringify(defs)); } catch {}
   }, []);
 
-  // ── TEMP: Max.Steigen Druckdifferenz für bereits importierte Flüge
-  // nachrechnen ─────────────────────────────────────────────────────────
-  // "Max.Steigen Druckdifferenz" (siehe computeClimbSinkStats/hasBaroAlt
-  // weiter oben) wird nur beim (Re-)Import aus der IGC-Datei gesetzt
-  // (attachIgcToFlight/processIGCFiles) — Flüge, die schon vor Einführung
-  // dieses Felds importiert wurden, haben es noch nicht. Diese Funktion holt
-  // für jeden Flug mit gespeicherter Original-IGC-Datei (loadRawIgcFile,
-  // siehe oben) diese erneut, berechnet NUR maxSteigenBaro daraus und
-  // schreibt es in customFields — alle anderen Felder des Flugs bleiben
-  // unangetastet. Rein für den einmaligen Nachtrag gedacht (Knopf im
-  // Import-Panel unten): nach dem einmaligen Ausführen können Funktion und
-  // Knopf wieder entfernt werden, analog zur früheren, mittlerweile bereits
-  // wieder entfernten Nachrechnen-Funktion für Spirale/Wingover (siehe
-  // Kommentar bei analyzeSpiralWingover weiter oben).
-  const [backfillBaroRunning, setBackfillBaroRunning] = useState(false);
-  const [backfillBaroResult, setBackfillBaroResult] = useState(null);
-  const backfillMaxSteigenBaro = useCallback(async () => {
-    setBackfillBaroRunning(true);
-    setBackfillBaroResult(null);
-    let updated = 0, skippedNoIgc = 0, skippedNoBaro = 0, failed = 0;
-    const updatedFlights = [];
-    for (const fl of flights) {
-      if (!fl.track || fl.track.length < 2) continue;
-      try {
-        const raw = await loadRawIgcFile(fl.id);
-        if (!raw) { skippedNoIgc++; continue; }
-        const text = await new Blob([raw]).text();
-        const { track } = parseIGC(text);
-        if (!track.length || !hasBaroAlt(track)) { skippedNoBaro++; continue; }
-        const { maxClimbBaro } = computeClimbSinkStats(track);
-        const newVal = maxClimbBaro != null ? String(maxClimbBaro) : "";
-        if ((fl.customFields?.maxSteigenBaro || "") === newVal) continue;
-        const upd = { ...fl, customFields: { ...(fl.customFields||{}), maxSteigenBaro: newVal } };
-        const res = await saveFlight(upd);
-        if (res.ok) { updatedFlights.push(upd); updated++; } else failed++;
-      } catch (e) {
-        console.error("Max.Steigen Druckdifferenz nachrechnen fehlgeschlagen für Flug", fl.id, e);
-        failed++;
-      }
-    }
-    if (updatedFlights.length) {
-      setFlights(prev => prev.map(f => updatedFlights.find(u => u.id === f.id) || f));
-    }
-    setBackfillBaroResult({ updated, skippedNoIgc, skippedNoBaro, failed });
-    setBackfillBaroRunning(false);
-  }, [flights, saveFlight]);
-
   const doImport = useCallback(async (igcFiles) => {
     if (!igcFiles.length) return;
     setImporting(true); setImportProgress({done:0,total:igcFiles.length});
@@ -7085,27 +7038,6 @@ function FlugbuchApp() {
         <div style={{margin:"4px 16px 0",fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <span>📁 IGC-Ordner: {igcDirName}</span>
           <button onClick={clearIgcDir} style={{background:"none",border:"none",color:"rgba(248,113,113,0.6)",fontSize:11,cursor:"pointer"}}>ändern</button>
-        </div>
-      )}
-      {/* TEMP — einmaliger Nachtrag von "Max.Steigen Druckdifferenz" für
-          bereits importierte Flüge, siehe backfillMaxSteigenBaro oben. Nach
-          einmaligem Ausführen kann dieser Block wieder entfernt werden. */}
-      {showImportMenu && (
-        <div style={{margin:"4px 16px 0",fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
-          <span>🔧 Max.Steigen Druckdiff. für bestehende Flüge nachrechnen (temp)</span>
-          <button onClick={backfillMaxSteigenBaro} disabled={backfillBaroRunning}
-            style={{background:"none",border:"none",color:backfillBaroRunning?"rgba(232,244,253,0.3)":"rgba(96,165,250,0.7)",fontSize:11,cursor:backfillBaroRunning?"default":"pointer",whiteSpace:"nowrap"}}>
-            {backfillBaroRunning ? "⏳ läuft…" : "starten"}
-          </button>
-        </div>
-      )}
-      {backfillBaroResult && (
-        <div style={{margin:"4px 16px 0",background:"rgba(96,165,250,0.1)",border:"1px solid rgba(96,165,250,0.3)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:12,color:"#60a5fa"}}>
-            ✅ {backfillBaroResult.updated} aktualisiert · {backfillBaroResult.skippedNoIgc} ohne gespeicherte IGC-Datei · {backfillBaroResult.skippedNoBaro} ohne Druckhöhe im Logger
-            {backfillBaroResult.failed > 0 ? ` · ${backfillBaroResult.failed} fehlgeschlagen` : ""}
-          </span>
-          <button onClick={()=>setBackfillBaroResult(null)} style={{background:"none",border:"none",color:"rgba(96,165,250,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
         </div>
       )}
 
