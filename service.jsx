@@ -799,7 +799,7 @@ function ServiceApp() {
           <SectionHeader title="🔗 Google Kalender (Reiseanalyse)" sectionKey="googleCalendar" open={!!openInfo.googleCalendar} onToggle={toggleInfo} />
           {openInfo.googleCalendar && (
             <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
-              Für die "Reiseanalyse" in der Statistik liest die App pistazienfarbige Termine aus deinem Google Kalender. Dafür einmalig in der <a href="https://console.cloud.google.com/" target="_blank" rel="noopener" style={{ color: "#7dd3fc" }}>Google Cloud Console</a> ein Projekt anlegen, die "Google Calendar API" aktivieren und eine OAuth-Client-ID vom Typ "Webanwendung" erstellen — als autorisierten JavaScript-Ursprung genau die Adresse eintragen, unter der diese App läuft (z.B. https://dein-name.github.io). Die Client-ID unten einfügen. Kalender-ID nur nötig, falls nicht der Hauptkalender des Google-Kontos ("primary") gemeint ist.
+              Für die "Reiseanalyse" in der Statistik liest die App pistazienfarbige Termine aus deinem Google Kalender — standardmässig aus ALLEN Kalendern des Kontos (auch separate, z.B. ein eigener "Reisen"-Kalender), nicht nur dem Hauptkalender. Dafür einmalig in der <a href="https://console.cloud.google.com/" target="_blank" rel="noopener" style={{ color: "#7dd3fc" }}>Google Cloud Console</a> ein Projekt anlegen, die "Google Calendar API" aktivieren und eine OAuth-Client-ID vom Typ "Webanwendung" erstellen — als autorisierten JavaScript-Ursprung genau die Adresse eintragen, unter der diese App läuft (z.B. https://dein-name.github.io). Die Client-ID unten einfügen. Kalender-ID nur nötig, falls NICHT alle Kalender durchsucht werden sollen, sondern gezielt nur ein bestimmter.
             </div>
           )}
           <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>OAuth-Client-ID</div>
@@ -808,7 +808,7 @@ function ServiceApp() {
               placeholder="xxxxx.apps.googleusercontent.com"
               style={{ flex: "1 1 220px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
           </div>
-          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Kalender-ID (optional, Standard: primary)</div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Kalender-ID (optional, leer = alle Kalender durchsuchen)</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <input value={googleCalendarId} onChange={e => setGoogleCalendarId(e.target.value)}
               placeholder="primary"
