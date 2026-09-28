@@ -208,6 +208,45 @@ function ServiceApp() {
     }
   };
 
+  // Google-OAuth-Zugangsdaten für die "Reiseanalyse" in der Statistik (liest
+  // pistazienfarbige Termine aus dem Google Kalender, siehe statistik.jsx).
+  // Muss der Nutzer selbst einmalig in der Google Cloud Console anlegen
+  // (Projekt → APIs & Dienste → Google Calendar API aktivieren → OAuth-
+  // Client-ID vom Typ "Webanwendung" mit dieser Seite als autorisiertem
+  // JavaScript-Ursprung, z.B. https://<user>.github.io) — es gibt keinen
+  // eigenen Server, der einen fest eingebauten Schlüssel sicher verstecken
+  // könnte, daher analog zum MapTiler-Schlüssel oben ein eigener, hier
+  // hinterlegter Wert. Kalender-ID ist optional (leer = "primary", der
+  // Hauptkalender des angemeldeten Kontos).
+  const [googleClientId, setGoogleClientId] = React.useState("");
+  const [googleClientIdSaved, setGoogleClientIdSaved] = React.useState(false);
+  const [googleCalendarId, setGoogleCalendarId] = React.useState("");
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("settings:googleClientId");
+        if (r && r.value) { setGoogleClientId(r.value); setGoogleClientIdSaved(true); }
+        const c = await window.storage.get("settings:googleCalendarId");
+        if (c && c.value) setGoogleCalendarId(c.value);
+      } catch {}
+    })();
+  }, []);
+  const saveGoogleCalendarSettings = async () => {
+    const trimmedId = googleClientId.trim();
+    const trimmedCal = googleCalendarId.trim();
+    try {
+      if (trimmedId) await window.storage.set("settings:googleClientId", trimmedId);
+      else await window.storage.delete("settings:googleClientId");
+      if (trimmedCal) await window.storage.set("settings:googleCalendarId", trimmedCal);
+      else await window.storage.delete("settings:googleCalendarId");
+      await window.storage.set("settings:backupDirty", "1");
+      setGoogleClientIdSaved(!!trimmedId);
+      setMsg({ type: "ok", text: trimmedId ? "✓ Google-Client-ID gespeichert." : "✓ Google-Client-ID entfernt." });
+    } catch (e) {
+      setMsg({ type: "error", text: "Fehler beim Speichern: " + (e.message || String(e)) });
+    }
+  };
+
   // Radius (km), innerhalb dessen ein neu importierter IGC-Flug einen
   // Start-/Landeplatz-Namen bzw. ein Land von einem bereits vorhandenen
   // Flug mit ähnlichen Koordinaten übernehmen darf. 0.5 km Standard —
@@ -753,6 +792,34 @@ function ServiceApp() {
           </div>
           {maptilerKeySaved && (
             <div style={{ fontSize: 11, color: "rgba(74,222,128,0.8)", marginTop: 8 }}>✓ Eigener Schlüssel aktiv — Feld leeren und speichern, um wieder den Standard-Schlüssel zu nutzen.</div>
+          )}
+        </div>
+
+        <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+          <SectionHeader title="🔗 Google Kalender (Reiseanalyse)" sectionKey="googleCalendar" open={!!openInfo.googleCalendar} onToggle={toggleInfo} />
+          {openInfo.googleCalendar && (
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+              Für die "Reiseanalyse" in der Statistik liest die App pistazienfarbige Termine aus deinem Google Kalender. Dafür einmalig in der <a href="https://console.cloud.google.com/" target="_blank" rel="noopener" style={{ color: "#7dd3fc" }}>Google Cloud Console</a> ein Projekt anlegen, die "Google Calendar API" aktivieren und eine OAuth-Client-ID vom Typ "Webanwendung" erstellen — als autorisierten JavaScript-Ursprung genau die Adresse eintragen, unter der diese App läuft (z.B. https://dein-name.github.io). Die Client-ID unten einfügen. Kalender-ID nur nötig, falls nicht der Hauptkalender des Google-Kontos ("primary") gemeint ist.
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>OAuth-Client-ID</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            <input value={googleClientId} onChange={e => setGoogleClientId(e.target.value)}
+              placeholder="xxxxx.apps.googleusercontent.com"
+              style={{ flex: "1 1 220px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Kalender-ID (optional, Standard: primary)</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input value={googleCalendarId} onChange={e => setGoogleCalendarId(e.target.value)}
+              placeholder="primary"
+              style={{ flex: "1 1 220px", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 13 }} />
+            <button onClick={saveGoogleCalendarSettings}
+              style={{ flexShrink: 0, background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 10, padding: "10px 16px", color: "#4ade80", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Speichern
+            </button>
+          </div>
+          {googleClientIdSaved && (
+            <div style={{ fontSize: 11, color: "rgba(74,222,128,0.8)", marginTop: 8 }}>✓ Client-ID hinterlegt — in der Statistik → Reiseanalyse jetzt "Mit Google Kalender verbinden" antippen.</div>
           )}
         </div>
 

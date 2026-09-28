@@ -116,6 +116,7 @@ const VIEWS = [
   { id: "uebersicht", label: "Übersicht" },
   { id: "monat", label: "Monatsübersicht" },
   { id: "reise", label: "Reiseübersicht" },
+  { id: "reiseanalyse", label: "Reiseanalyse" },
 ];
 
 function ViewSwitcher({ view, onChange }) {
@@ -452,6 +453,296 @@ function UebersichtPivotTable({ pivot }) {
   );
 }
 
+// ── Reiseanalyse ─────────────────────────────────────────────────────────
+// Vierte Statistik-Ansicht: liest pistazienfarbige (colorId "10", von
+// Google intern "Basil" genannt) Termine aus dem Google Kalender des
+// Nutzers per OAuth (Google Identity Services, siehe statistik.html) und
+// wertet sie als "Reisen" aus — unabhängig vom (optionalen) "Reise"-Feld
+// der einzelnen Flüge in flugbuch.jsx. Pro Kalendereintrag: Reisetage =
+// Zeitspanne des Termins, Flugminuten = Summe der Flüge, deren Datum in
+// diese Zeitspanne fällt. Ergebnis wird lokal zwischengespeichert
+// (reiseanalyse:tripsCache), damit die Seite auch ohne erneute
+// Google-Anmeldung sofort den letzten Stand zeigt.
+const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
+const PISTACHIO_COLOR_ID = "10"; // Google-interner Name "Basil", dt. Oberfläche "Pistazie"
+const REISEANALYSE_START_YEAR = 2024;
+const DAY_MS = 24 * 3600 * 1000;
+
+// Wartet darauf, dass das per <script> in statistik.html geladene Google
+// Identity Services SDK bereit ist — das Script lädt async/defer, kann also
+// beim ersten Aufruf der Reiseanalyse-Ansicht noch nicht fertig sein.
+function loadGsiScript() {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + 8000;
+    (function poll() {
+      if (window.google?.accounts?.oauth2) { resolve(); return; }
+      if (Date.now() > deadline) { reject(new Error("Google Identitätsdienst konnte nicht geladen werden (accounts.google.com blockiert?).")); return; }
+      setTimeout(poll, 150);
+    })();
+  });
+}
+
+// dd.mm.yyyy (Flugbuch-Datumsformat, siehe flugbuch.jsx) → UTC-Millisekunden
+// um Mitternacht, oder null bei fehlendem/ungültigem Datum.
+function parseFlightDateUTC(f) {
+  const parts = (f.date || "").split(".");
+  if (parts.length !== 3) return null;
+  const d = parseInt(parts[0], 10), m = parseInt(parts[1], 10), y = parseInt(parts[2], 10);
+  if (!d || !m || !y) return null;
+  return Date.UTC(y, m - 1, d);
+}
+function tripStartUTC(trip) {
+  const [y, m, d] = trip.startDate.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+// Exklusives Ende (erster Tag NACH der Reise) — bei ganztägigen Google-
+// Kalendereinträgen ist end.date bereits exklusiv definiert, bei
+// Termine-mit-Uhrzeit wird der Enddatums-Tag noch mitgezählt (+1 Tag).
+function tripEndExclusiveUTC(trip) {
+  const [y, m, d] = trip.endDate.split("-").map(Number);
+  let t = Date.UTC(y, m - 1, d);
+  if (!trip.allDay) t += DAY_MS;
+  return t;
+}
+// Anzahl Tage einer Reise, die in ein bestimmtes Kalenderjahr fallen (bei
+// Reisen über den Jahreswechsel hinweg auf das jeweilige Jahr geclippt).
+function daysOfTripInYear(trip, year) {
+  const start = tripStartUTC(trip), endEx = tripEndExclusiveUTC(trip);
+  const yearStart = Date.UTC(year, 0, 1), yearEndEx = Date.UTC(year + 1, 0, 1);
+  const clipStart = Math.max(start, yearStart), clipEnd = Math.min(endEx, yearEndEx);
+  return Math.max(0, Math.round((clipEnd - clipStart) / DAY_MS));
+}
+function formatTripRange(startDate, endDate) {
+  const fmt = s => { const [y, m, d] = s.split("-"); return `${d}.${m}.${y}`; };
+  return startDate === endDate ? fmt(startDate) : `${fmt(startDate)} – ${fmt(endDate)}`;
+}
+
+// Holt alle pistazienfarbigen Termine ab REISEANALYSE_START_YEAR aus dem
+// angegebenen Kalender (Pagination über nextPageToken, falls nötig — die
+// Google-Farbfilterung selbst unterstützt die Events-API nicht serverseitig,
+// daher wird komplett geladen und hier nach colorId gefiltert).
+async function fetchPistachioTrips(accessToken, calendarId) {
+  const trips = [];
+  let pageToken;
+  do {
+    const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`);
+    url.searchParams.set("timeMin", `${REISEANALYSE_START_YEAR}-01-01T00:00:00Z`);
+    url.searchParams.set("singleEvents", "true");
+    url.searchParams.set("orderBy", "startTime");
+    url.searchParams.set("maxResults", "2500");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`Google Kalender API: HTTP ${resp.status}${body ? " — " + body.slice(0, 200) : ""}`);
+    }
+    const data = await resp.json();
+    for (const ev of data.items || []) {
+      if (ev.status === "cancelled") continue;
+      if (ev.colorId !== PISTACHIO_COLOR_ID) continue;
+      const startDate = ev.start?.date || (ev.start?.dateTime || "").slice(0, 10);
+      const endDate = ev.end?.date || (ev.end?.dateTime || "").slice(0, 10);
+      if (!startDate || !endDate) continue;
+      trips.push({ id: ev.id, title: ev.summary || "(ohne Titel)", startDate, endDate, allDay: !!ev.start?.date });
+    }
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return trips;
+}
+
+// Jahres-Pivot: Reisetage + Flugminuten je Jahr (ab REISEANALYSE_START_YEAR,
+// plus jedes weitere Jahr, in das eine Reise tatsächlich hineinreicht) und
+// je Jahr die Liste der einzelnen Reisen für den Drilldown.
+function computeReiseanalysePivot(trips, flights) {
+  const parsedFlights = flights
+    .map(f => ({ f, dateUTC: parseFlightDateUTC(f) }))
+    .filter(x => x.dateUTC !== null);
+
+  const currentYear = new Date().getFullYear();
+  const years = new Set();
+  for (let y = REISEANALYSE_START_YEAR; y <= currentYear; y++) years.add(y);
+  trips.forEach(t => {
+    const startY = new Date(tripStartUTC(t)).getUTCFullYear();
+    const lastDayY = new Date(tripEndExclusiveUTC(t) - DAY_MS).getUTCFullYear();
+    for (let y = Math.max(startY, REISEANALYSE_START_YEAR); y <= lastDayY; y++) years.add(y);
+  });
+  const yearList = [...years].sort((a, b) => a - b);
+
+  const rows = yearList.map(year => {
+    const tripRows = [];
+    for (const t of trips) {
+      const days = daysOfTripInYear(t, year);
+      if (days <= 0) continue;
+      const start = tripStartUTC(t), endEx = tripEndExclusiveUTC(t);
+      const minutes = parsedFlights
+        .filter(x => x.dateUTC >= start && x.dateUTC < endEx && new Date(x.dateUTC).getUTCFullYear() === year)
+        .reduce((acc, x) => acc + (x.f.durationSec || 0) / 60, 0);
+      tripRows.push({ id: t.id, title: t.title, days, minutes, startDate: t.startDate, endDate: t.endDate });
+    }
+    tripRows.sort((a, b) => a.startDate.localeCompare(b.startDate));
+    return {
+      year,
+      days: tripRows.reduce((acc, r) => acc + r.days, 0),
+      minutes: tripRows.reduce((acc, r) => acc + r.minutes, 0),
+      trips: tripRows,
+    };
+  });
+  const total = rows.reduce((acc, r) => ({ days: acc.days + r.days, minutes: acc.minutes + r.minutes }), { days: 0, minutes: 0 });
+  return { rows, total };
+}
+
+function ReiseanalysePivotTable({ pivot, onOpenYear }) {
+  const cols = "minmax(0,0.8fr) minmax(0,1fr) minmax(0,1.1fr)";
+  const cellStyle = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
+  return (
+    <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden" }}>
+      <div style={{ display: "grid", gridTemplateColumns: cols, background: STICKY_BG_HEADER, borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+        {["Jahr", "Reisetage", "Flugminuten"].map((h, i) => (
+          <div key={h} style={{ ...cellStyle, padding: "8px 10px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
+        ))}
+      </div>
+      {pivot.rows.length === 0 && (
+        <div style={{ padding: "24px 12px", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.4)" }}>Keine pistazienfarbigen Kalendereinträge gefunden.</div>
+      )}
+      {pivot.rows.map(r => (
+        <div key={r.year} onClick={() => r.trips.length && onOpenYear(r.year)}
+          style={{ display: "grid", gridTemplateColumns: cols, borderBottom: "1px solid rgba(255,255,255,0.05)", cursor: r.trips.length ? "pointer" : "default" }}>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 700, color: "#7dd3fc" }}>{r.year}{r.trips.length ? " ›" : ""}</div>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, textAlign: "right", color: r.days ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{r.days || "·"}</div>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, textAlign: "right", color: r.minutes ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{r.minutes ? formatMinutes(r.minutes) : "·"}</div>
+        </div>
+      ))}
+      {pivot.rows.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: cols, background: "rgba(125,211,252,0.08)" }}>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800 }}>Gesamt</div>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReiseDrilldownModal({ row, onClose }) {
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 480, maxHeight: "80vh", overflowY: "auto", background: "#0f1f33", borderTop: "1px solid rgba(255,255,255,0.12)", borderRadius: "16px 16px 0 0", padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>🧳 Reisen {row.year}</div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
+        </div>
+        {row.trips.map((t, i) => (
+          <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 4px", borderBottom: i < row.trips.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none" }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</div>
+              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)" }}>{formatTripRange(t.startDate, t.endDate)}</div>
+            </div>
+            <div style={{ flexShrink: 0, textAlign: "right" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{t.days} {t.days === 1 ? "Tag" : "Tage"}</div>
+              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>{t.minutes ? formatMinutes(t.minutes) : "0h 00m"}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ReiseanalyseSection({ flights }) {
+  const [clientId, setClientId] = React.useState("");
+  const [calendarId, setCalendarId] = React.useState("primary");
+  const [settingsLoaded, setSettingsLoaded] = React.useState(false);
+  const [trips, setTrips] = React.useState([]);
+  const [fetchedAt, setFetchedAt] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const [openYear, setOpenYear] = React.useState(null);
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const [ci, cal, cache] = await Promise.all([
+          window.storage.get("settings:googleClientId"),
+          window.storage.get("settings:googleCalendarId"),
+          window.storage.get("reiseanalyse:tripsCache"),
+        ]);
+        if (ci?.value) setClientId(ci.value);
+        if (cal?.value) setCalendarId(cal.value);
+        if (cache?.value) {
+          try {
+            const parsed = JSON.parse(cache.value);
+            if (Array.isArray(parsed.trips)) { setTrips(parsed.trips); setFetchedAt(parsed.fetchedAt || null); }
+          } catch {}
+        }
+      } catch {}
+      setSettingsLoaded(true);
+    })();
+  }, []);
+
+  const sync = async () => {
+    setError(null);
+    if (!clientId) {
+      setError('Keine Google-Client-ID hinterlegt — unter Service → "🔗 Google Kalender (Reiseanalyse)" eintragen.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await loadGsiScript();
+      const accessToken = await new Promise((resolve, reject) => {
+        const client = window.google.accounts.oauth2.initTokenClient({
+          client_id: clientId,
+          scope: GOOGLE_CALENDAR_SCOPE,
+          callback: (resp) => {
+            if (resp.error) reject(new Error(resp.error)); else resolve(resp.access_token);
+          },
+          error_callback: (err) => reject(new Error(err?.message || "Google-Anmeldung abgebrochen.")),
+        });
+        client.requestAccessToken();
+      });
+      const fetchedTrips = await fetchPistachioTrips(accessToken, calendarId || "primary");
+      const iso = new Date().toISOString();
+      setTrips(fetchedTrips);
+      setFetchedAt(iso);
+      await window.storage.set("reiseanalyse:tripsCache", JSON.stringify({ fetchedAt: iso, calendarId, trips: fetchedTrips }));
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const pivot = React.useMemo(() => computeReiseanalysePivot(trips, flights), [trips, flights]);
+  const openRow = pivot.rows.find(r => r.year === openYear) || null;
+
+  if (!settingsLoaded) {
+    return <div style={{ padding: "24px 16px", color: "rgba(232,244,253,0.5)" }}>Lade…</div>;
+  }
+
+  return (
+    <div style={{ padding: "0 16px 14px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)" }}>
+          {fetchedAt
+            ? `Kalenderstand: ${new Date(fetchedAt).toLocaleString("de-CH", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" })}`
+            : "Noch nicht mit Google Kalender synchronisiert."}
+        </div>
+        <button onClick={sync} disabled={busy}
+          style={{ background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 10, padding: "9px 14px", color: "#7dd3fc", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+          {busy ? "⏳ Synchronisiere…" : (fetchedAt ? "🔄 Aktualisieren" : "🔗 Mit Google Kalender verbinden")}
+        </button>
+      </div>
+      {error && (
+        <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#f87171", marginBottom: 12 }}>
+          {error}
+        </div>
+      )}
+      <ReiseanalysePivotTable pivot={pivot} onOpenYear={setOpenYear} />
+      {openRow && <ReiseDrilldownModal row={openRow} onClose={() => setOpenYear(null)} />}
+    </div>
+  );
+}
+
 function StatistikApp() {
   const [flights, setFlights] = React.useState(null); // null = noch am Laden
 
@@ -675,6 +966,8 @@ function StatistikApp() {
       {view === "monat" && <MonthPivotTable flights={filtered} />}
 
       {view === "reise" && <ReisePivotTable flights={filtered} />}
+
+      {view === "reiseanalyse" && <ReiseanalyseSection flights={all} />}
     </div>
   );
 }
