@@ -454,25 +454,38 @@ function UebersichtPivotTable({ pivot }) {
 }
 
 // ── Reiseanalyse ─────────────────────────────────────────────────────────
-// Vierte Statistik-Ansicht: liest pistazienfarbige (colorId "10", von
-// Google intern "Basil" genannt) Termine aus dem Google Kalender des
-// Nutzers per OAuth (Google Identity Services, siehe statistik.html) und
-// wertet sie als "Reisen" aus — unabhängig vom (optionalen) "Reise"-Feld
-// der einzelnen Flüge in flugbuch.jsx. Pro Kalendereintrag: Reisetage =
-// Zeitspanne des Termins, Flugminuten = Summe der Flüge, deren Datum in
-// diese Zeitspanne fällt. Ergebnis wird lokal zwischengespeichert
-// (reiseanalyse:tripsCache), damit die Seite auch ohne erneute
-// Google-Anmeldung sofort den letzten Stand zeigt.
+// Vierte Statistik-Ansicht: liest pistazienfarbige Termine aus dem Google
+// Kalender des Nutzers per OAuth (Google Identity Services, siehe
+// statistik.html) und wertet sie als "Reisen" aus — unabhängig vom
+// (optionalen) "Reise"-Feld der einzelnen Flüge in flugbuch.jsx. Pro
+// Kalendereintrag: Reisetage = Zeitspanne des Termins, Flugminuten = Summe
+// der Flüge, deren Datum in diese Zeitspanne fällt. Ergebnis wird lokal
+// zwischengespeichert (reiseanalyse:tripsCache), damit die Seite auch ohne
+// erneute Google-Anmeldung sofort den letzten Stand zeigt.
+//
+// "Pistazie" ist ein Termin per eigener Farbe ODER — wenn ein Termin gar
+// keine eigene Farbe trägt (häufiger Fall: der Nutzer hat nur die Farbe
+// eines ganzen, dedizierten "Reisen"-Kalenders auf Pistazie gestellt,
+// statt jeden Termin einzeln einzufärben) — jeder nicht abgesagte Termin in
+// einem Kalender, dessen eigene Hintergrundfarbe pistazienfarben ist.
+// Durchsucht werden dafür standardmässig ALLE Kalender des Kontos (nicht
+// nur "primary"), da der Reisen-Kalender meist ein separater, sekundärer
+// Kalender ist — außer settings:googleCalendarId ist explizit auf eine
+// bestimmte Kalender-ID gesetzt.
 const GOOGLE_CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.readonly";
-const PISTACHIO_COLOR_ID = "10"; // Google-interner Name "Basil", dt. Oberfläche vermutlich "Pistazie"/"Basilikum"
+const PISTACHIO_EVENT_COLOR_ID = "10"; // alte 11er-Terminfarbpalette, dort "Basil" genannt
+const PISTACHIO_HEX = ["#7bd148", "#0b8043"]; // neuere ~24er-Palette "Pistachio" + alte Palette "Basil", je nach dem, welche Google gerade fürs Konto anzeigt
 const REISEANALYSE_START_YEAR = 2024;
 const DAY_MS = 24 * 3600 * 1000;
 
+function isPistachioHex(hex) {
+  return !!hex && PISTACHIO_HEX.includes(hex.toLowerCase());
+}
+
 // Die 11 fest vorgegebenen Google-Kalender-Terminfarben (colorId 1–11,
-// nie geändert, siehe Calendar-API-Doku) — nur zur Diagnose, wenn kein
-// Termin mit PISTACHIO_COLOR_ID gefunden wird: zeigt dem Nutzer, welche
-// Farbe seine Termine tatsächlich tragen, damit sich eine falsche Annahme
-// über die richtige colorId sofort korrigieren lässt.
+// alte Palette, siehe Calendar-API-Doku) — nur zur Diagnose, wenn kein
+// pistazienfarbiger Termin gefunden wird: zeigt dem Nutzer, welche Farbe
+// seine Termine tatsächlich tragen.
 const EVENT_COLORS = {
   "1": { name: "Lavendel", hex: "#7986cb" },
   "2": { name: "Salbei", hex: "#33b679" },
@@ -483,9 +496,23 @@ const EVENT_COLORS = {
   "7": { name: "Pfau", hex: "#039be5" },
   "8": { name: "Graphit", hex: "#616161" },
   "9": { name: "Blaubeere", hex: "#3f51b5" },
-  "10": { name: 'Basilikum ("Pistazie")', hex: "#0b8043" },
+  "10": { name: "Basil", hex: "#0b8043" },
   "11": { name: "Tomate", hex: "#d50000" },
 };
+
+// Holt alle Kalender, auf die der Nutzer lesend zugreifen kann (eigene und
+// mit ihm geteilte, ohne reine Verfügbarkeits-Kalender ohne Termindetails).
+async function fetchCalendarList(accessToken) {
+  const resp = await fetch("https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250", {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(`Google Kalenderliste: HTTP ${resp.status}${body ? " — " + body.slice(0, 200) : ""}`);
+  }
+  const data = await resp.json();
+  return (data.items || []).filter(c => c.accessRole !== "freeBusyReader");
+}
 
 // Wartet darauf, dass das per <script> in statistik.html geladene Google
 // Identity Services SDK bereit ist — das Script lädt async/defer, kann also
@@ -536,18 +563,12 @@ function formatTripRange(startDate, endDate) {
   return startDate === endDate ? fmt(startDate) : `${fmt(startDate)} – ${fmt(endDate)}`;
 }
 
-// Holt alle pistazienfarbigen Termine ab REISEANALYSE_START_YEAR aus dem
-// angegebenen Kalender (Pagination über nextPageToken, falls nötig — die
-// Google-Farbfilterung selbst unterstützt die Events-API nicht serverseitig,
-// daher wird komplett geladen und hier nach colorId gefiltert). Liefert
-// zusätzlich eine Farbverteilung aller geprüften Termine zurück (colorCounts,
-// "none" = Termin ohne eigene Farbe, übernimmt die Kalender-Standardfarbe) —
-// reine Diagnose-Hilfe für den Fall, dass PISTACHIO_COLOR_ID nicht (mehr)
-// zur tatsächlichen Google-Farbe passt.
-async function fetchPistachioTrips(accessToken, calendarId) {
-  const trips = [];
-  const colorCounts = {};
-  let scanned = 0;
+// Termine eines einzelnen Kalenders ab REISEANALYSE_START_YEAR (Pagination
+// über nextPageToken, falls nötig — die Events-API kennt keine
+// serverseitige Farbfilterung, daher wird komplett geladen und hier
+// gefiltert).
+async function fetchCalendarEvents(accessToken, calendarId) {
+  const events = [];
   let pageToken;
   do {
     const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`);
@@ -559,23 +580,51 @@ async function fetchPistachioTrips(accessToken, calendarId) {
     const resp = await fetch(url.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
     if (!resp.ok) {
       const body = await resp.text().catch(() => "");
-      throw new Error(`Google Kalender API: HTTP ${resp.status}${body ? " — " + body.slice(0, 200) : ""}`);
+      throw new Error(`Google Kalender API (${calendarId}): HTTP ${resp.status}${body ? " — " + body.slice(0, 200) : ""}`);
     }
     const data = await resp.json();
-    for (const ev of data.items || []) {
+    events.push(...(data.items || []));
+    pageToken = data.nextPageToken;
+  } while (pageToken);
+  return events;
+}
+
+// Sammelt alle pistazienfarbigen Termine über die angegebenen Kalender
+// hinweg — "pistazienfarben" heißt: der Termin trägt selbst diese Farbe,
+// ODER er trägt gar keine eigene Farbe und der Kalender, auf dem er liegt,
+// ist selbst pistazienfarben (siehe Kommentar oben an der Konstante). Liefert
+// zusätzlich Diagnosedaten zurück (geprüfte Kalender + Farbverteilung ihrer
+// Termine) für den Fall, dass gar nichts gefunden wird.
+async function fetchPistachioTrips(accessToken, calendars) {
+  const trips = [];
+  const colorCounts = {};
+  const calendarStats = [];
+  let scanned = 0;
+  for (const cal of calendars) {
+    const calPistachio = isPistachioHex(cal.backgroundColor);
+    let events;
+    try {
+      events = await fetchCalendarEvents(accessToken, cal.id);
+    } catch (e) {
+      calendarStats.push({ id: cal.id, name: cal.summary || cal.id, backgroundColor: cal.backgroundColor, pistachio: calPistachio, events: 0, error: e.message || String(e) });
+      continue;
+    }
+    let calScanned = 0;
+    for (const ev of events) {
       if (ev.status === "cancelled") continue;
-      scanned++;
+      scanned++; calScanned++;
       const cid = ev.colorId || "none";
       colorCounts[cid] = (colorCounts[cid] || 0) + 1;
-      if (ev.colorId !== PISTACHIO_COLOR_ID) continue;
+      const isTrip = ev.colorId === PISTACHIO_EVENT_COLOR_ID || (!ev.colorId && calPistachio);
+      if (!isTrip) continue;
       const startDate = ev.start?.date || (ev.start?.dateTime || "").slice(0, 10);
       const endDate = ev.end?.date || (ev.end?.dateTime || "").slice(0, 10);
       if (!startDate || !endDate) continue;
-      trips.push({ id: ev.id, title: ev.summary || "(ohne Titel)", startDate, endDate, allDay: !!ev.start?.date });
+      trips.push({ id: `${cal.id}:${ev.id}`, title: ev.summary || "(ohne Titel)", startDate, endDate, allDay: !!ev.start?.date });
     }
-    pageToken = data.nextPageToken;
-  } while (pageToken);
-  return { trips, scanned, colorCounts };
+    calendarStats.push({ id: cal.id, name: cal.summary || cal.id, backgroundColor: cal.backgroundColor, pistachio: calPistachio, events: calScanned });
+  }
+  return { trips, scanned, colorCounts, calendarStats };
 }
 
 // Jahres-Pivot: Reisetage + Flugminuten je Jahr (ab REISEANALYSE_START_YEAR,
@@ -677,26 +726,32 @@ function ReiseDrilldownModal({ row, onClose }) {
   );
 }
 
-// Zeigt, welche Terminfarben der zuletzt synchronisierte Kalender
-// tatsächlich enthält — hilft, eine falsche Annahme über PISTACHIO_COLOR_ID
-// zu erkennen, und macht sichtbar, wenn Termine gar keine eigene Farbe
-// tragen (dann übernehmen sie nur die Kalender-Standardfarbe, die die
-// Events-API nicht liefert — Google zeigt Pistazie dann evtl. nur visuell
-// im Kalender an, ohne dass ein Termin selbst "pistazienfarben" ist).
+// Zeigt, welche Kalender durchsucht wurden (mit ihrer eigenen Farbe) und
+// welche Terminfarben darin tatsächlich vorkommen — hilft, eine falsche
+// Annahme über PISTACHIO_EVENT_COLOR_ID/PISTACHIO_HEX zu erkennen, und
+// macht sichtbar, wenn Termine gar keine eigene Farbe tragen (dann zählt
+// nur die Farbe des jeweiligen Kalenders).
 function ColorDiagnostics({ diagnostics }) {
   const entries = Object.entries(diagnostics.colorCounts).sort((a, b) => b[1] - a[1]);
   return (
     <div style={{ background: "rgba(250,204,21,0.08)", border: "1px solid rgba(250,204,21,0.25)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "rgba(232,244,253,0.75)", marginBottom: 12 }}>
       <div style={{ fontWeight: 700, color: "#fcd34d", marginBottom: 6 }}>
-        Keine Termine mit der Farbe {EVENT_COLORS[PISTACHIO_COLOR_ID].name} gefunden — {diagnostics.scanned} Termine ab {REISEANALYSE_START_YEAR} geprüft.
+        Keine pistazienfarbigen Termine gefunden — {diagnostics.scanned} Termine ab {REISEANALYSE_START_YEAR} in {diagnostics.calendarStats.length} Kalender{diagnostics.calendarStats.length === 1 ? "" : "n"} geprüft.
       </div>
-      {entries.length === 0 ? (
-        <div>Keine Termine im gewählten Kalender ab {REISEANALYSE_START_YEAR} gefunden — falsche Kalender-ID unter Service → Google Kalender eingetragen?</div>
-      ) : (
+
+      <div style={{ marginBottom: 4, fontWeight: 700 }}>Durchsuchte Kalender:</div>
+      {diagnostics.calendarStats.map(c => (
+        <div key={c.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
+          <span style={{ width: 12, height: 12, borderRadius: "50%", background: c.backgroundColor || "#999", flexShrink: 0, border: c.pistachio ? "2px solid #fcd34d" : "1px solid rgba(255,255,255,0.3)" }} />
+          <span>{c.name} — {c.error ? `Fehler: ${c.error}` : `${c.events} Termine`}{c.pistachio ? " · Kalenderfarbe ≈ Pistazie" : ""}</span>
+        </div>
+      ))}
+
+      {entries.length > 0 && (
         <>
-          <div style={{ marginBottom: 6 }}>Tatsächlich vorkommende Terminfarben (falls deine Reisen dabei sind, aber mit anderer Farbe — bitte melden, dann passe ich PISTACHIO_COLOR_ID an):</div>
+          <div style={{ margin: "10px 0 4px", fontWeight: 700 }}>Tatsächlich vorkommende Termin-Farbcodes (alte Terminfarbpalette, falls einzeln gesetzt):</div>
           {entries.map(([cid, count]) => {
-            const info = cid === "none" ? { name: "keine eigene Termin-Farbe (nur Kalender-Standardfarbe)", hex: "#999" } : (EVENT_COLORS[cid] || { name: `unbekannter Code ${cid}`, hex: "#999" });
+            const info = cid === "none" ? { name: "keine eigene Termin-Farbe (übernimmt Kalenderfarbe oben)", hex: "#999" } : (EVENT_COLORS[cid] || { name: `unbekannter Code ${cid}`, hex: "#999" });
             return (
               <div key={cid} style={{ display: "flex", alignItems: "center", gap: 8, padding: "2px 0" }}>
                 <span style={{ width: 12, height: 12, borderRadius: "50%", background: info.hex, flexShrink: 0, border: "1px solid rgba(255,255,255,0.3)" }} />
@@ -706,6 +761,7 @@ function ColorDiagnostics({ diagnostics }) {
           })}
         </>
       )}
+      <div style={{ marginTop: 10 }}>Ist eine deiner Reisen oben als Kalender oder Farbe zu sehen, aber trotzdem nicht erfasst? Bitte melden, dann passe ich die Erkennung an.</div>
     </div>
   );
 }
@@ -762,10 +818,18 @@ function ReiseanalyseSection({ flights }) {
         });
         client.requestAccessToken();
       });
-      const { trips: fetchedTrips, scanned, colorCounts } = await fetchPistachioTrips(accessToken, calendarId || "primary");
+      // Ohne explizit gesetzte Kalender-ID werden ALLE Kalender des Kontos
+      // durchsucht (siehe Kommentar an PISTACHIO_HEX oben) — der
+      // "Reisen"-Kalender ist meist ein separater, sekundärer Kalender,
+      // nicht der Hauptkalender ("primary").
+      const trimmedCalendarId = (calendarId || "").trim();
+      const calendars = trimmedCalendarId && trimmedCalendarId !== "primary"
+        ? [{ id: trimmedCalendarId, summary: trimmedCalendarId, backgroundColor: null }]
+        : await fetchCalendarList(accessToken);
+      const { trips: fetchedTrips, scanned, colorCounts, calendarStats } = await fetchPistachioTrips(accessToken, calendars);
       const iso = new Date().toISOString();
       setTrips(fetchedTrips);
-      setDiagnostics({ scanned, colorCounts });
+      setDiagnostics({ scanned, colorCounts, calendarStats });
       setFetchedAt(iso);
       await window.storage.set("reiseanalyse:tripsCache", JSON.stringify({ fetchedAt: iso, calendarId, trips: fetchedTrips }));
     } catch (e) {
