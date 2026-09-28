@@ -61,8 +61,18 @@ function parseIGC(text) {
       // so a 0 reading is always treated as a glitch and skipped rather
       // than kept as a real data point.
       const gpsAlt = +line.slice(30,35);
+      // Drucksensor-Höhe (PPPPP, Spalten 25-29) zusätzlich mitgelesen — für
+      // "Max.Steigen Druckdifferenz" (siehe computeClimbSinkStats), das den
+      // gleichen Fensterwert wie Max.Steigen auf Basis der Barometer- statt
+      // der GPS-Höhe liefert und damit direkt mit einem live am Vario
+      // abgelesenen Wert vergleichbar ist (viele Varios zeigen den
+      // Drucksensor-Wert an, nicht die GPS-Höhe). 0/NaN (Logger ohne
+      // Drucksensor, oder ein einzelner Aussetzer) wird unten in
+      // hasBaroAlt/computeClimbSinkStats erkannt statt als echte Höhe
+      // verwendet.
+      const baroAlt = +line.slice(25,30);
       if (!isNaN(lat)&&!isNaN(lon)&&!isNaN(gpsAlt)&&gpsAlt>0)
-        track.push({ lat, lon, gpsAlt, timeSec: hh*3600+mm*60+ss });
+        track.push({ lat, lon, gpsAlt, baroAlt: isNaN(baroAlt)?0:baroAlt, timeSec: hh*3600+mm*60+ss });
     }
   }
   return { track, date, pilot, glider, tzOffsetHours };
@@ -189,12 +199,14 @@ const PLAUSIBLE_MAX_VARIO_MS = 25;
 // 0..k-1; ein Fenster [lo,hi) enthält einen Ausreisser, wenn
 // prefix[hi]-prefix[lo] > 0 ist (siehe altitudeGlitchWindowOverlaps
 // direkt darunter).
-function buildAltitudeGlitchPrefix(track) {
+// altKey wählt die Höhenquelle ("gpsAlt" oder "baroAlt", siehe parseIGC) —
+// Default bleibt "gpsAlt", damit bestehende Aufrufer unverändert bleiben.
+function buildAltitudeGlitchPrefix(track, altKey = "gpsAlt") {
   const n = track.length;
   const prefix = new Array(n).fill(0);
   for (let k = 0; k < n - 1; k++) {
     const dt = track[k+1].timeSec - track[k].timeSec;
-    const rate = dt > 0 ? (track[k+1].gpsAlt - track[k].gpsAlt) / dt : 0;
+    const rate = dt > 0 ? (track[k+1][altKey] - track[k][altKey]) / dt : 0;
     const isGlitch = dt > 0 && Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS;
     prefix[k+1] = prefix[k] + (isGlitch ? 1 : 0);
   }
@@ -260,7 +272,9 @@ const MANEUVER_TURN_RATE_DEG_S = 40;
 // zusätzlich jedes Fenster, das einen einzelnen unplausiblen rohen
 // Höhensprung enthält, statt sich allein auf die über das Fenster
 // gemittelte (und damit verdünnte) Rate zu verlassen.
-function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix, glitchPrefix) {
+// altKey wie bei buildAltitudeGlitchPrefix oben — glitchPrefix muss mit
+// derselben Höhenquelle gebaut worden sein (siehe computeClimbSinkStats).
+function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix, glitchPrefix, altKey = "gpsAlt") {
   let maxRate = -Infinity, minRate = Infinity;
   let j = 0;
   for (let i=0; i<track.length; i++) {
@@ -271,7 +285,7 @@ function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix, glitchPrefi
     if (j === i) continue;
     const dt = track[j].timeSec - t0;
     if (dt <= 0) continue;
-    const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
+    const rate = (track[j][altKey] - track[i][altKey]) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
     if (altitudeGlitchWindowOverlaps(glitchPrefix, i, j)) continue; // einzelner unplausibler Höhensprung im Fenster versteckt, ignorieren
     if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover, ignorieren
@@ -279,6 +293,15 @@ function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix, glitchPrefi
     if (rate < minRate) minRate = rate;
   }
   return { maxRate, minRate };
+}
+
+// Manche Logger schreiben im Drucksensor-Feld des B-Records durchgehend
+// "00000" (kein Drucksensor verbaut, oder Feld nicht unterstützt) — ein
+// einzelner Punkt >0 reicht als Nachweis, dass hier echte Druckhöhendaten
+// vorliegen, sonst würde computeClimbSinkStats aus lauter Nullen einen
+// irreführenden "Wert" von 0.0 m/s errechnen statt gar keinen zu liefern.
+function hasBaroAlt(track) {
+  return track.some(p => p.baroAlt > 0);
 }
 
 function computeClimbSinkStats(track) {
@@ -303,7 +326,22 @@ function computeClimbSinkStats(track) {
   // 20s-Steigwerte).
   const { maxRate: maxClimb20Raw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC_20, maneuverPrefix, glitchPrefix);
   const maxClimb20 = isFinite(maxClimb20Raw) ? +maxClimb20Raw.toFixed(1) : 0;
-  return { maxClimb, maxClimb20, maxSinkRate };
+  // "Max.Steigen Druckdifferenz": exakt dieselbe Fenster-/Ausreisser-/
+  // Manöver-Logik wie Max.Steigen oben, nur auf Basis der Drucksensor-Höhe
+  // (baroAlt) statt der GPS-Höhe — viele Varios zeigen live diesen Wert an,
+  // der auf kurze Kernstösse direkter reagiert als die (im 3s-Fenster
+  // ohnehin schon geglättete) GPS-Höhe. Eigener glitchPrefix, da ein
+  // einzelner unplausibler Sprung in der Druckhöhe unabhängig von der
+  // GPS-Höhe auftreten kann; maneuverPrefix bleibt gemeinsam, da der
+  // (kursbasierte) Manöver-Ausschluss unabhängig von der Höhenquelle ist.
+  // null (statt 0), wenn der Logger gar keine Druckhöhe aufgezeichnet hat.
+  let maxClimbBaro = null;
+  if (hasBaroAlt(track)) {
+    const glitchPrefixBaro = buildAltitudeGlitchPrefix(track, "baroAlt");
+    const { maxRate: maxClimbBaroRaw } = windowedClimbSinkExtremes(track, CLIMB_WINDOW_SEC, maneuverPrefix, glitchPrefixBaro, "baroAlt");
+    maxClimbBaro = isFinite(maxClimbBaroRaw) ? +maxClimbBaroRaw.toFixed(1) : 0;
+  }
+  return { maxClimb, maxClimb20, maxSinkRate, maxClimbBaro };
 }
 
 // Wie windowedClimbSinkExtremes oben, aber zusätzlich mit dem Kartenpunkt zum
@@ -813,7 +851,7 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   const maxAlt = Math.max(...alts), minAlt = Math.min(...alts);
   const startAlt = track[0].gpsAlt, endAlt = track[track.length-1].gpsAlt;
   const startPt = track[0], endPt = track[track.length-1];
-  const { maxClimb, maxClimb20, maxSinkRate } = computeClimbSinkStats(track);
+  const { maxClimb, maxClimb20, maxSinkRate, maxClimbBaro } = computeClimbSinkStats(track);
   // Thermal count und Höhengewinn unten liefen bisher OHNE den Schutz, den
   // Max.Steigen/-20s/Max.Sinken oben längst haben (siehe
   // buildAltitudeGlitchPrefix/PLAUSIBLE_MAX_VARIO_MS weiter oben in dieser
@@ -884,7 +922,7 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   // Flug keine entsprechende Sequenz enthält.
   const { spirale, wingover } = analyzeSpiralWingover(track);
   return { maxAlt, minAlt, startAlt, endAlt, startPt, endPt, durationSec, durationStr, startTime, endTime,
-    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm, maxSpeedKmh,
+    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, maxClimbBaro, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm, maxSpeedKmh,
     spiraleMaxSinken: spirale ? spirale.maxSink : null,
     spiraleSinkenSchnitt: spirale ? spirale.avgSink : null,
     spiraleAnzahlKreise: spirale ? spirale.count : null,
@@ -5275,6 +5313,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
             <StaticField label="Dauer"       value={fl.durationStr} />
             <StaticField label="H.Diff."     value={fl.customFields?.hDiff} unit="m" />
             <InlineField label="Ø Speed"     value={fl.customFields?.kmh}           onSave={v=>saveField({customFields:{kmh:v}})} unit="km/h" />
+            <InlineField label="Max.Steigen Druckdifferenz" value={fmt1(fl.customFields?.maxSteigenBaro)} onSave={v=>saveField({customFields:{maxSteigenBaro:v}})} unit="m/s" />
             <InlineField label="Max.Steigen" value={fmt1(fl.customFields?.maxSteigen)}    onSave={v=>saveField({customFields:{maxSteigen:v}})} unit="m/s" />
             <InlineField label="Max.Steigen 20s" value={fmt1(fl.customFields?.maxSteigen20)} onSave={v=>saveField({customFields:{maxSteigen20:v}})} unit="m/s" />
             <InlineField label="Max.Sinken"  value={fmt1(fl.customFields?.maxSinken)}     onSave={v=>saveField({customFields:{maxSinken:v}})} unit="m/s" />
@@ -6195,6 +6234,53 @@ function FlugbuchApp() {
     try { await window.storage.set("customFieldDefs", JSON.stringify(defs)); } catch {}
   }, []);
 
+  // ── TEMP: Max.Steigen Druckdifferenz für bereits importierte Flüge
+  // nachrechnen ─────────────────────────────────────────────────────────
+  // "Max.Steigen Druckdifferenz" (siehe computeClimbSinkStats/hasBaroAlt
+  // weiter oben) wird nur beim (Re-)Import aus der IGC-Datei gesetzt
+  // (attachIgcToFlight/processIGCFiles) — Flüge, die schon vor Einführung
+  // dieses Felds importiert wurden, haben es noch nicht. Diese Funktion holt
+  // für jeden Flug mit gespeicherter Original-IGC-Datei (loadRawIgcFile,
+  // siehe oben) diese erneut, berechnet NUR maxSteigenBaro daraus und
+  // schreibt es in customFields — alle anderen Felder des Flugs bleiben
+  // unangetastet. Rein für den einmaligen Nachtrag gedacht (Knopf im
+  // Import-Panel unten): nach dem einmaligen Ausführen können Funktion und
+  // Knopf wieder entfernt werden, analog zur früheren, mittlerweile bereits
+  // wieder entfernten Nachrechnen-Funktion für Spirale/Wingover (siehe
+  // Kommentar bei analyzeSpiralWingover weiter oben).
+  const [backfillBaroRunning, setBackfillBaroRunning] = useState(false);
+  const [backfillBaroResult, setBackfillBaroResult] = useState(null);
+  const backfillMaxSteigenBaro = useCallback(async () => {
+    setBackfillBaroRunning(true);
+    setBackfillBaroResult(null);
+    let updated = 0, skippedNoIgc = 0, skippedNoBaro = 0, failed = 0;
+    const updatedFlights = [];
+    for (const fl of flights) {
+      if (!fl.track || fl.track.length < 2) continue;
+      try {
+        const raw = await loadRawIgcFile(fl.id);
+        if (!raw) { skippedNoIgc++; continue; }
+        const text = await new Blob([raw]).text();
+        const { track } = parseIGC(text);
+        if (!track.length || !hasBaroAlt(track)) { skippedNoBaro++; continue; }
+        const { maxClimbBaro } = computeClimbSinkStats(track);
+        const newVal = maxClimbBaro != null ? String(maxClimbBaro) : "";
+        if ((fl.customFields?.maxSteigenBaro || "") === newVal) continue;
+        const upd = { ...fl, customFields: { ...(fl.customFields||{}), maxSteigenBaro: newVal } };
+        const res = await saveFlight(upd);
+        if (res.ok) { updatedFlights.push(upd); updated++; } else failed++;
+      } catch (e) {
+        console.error("Max.Steigen Druckdifferenz nachrechnen fehlgeschlagen für Flug", fl.id, e);
+        failed++;
+      }
+    }
+    if (updatedFlights.length) {
+      setFlights(prev => prev.map(f => updatedFlights.find(u => u.id === f.id) || f));
+    }
+    setBackfillBaroResult({ updated, skippedNoIgc, skippedNoBaro, failed });
+    setBackfillBaroRunning(false);
+  }, [flights, saveFlight]);
+
   const doImport = useCallback(async (igcFiles) => {
     if (!igcFiles.length) return;
     setImporting(true); setImportProgress({done:0,total:igcFiles.length});
@@ -6329,6 +6415,10 @@ function FlugbuchApp() {
     cf.maxSteigen = String(igcData.maxClimb);
     cf.maxSteigen20 = String(igcData.maxClimb20);
     cf.maxSinken = String(igcData.maxSinkRate);
+    // Max.Steigen Druckdifferenz: gleiche Regel wie Max.Steigen/-20s/
+    // Max.Sinken oben — immer neu gesetzt, leer statt "0" wenn der Logger
+    // keine Druckhöhe aufgezeichnet hat (siehe hasBaroAlt).
+    cf.maxSteigenBaro = igcData.maxClimbBaro != null ? String(igcData.maxClimbBaro) : "";
     // Spirale/Wingover: gleiche Regel wie Max.Steigen/-20s/Max.Sinken oben
     // — immer aus dem gerade eingelesenen Track neu gesetzt. Leerer String
     // (statt "0"), wenn der Flug keine entsprechende Sequenz enthält, damit
@@ -6483,6 +6573,7 @@ function FlugbuchApp() {
               maxSteigen: igcData.maxClimb ? String(igcData.maxClimb) : "",
               maxSteigen20: igcData.maxClimb20 ? String(igcData.maxClimb20) : "",
               maxSinken: igcData.maxSinkRate ? String(igcData.maxSinkRate) : "",
+              maxSteigenBaro: igcData.maxClimbBaro != null ? String(igcData.maxClimbBaro) : "",
               spiraleMaxSinken: igcData.spiraleMaxSinken != null ? String(igcData.spiraleMaxSinken) : "",
               spiraleSinkenSchnitt: igcData.spiraleSinkenSchnitt != null ? String(igcData.spiraleSinkenSchnitt) : "",
               spiraleAnzahlKreise: igcData.spiraleAnzahlKreise != null ? String(igcData.spiraleAnzahlKreise) : "",
@@ -6996,6 +7087,27 @@ function FlugbuchApp() {
           <button onClick={clearIgcDir} style={{background:"none",border:"none",color:"rgba(248,113,113,0.6)",fontSize:11,cursor:"pointer"}}>ändern</button>
         </div>
       )}
+      {/* TEMP — einmaliger Nachtrag von "Max.Steigen Druckdifferenz" für
+          bereits importierte Flüge, siehe backfillMaxSteigenBaro oben. Nach
+          einmaligem Ausführen kann dieser Block wieder entfernt werden. */}
+      {showImportMenu && (
+        <div style={{margin:"4px 16px 0",fontSize:11,color:"rgba(232,244,253,0.4)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+          <span>🔧 Max.Steigen Druckdiff. für bestehende Flüge nachrechnen (temp)</span>
+          <button onClick={backfillMaxSteigenBaro} disabled={backfillBaroRunning}
+            style={{background:"none",border:"none",color:backfillBaroRunning?"rgba(232,244,253,0.3)":"rgba(96,165,250,0.7)",fontSize:11,cursor:backfillBaroRunning?"default":"pointer",whiteSpace:"nowrap"}}>
+            {backfillBaroRunning ? "⏳ läuft…" : "starten"}
+          </button>
+        </div>
+      )}
+      {backfillBaroResult && (
+        <div style={{margin:"4px 16px 0",background:"rgba(96,165,250,0.1)",border:"1px solid rgba(96,165,250,0.3)",borderRadius:10,padding:"8px 12px",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <span style={{fontSize:12,color:"#60a5fa"}}>
+            ✅ {backfillBaroResult.updated} aktualisiert · {backfillBaroResult.skippedNoIgc} ohne gespeicherte IGC-Datei · {backfillBaroResult.skippedNoBaro} ohne Druckhöhe im Logger
+            {backfillBaroResult.failed > 0 ? ` · ${backfillBaroResult.failed} fehlgeschlagen` : ""}
+          </span>
+          <button onClick={()=>setBackfillBaroResult(null)} style={{background:"none",border:"none",color:"rgba(96,165,250,0.5)",cursor:"pointer",fontSize:16}}>✕</button>
+        </div>
+      )}
 
       {showCsvColumnConfig && (
         <CsvColumnConfigModal columns={csvColumns} onSave={saveCsvColumns} onClose={()=>setShowCsvColumnConfig(false)} />
@@ -7057,6 +7169,7 @@ function FlugbuchApp() {
                 maxSteigen: item.igcData.maxClimb ? String(item.igcData.maxClimb) : "",
                 maxSteigen20: item.igcData.maxClimb20 ? String(item.igcData.maxClimb20) : "",
                 maxSinken: item.igcData.maxSinkRate ? String(item.igcData.maxSinkRate) : "",
+                maxSteigenBaro: item.igcData.maxClimbBaro != null ? String(item.igcData.maxClimbBaro) : "",
                 spiraleMaxSinken: item.igcData.spiraleMaxSinken != null ? String(item.igcData.spiraleMaxSinken) : "",
                 spiraleSinkenSchnitt: item.igcData.spiraleSinkenSchnitt != null ? String(item.igcData.spiraleSinkenSchnitt) : "",
                 spiraleAnzahlKreise: item.igcData.spiraleAnzahlKreise != null ? String(item.igcData.spiraleAnzahlKreise) : "",
