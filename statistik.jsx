@@ -602,10 +602,158 @@ async function fetchPistachioTrips(accessToken, calendars, pistachioLabelId) {
   return trips;
 }
 
+// Flugreisekosten aus der Schwester-App "Budget" (gleicher Origin, deren
+// localStorage-State "budgetprojektion.state.v2"): Buchungen der
+// Unterkategorie "Flugreisen" werden hier — bei jedem Rendern neu — den
+// Kalender-Reisen zugeordnet:
+//  - Buchungsdatum innerhalb genau einer Reise → automatisch dieser Reise
+//  - im Puffer (COST_BUFFER_DAYS davor/danach, z.B. früher gebuchtes Hotel
+//    oder Flug), in mehreren Reisen zugleich oder ausserhalb → offen, im
+//    Zuordnungsdialog entscheidet der Nutzer (Reise wählen und/oder
+//    Buchungsdatum ändern)
+// Nur diese manuellen Entscheidungen werden gespeichert
+// (reiseanalyse:kostenZuordnung = { buchungsId: reiseId | "keine" }); das
+// Buchungsdatum wird bei Änderung ins Budget zurückgeschrieben.
+const BUDGET_STATE_KEY = "budgetprojektion.state.v2";
+const BUDGET_META_KEY = "budgetprojektion.backupmeta.v1";
+const COST_BUFFER_DAYS = 10;
+const NO_TRIP = "keine";
+
+function readBudgetState() {
+  try {
+    const raw = localStorage.getItem(BUDGET_STATE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+function isoToUTC(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  return Date.UTC(y, m - 1, d);
+}
+// Zuordnung einer Buchung zu den Reisen (siehe Kommentar oben).
+function classifyBooking(datum, trips) {
+  const t = isoToUTC(datum);
+  const inside = trips.filter(tr => t >= tripStartUTC(tr) && t < tripEndExclusiveUTC(tr));
+  if (inside.length === 1) return { status: "innen", trip: inside[0] };
+  if (inside.length > 1) return { status: "mehrdeutig" };
+  const buf = COST_BUFFER_DAYS * DAY_MS;
+  const near = trips.filter(tr => t >= tripStartUTC(tr) - buf && t < tripEndExclusiveUTC(tr) + buf);
+  if (near.length === 1) return { status: "puffer", trip: near[0] };
+  if (near.length > 1) return { status: "mehrdeutig" };
+  return { status: "ausserhalb" };
+}
+// Kosten je Reise (Summe Ausgaben; Erstattungen mindern sie) + offene
+// Buchungen. manual = gespeicherte Entscheidungen des Nutzers.
+function computeFlightCosts(trips, manual) {
+  const empty = { available: false, byTrip: new Map(), open: [] };
+  const st = readBudgetState();
+  if (!st) return empty;
+  const unter = (st.unterkategorien || []).filter(u => u.name === "Flugreisen").map(u => u.id);
+  const byTrip = new Map(), open = [];
+  const add = (tripId, b) => byTrip.set(tripId, (byTrip.get(tripId) || 0) - (b.betragChf || 0));
+  for (const b of st.realTransaktionen || []) {
+    if (!unter.includes(b.unterkategorieId) || !b.datum) continue;
+    const m = manual[b.id];
+    if (m === NO_TRIP) continue;
+    if (m && trips.some(tr => tr.id === m)) { add(m, b); continue; }
+    const k = classifyBooking(b.datum, trips);
+    if (k.status === "innen") add(k.trip.id, b);
+    else open.push({ b, k });
+  }
+  open.sort((x, y) => x.b.datum.localeCompare(y.b.datum));
+  return { available: true, byTrip, open };
+}
+// Schreibt ein geändertes Buchungsdatum in die Buchung der Budget-App
+// zurück (Originaldatum bleibt in datumOriginal) und markiert deren Backup
+// als geändert. Das Budget übernimmt die Änderung per "storage"-Event.
+function writeBookingDate(id, datum) {
+  try {
+    const st = readBudgetState();
+    const b = st && (st.realTransaktionen || []).find(t => t.id === id);
+    if (!b) return false;
+    if (!b.datumOriginal) b.datumOriginal = b.datum;
+    b.datum = datum;
+    localStorage.setItem(BUDGET_STATE_KEY, JSON.stringify(st));
+    try {
+      const meta = JSON.parse(localStorage.getItem(BUDGET_META_KEY) || "{}");
+      meta.dirty = true;
+      localStorage.setItem(BUDGET_META_KEY, JSON.stringify(meta));
+    } catch {}
+    return true;
+  } catch { return false; }
+}
+function formatChf(v) {
+  return new Intl.NumberFormat("de-CH", { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(Math.round(v));
+}
+function formatIsoDe(iso) {
+  const [y, m, d] = iso.split("-");
+  return `${d}.${m}.${y}`;
+}
+// Abstand einer Buchung zu einer Reise in Tagen (0 = innerhalb).
+function dayDistance(datum, trip) {
+  const t = isoToUTC(datum), s = tripStartUTC(trip), e = tripEndExclusiveUTC(trip);
+  if (t < s) return Math.round((s - t) / DAY_MS);
+  if (t >= e) return Math.round((t - e) / DAY_MS) + 1;
+  return 0;
+}
+
+function CostAssignRow({ item, trips, onSave }) {
+  const { b, k } = item;
+  const [datum, setDatum] = React.useState(b.datum);
+  const [tripId, setTripId] = React.useState(k.status === "puffer" ? k.trip.id : "");
+  const sorted = React.useMemo(
+    () => [...trips].sort((x, y) => dayDistance(b.datum, x) - dayDistance(b.datum, y)),
+    [trips, b.datum]
+  );
+  const hint = k.status === "puffer"
+    ? `${dayDistance(b.datum, k.trip)} Tage ${isoToUTC(b.datum) < tripStartUTC(k.trip) ? "vor" : "nach"} «${k.trip.title}»`
+    : k.status === "mehrdeutig" ? "passt zu mehreren Reisen" : "keiner Reise zuordenbar";
+  const field = { background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "7px 8px", color: "#e8f4fd", fontSize: 13, colorScheme: "dark" };
+  return (
+    <div style={{ padding: "10px 4px", borderBottom: "1px solid rgba(255,255,255,0.08)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name || "(ohne Bezeichnung)"}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: b.betragChf < 0 ? "#f87171" : "#4ade80", flexShrink: 0 }}>{formatChf(b.betragChf)}</div>
+      </div>
+      <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginBottom: 6 }}>{hint}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
+        <input type="date" value={datum} onChange={e => setDatum(e.target.value)} style={field} />
+        <select value={tripId} onChange={e => setTripId(e.target.value)} style={{ ...field, flex: 1, minWidth: 140 }}>
+          <option value="">– Reise wählen –</option>
+          {sorted.map(tr => <option key={tr.id} value={tr.id}>{tr.title} ({formatTripRange(tr.startDate, tr.endDate)})</option>)}
+          <option value={NO_TRIP}>Keine Reisekosten</option>
+        </select>
+        <button onClick={() => onSave(b, datum, tripId)} disabled={!datum}
+          style={{ background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 8, padding: "7px 12px", color: "#7dd3fc", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+          Übernehmen
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function CostAssignModal({ open, trips, onSave, onClose }) {
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 520, maxHeight: "85vh", overflowY: "auto", background: "#0f1f33", borderTop: "1px solid rgba(255,255,255,0.12)", borderRadius: "16px 16px 0 0", padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>✈ Flugreisekosten zuordnen ({open.length} offen)</div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginBottom: 8 }}>
+          Buchungen der Unterkategorie „Flugreisen“ ausserhalb einer Reise (Puffer: {COST_BUFFER_DAYS} Tage davor/danach). Eine Datumsänderung wird in die Buchung im Budget übernommen.
+        </div>
+        {open.length === 0 && <div style={{ padding: "20px 0", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.5)" }}>Alle Flugreisekosten sind zugeordnet. ✓</div>}
+        {open.map(item => <CostAssignRow key={item.b.id + item.b.datum} item={item} trips={trips} onSave={onSave} />)}
+      </div>
+    </div>
+  );
+}
+
 // Jahres-Pivot: Reisetage + Flugminuten je Jahr (ab REISEANALYSE_START_YEAR,
 // plus jedes weitere Jahr, in das eine Reise tatsächlich hineinreicht) und
 // je Jahr die Liste der einzelnen Reisen für den Drilldown.
-function computeReiseanalysePivot(trips, flights) {
+function computeReiseanalysePivot(trips, flights, costs) {
   const parsedFlights = flights
     .map(f => ({ f, dateUTC: parseFlightDateUTC(f) }))
     .filter(x => x.dateUTC !== null);
@@ -629,27 +777,32 @@ function computeReiseanalysePivot(trips, flights) {
       const minutes = parsedFlights
         .filter(x => x.dateUTC >= start && x.dateUTC < endEx && new Date(x.dateUTC).getUTCFullYear() === year)
         .reduce((acc, x) => acc + (x.f.durationSec || 0) / 60, 0);
-      tripRows.push({ id: t.id, title: t.title, days, minutes, startDate: t.startDate, endDate: t.endDate });
+      // Kosten einer Reise zählen komplett im Startjahr der Reise (auch wenn
+      // sie über den Jahreswechsel geht bzw. Buchungen in einem anderen Jahr
+      // liegen), damit sie nicht doppelt erscheinen.
+      const cost = t.startDate.slice(0, 4) === String(year) ? (costs.byTrip.get(t.id) || 0) : 0;
+      tripRows.push({ id: t.id, title: t.title, days, minutes, cost, startDate: t.startDate, endDate: t.endDate });
     }
     tripRows.sort((a, b) => a.startDate.localeCompare(b.startDate));
     return {
       year,
       days: tripRows.reduce((acc, r) => acc + r.days, 0),
       minutes: tripRows.reduce((acc, r) => acc + r.minutes, 0),
+      cost: tripRows.reduce((acc, r) => acc + r.cost, 0),
       trips: tripRows,
     };
   });
-  const total = rows.reduce((acc, r) => ({ days: acc.days + r.days, minutes: acc.minutes + r.minutes }), { days: 0, minutes: 0 });
+  const total = rows.reduce((acc, r) => ({ days: acc.days + r.days, minutes: acc.minutes + r.minutes, cost: acc.cost + r.cost }), { days: 0, minutes: 0, cost: 0 });
   return { rows, total };
 }
 
 function ReiseanalysePivotTable({ pivot, onOpenYear }) {
-  const cols = "minmax(0,0.8fr) minmax(0,1fr) minmax(0,1.1fr)";
+  const cols = "minmax(0,0.7fr) minmax(0,0.9fr) minmax(0,1fr) minmax(0,1.1fr)";
   const cellStyle = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
   return (
     <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden" }}>
       <div style={{ display: "grid", gridTemplateColumns: cols, background: STICKY_BG_HEADER, borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-        {["Jahr", "Reisetage", "Flugminuten"].map((h, i) => (
+        {["Jahr", "Reisetage", "Flugminuten", "Flugkosten"].map((h, i) => (
           <div key={h} style={{ ...cellStyle, padding: "8px 10px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
         ))}
       </div>
@@ -662,6 +815,7 @@ function ReiseanalysePivotTable({ pivot, onOpenYear }) {
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 700, color: "#7dd3fc" }}>{r.year}{r.trips.length ? " ›" : ""}</div>
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, textAlign: "right", color: r.days ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{r.days || "·"}</div>
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, textAlign: "right", color: r.minutes ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{r.minutes ? formatMinutes(r.minutes) : "·"}</div>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, textAlign: "right", color: r.cost ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{r.cost ? formatChf(r.cost) : "·"}</div>
         </div>
       ))}
       {pivot.rows.length > 0 && (
@@ -669,6 +823,7 @@ function ReiseanalysePivotTable({ pivot, onOpenYear }) {
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800 }}>Gesamt</div>
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes)}</div>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{pivot.total.cost ? formatChf(pivot.total.cost) : "·"}</div>
         </div>
       )}
     </div>
@@ -693,6 +848,7 @@ function ReiseDrilldownModal({ row, onClose }) {
             <div style={{ flexShrink: 0, textAlign: "right" }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{t.days} {t.days === 1 ? "Tag" : "Tage"}</div>
               <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>{t.minutes ? formatMinutes(t.minutes) : "0h 00m"}</div>
+              {t.cost ? <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>CHF {formatChf(t.cost)}</div> : null}
             </div>
           </div>
         ))}
@@ -711,16 +867,21 @@ function ReiseanalyseSection({ flights }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
   const [openYear, setOpenYear] = React.useState(null);
+  const [manual, setManual] = React.useState({}); // Buchungs-ID -> Reise-ID | "keine"
+  const [budgetTick, setBudgetTick] = React.useState(0);
+  const [assignOpen, setAssignOpen] = React.useState(false);
 
   React.useEffect(() => {
     (async () => {
       try {
-        const [ci, cal, lbl, cache] = await Promise.all([
+        const [ci, cal, lbl, cache, zu] = await Promise.all([
           window.storage.get("settings:googleClientId"),
           window.storage.get("settings:googleCalendarId"),
           window.storage.get("settings:googlePistachioLabelId"),
           window.storage.get("reiseanalyse:tripsCache"),
+          window.storage.get("reiseanalyse:kostenZuordnung"),
         ]);
+        try { if (zu?.value) setManual(JSON.parse(zu.value) || {}); } catch {}
         if (ci?.value) setClientId(ci.value);
         if (cal?.value) setCalendarId(cal.value);
         if (lbl?.value) setPistachioLabelId(lbl.value);
@@ -775,7 +936,23 @@ function ReiseanalyseSection({ flights }) {
     }
   };
 
-  const pivot = React.useMemo(() => computeReiseanalysePivot(trips, flights), [trips, flights]);
+  // Bei jedem Rendern/Sync neu aus dem Budget gelesen und zugeordnet
+  // ("on the fly"); budgetTick erzwingt das nach einer Datumsänderung.
+  const costs = React.useMemo(() => computeFlightCosts(trips, manual), [trips, manual, budgetTick]);
+  const pivot = React.useMemo(() => computeReiseanalysePivot(trips, flights, costs), [trips, flights, costs]);
+
+  const assign = async (b, datum, tripId) => {
+    if (datum !== b.datum && !writeBookingDate(b.id, datum)) {
+      setError("Das Buchungsdatum konnte im Budget nicht geändert werden.");
+      return;
+    }
+    if (tripId) {
+      const next = { ...manual, [b.id]: tripId };
+      setManual(next);
+      try { await window.storage.set("reiseanalyse:kostenZuordnung", JSON.stringify(next)); } catch {}
+    }
+    setBudgetTick(t => t + 1);
+  };
   const openRow = pivot.rows.find(r => r.year === openYear) || null;
 
   if (!settingsLoaded) {
@@ -800,7 +977,13 @@ function ReiseanalyseSection({ flights }) {
           {error}
         </div>
       )}
+      {costs.available && costs.open.length > 0 && (
+        <div onClick={() => setAssignOpen(true)} style={{ cursor: "pointer", background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#fbbf24", marginBottom: 12 }}>
+          ✈ {costs.open.length} Flugreise-{costs.open.length === 1 ? "Buchung ist" : "Buchungen sind"} keiner Reise eindeutig zugeordnet — tippen zum Zuordnen ›
+        </div>
+      )}
       <ReiseanalysePivotTable pivot={pivot} onOpenYear={setOpenYear} />
+      {assignOpen && <CostAssignModal open={costs.open} trips={trips} onSave={assign} onClose={() => setAssignOpen(false)} />}
       {openRow && <ReiseDrilldownModal row={openRow} onClose={() => setOpenYear(null)} />}
     </div>
   );

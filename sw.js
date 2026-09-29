@@ -8,7 +8,7 @@
 // CACHE_VERSION hochzählen, sonst wird die Änderung nicht ausgerollt, da
 // alte Service-Worker-Installationen sonst ihren alten Cache "STATIC_CACHE"
 // unverändert weiterverwenden.
-const CACHE_VERSION = "v4";
+const CACHE_VERSION = "v5";
 const CACHE_NAME = "flugbuch-cache-" + CACHE_VERSION;
 
 // Strategie für die eigenen Dateien (index.html, flugbuch.html, .jsx, ...):
