@@ -701,13 +701,17 @@ function dayDistance(datum, trip) {
   return 0;
 }
 
-function CostAssignRow({ item, trips, onSave }) {
+// TEMPORÄR (einmalige Zusatzfunktion): Reisen, die bereits eine Buchung
+// „Fly with Andy“ haben, werden in der Reise-Auswahl ausgeblendet.
+const isFlyWithAndy = b => /fly\s*with\s*andy/i.test(b.name || "");
+function CostAssignRow({ item, trips, onSave, bookingsByTrip }) {
   const { b, k } = item;
   const [datum, setDatum] = React.useState(b.datum);
   const [tripId, setTripId] = React.useState(k.status === "puffer" ? k.trip.id : "");
   const sorted = React.useMemo(
-    () => [...trips].sort((x, y) => dayDistance(b.datum, x) - dayDistance(b.datum, y)),
-    [trips, b.datum]
+    () => trips.filter(tr => !(bookingsByTrip.get(tr.id) || []).some(isFlyWithAndy))
+      .sort((x, y) => dayDistance(b.datum, x) - dayDistance(b.datum, y)),
+    [trips, b.datum, bookingsByTrip]
   );
   const hint = k.status === "puffer"
     ? `${dayDistance(b.datum, k.trip)} Tage ${isoToUTC(b.datum) < tripStartUTC(k.trip) ? "vor" : "nach"} «${k.trip.title}»`
@@ -736,7 +740,7 @@ function CostAssignRow({ item, trips, onSave }) {
   );
 }
 
-function CostAssignModal({ open, trips, onSave, onClose }) {
+function CostAssignModal({ open, trips, bookingsByTrip, onSave, onClose }) {
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div onClick={e => e.stopPropagation()}
@@ -749,7 +753,7 @@ function CostAssignModal({ open, trips, onSave, onClose }) {
           Buchungen der Unterkategorie „Flugreisen“ ausserhalb einer Reise (Puffer: {COST_BUFFER_DAYS} Tage davor/danach). Eine Datumsänderung wird in die Buchung im Budget übernommen.
         </div>
         {open.length === 0 && <div style={{ padding: "20px 0", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.5)" }}>Alle Flugreisekosten sind zugeordnet. ✓</div>}
-        {open.map(item => <CostAssignRow key={item.b.id + item.b.datum} item={item} trips={trips} onSave={onSave} />)}
+        {open.map(item => <CostAssignRow key={item.b.id + item.b.datum} item={item} trips={trips} bookingsByTrip={bookingsByTrip} onSave={onSave} />)}
       </div>
     </div>
   );
@@ -1007,7 +1011,7 @@ function ReiseanalyseSection({ flights }) {
         </div>
       )}
       <ReiseanalysePivotTable pivot={pivot} onOpenYear={setOpenYear} />
-      {assignOpen && <CostAssignModal open={costs.open} trips={trips} onSave={assign} onClose={() => setAssignOpen(false)} />}
+      {assignOpen && <CostAssignModal open={costs.open} trips={trips} bookingsByTrip={costs.bookingsByTrip} onSave={assign} onClose={() => setAssignOpen(false)} />}
       {openRow && <ReiseDrilldownModal row={openRow} onClose={() => setOpenYear(null)} />}
     </div>
   );
