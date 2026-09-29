@@ -644,12 +644,16 @@ function classifyBooking(datum, trips) {
 // Kosten je Reise (Summe Ausgaben; Erstattungen mindern sie) + offene
 // Buchungen. manual = gespeicherte Entscheidungen des Nutzers.
 function computeFlightCosts(trips, manual) {
-  const empty = { available: false, byTrip: new Map(), open: [] };
+  const empty = { available: false, byTrip: new Map(), bookingsByTrip: new Map(), open: [] };
   const st = readBudgetState();
   if (!st) return empty;
   const unter = (st.unterkategorien || []).filter(u => u.name === "Flugreisen").map(u => u.id);
-  const byTrip = new Map(), open = [];
-  const add = (tripId, b) => byTrip.set(tripId, (byTrip.get(tripId) || 0) - (b.betragChf || 0));
+  const byTrip = new Map(), open = [], bookingsByTrip = new Map();
+  const add = (tripId, b) => {
+    byTrip.set(tripId, (byTrip.get(tripId) || 0) - (b.betragChf || 0));
+    if (!bookingsByTrip.has(tripId)) bookingsByTrip.set(tripId, []);
+    bookingsByTrip.get(tripId).push(b);
+  };
   for (const b of st.realTransaktionen || []) {
     if (!unter.includes(b.unterkategorieId) || !b.datum) continue;
     const m = manual[b.id];
@@ -660,7 +664,8 @@ function computeFlightCosts(trips, manual) {
     else open.push({ b, k });
   }
   open.sort((x, y) => x.b.datum.localeCompare(y.b.datum));
-  return { available: true, byTrip, open };
+  bookingsByTrip.forEach(list => list.sort((x, y) => x.datum.localeCompare(y.datum)));
+  return { available: true, byTrip, bookingsByTrip, open };
 }
 // Schreibt ein geändertes Buchungsdatum in die Buchung der Budget-App
 // zurück (Originaldatum bleibt in datumOriginal) und markiert deren Backup
@@ -781,7 +786,7 @@ function computeReiseanalysePivot(trips, flights, costs) {
       // sie über den Jahreswechsel geht bzw. Buchungen in einem anderen Jahr
       // liegen), damit sie nicht doppelt erscheinen.
       const cost = t.startDate.slice(0, 4) === String(year) ? (costs.byTrip.get(t.id) || 0) : 0;
-      tripRows.push({ id: t.id, title: t.title, days, minutes, cost, startDate: t.startDate, endDate: t.endDate });
+      tripRows.push({ id: t.id, title: t.title, days, minutes, cost, bookings: costs.bookingsByTrip.get(t.id) || [], startDate: t.startDate, endDate: t.endDate });
     }
     tripRows.sort((a, b) => a.startDate.localeCompare(b.startDate));
     return {
@@ -831,6 +836,7 @@ function ReiseanalysePivotTable({ pivot, onOpenYear }) {
 }
 
 function ReiseDrilldownModal({ row, onClose }) {
+  const [expanded, setExpanded] = React.useState(null); // Reise-ID mit aufgeklappten Buchungen
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div onClick={e => e.stopPropagation()}
@@ -840,16 +846,34 @@ function ReiseDrilldownModal({ row, onClose }) {
           <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
         </div>
         {row.trips.map((t, i) => (
-          <div key={t.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 4px", borderBottom: i < row.trips.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none" }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</div>
-              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)" }}>{formatTripRange(t.startDate, t.endDate)}</div>
+          <div key={t.id} style={{ borderBottom: i < row.trips.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none" }}>
+            <div onClick={() => t.bookings.length && setExpanded(expanded === t.id ? null : t.id)}
+              style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 4px", cursor: t.bookings.length ? "pointer" : "default" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}{t.bookings.length ? (expanded === t.id ? " ▾" : " ▸") : ""}</div>
+                <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)" }}>{formatTripRange(t.startDate, t.endDate)}</div>
+              </div>
+              <div style={{ flexShrink: 0, textAlign: "right" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{t.days} {t.days === 1 ? "Tag" : "Tage"}</div>
+                <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>{t.minutes ? formatMinutes(t.minutes) : "0h 00m"}</div>
+                {t.cost ? <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>CHF {formatChf(t.cost)}</div> : null}
+              </div>
             </div>
-            <div style={{ flexShrink: 0, textAlign: "right" }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{t.days} {t.days === 1 ? "Tag" : "Tage"}</div>
-              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>{t.minutes ? formatMinutes(t.minutes) : "0h 00m"}</div>
-              {t.cost ? <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>CHF {formatChf(t.cost)}</div> : null}
-            </div>
+            {expanded === t.id && (
+              <div style={{ margin: "0 4px 8px", padding: "6px 8px", background: "rgba(255,255,255,0.04)", borderRadius: 8 }}>
+                {t.bookings.map(b => (
+                  <div key={b.id} style={{ display: "flex", gap: 8, padding: "3px 0", fontSize: 12 }}>
+                    <div style={{ flexShrink: 0, color: "rgba(232,244,253,0.5)" }}>{formatIsoDe(b.datum)}</div>
+                    <div style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name || "(ohne Bezeichnung)"}</div>
+                    <div style={{ flexShrink: 0, fontWeight: 600, color: b.betragChf < 0 ? "#f87171" : "#4ade80" }}>{formatChf(b.betragChf)}</div>
+                  </div>
+                ))}
+                <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, paddingTop: 4, borderTop: "1px solid rgba(255,255,255,0.08)", fontSize: 12, fontWeight: 700 }}>
+                  <span>Total ({t.bookings.length} {t.bookings.length === 1 ? "Buchung" : "Buchungen"})</span>
+                  <span>CHF {formatChf(t.bookings.reduce((a, x) => a - (x.betragChf || 0), 0))}</span>
+                </div>
+              </div>
+            )}
           </div>
         ))}
       </div>
