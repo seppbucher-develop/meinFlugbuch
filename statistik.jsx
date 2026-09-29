@@ -602,10 +602,41 @@ async function fetchPistachioTrips(accessToken, calendars, pistachioLabelId) {
   return trips;
 }
 
+// Flugreisekosten aus der Schwester-App "Budget" (gleicher Origin, deren
+// localStorage-State "budgetprojektion.state.v2"): Buchungen der
+// Unterkategorie "Flugreisen" tragen dort nach der Zuordnung im Budget
+// ("✈ Flugreisen zuordnen…") eine reiseId, die der id der Kalender-Reise
+// entspricht. Kosten = Summe der Ausgaben (Erstattungen mindern sie);
+// "keine" = bewusst keiner Reise zugeordnet, ohne reiseId = noch offen.
+function loadBudgetFlightCosts() {
+  const empty = { available: false, byTrip: new Map(), open: 0 };
+  try {
+    const raw = localStorage.getItem("budgetprojektion.state.v2");
+    if (!raw) return empty;
+    const st = JSON.parse(raw);
+    const unter = (st.unterkategorien || []).filter(u => u.name === "Flugreisen").map(u => u.id);
+    if (!unter.length) return { ...empty, available: true };
+    const byTrip = new Map();
+    let open = 0;
+    for (const t of st.realTransaktionen || []) {
+      if (!unter.includes(t.unterkategorieId)) continue;
+      if (!t.reiseId) { open++; continue; }
+      if (t.reiseId === "keine") continue;
+      byTrip.set(t.reiseId, (byTrip.get(t.reiseId) || 0) - (t.betragChf || 0));
+    }
+    return { available: true, byTrip, open };
+  } catch {
+    return empty;
+  }
+}
+function formatChf(v) {
+  return new Intl.NumberFormat("de-CH", { minimumFractionDigits: 0, maximumFractionDigits: 0 }).format(Math.round(v));
+}
+
 // Jahres-Pivot: Reisetage + Flugminuten je Jahr (ab REISEANALYSE_START_YEAR,
 // plus jedes weitere Jahr, in das eine Reise tatsächlich hineinreicht) und
 // je Jahr die Liste der einzelnen Reisen für den Drilldown.
-function computeReiseanalysePivot(trips, flights) {
+function computeReiseanalysePivot(trips, flights, costs) {
   const parsedFlights = flights
     .map(f => ({ f, dateUTC: parseFlightDateUTC(f) }))
     .filter(x => x.dateUTC !== null);
@@ -629,27 +660,32 @@ function computeReiseanalysePivot(trips, flights) {
       const minutes = parsedFlights
         .filter(x => x.dateUTC >= start && x.dateUTC < endEx && new Date(x.dateUTC).getUTCFullYear() === year)
         .reduce((acc, x) => acc + (x.f.durationSec || 0) / 60, 0);
-      tripRows.push({ id: t.id, title: t.title, days, minutes, startDate: t.startDate, endDate: t.endDate });
+      // Kosten einer Reise zählen komplett im Startjahr der Reise (auch wenn
+      // sie über den Jahreswechsel geht bzw. Buchungen in einem anderen Jahr
+      // liegen), damit sie nicht doppelt erscheinen.
+      const cost = t.startDate.slice(0, 4) === String(year) ? (costs.byTrip.get(t.id) || 0) : 0;
+      tripRows.push({ id: t.id, title: t.title, days, minutes, cost, startDate: t.startDate, endDate: t.endDate });
     }
     tripRows.sort((a, b) => a.startDate.localeCompare(b.startDate));
     return {
       year,
       days: tripRows.reduce((acc, r) => acc + r.days, 0),
       minutes: tripRows.reduce((acc, r) => acc + r.minutes, 0),
+      cost: tripRows.reduce((acc, r) => acc + r.cost, 0),
       trips: tripRows,
     };
   });
-  const total = rows.reduce((acc, r) => ({ days: acc.days + r.days, minutes: acc.minutes + r.minutes }), { days: 0, minutes: 0 });
+  const total = rows.reduce((acc, r) => ({ days: acc.days + r.days, minutes: acc.minutes + r.minutes, cost: acc.cost + r.cost }), { days: 0, minutes: 0, cost: 0 });
   return { rows, total };
 }
 
 function ReiseanalysePivotTable({ pivot, onOpenYear }) {
-  const cols = "minmax(0,0.8fr) minmax(0,1fr) minmax(0,1.1fr)";
+  const cols = "minmax(0,0.7fr) minmax(0,0.9fr) minmax(0,1fr) minmax(0,1.1fr)";
   const cellStyle = { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" };
   return (
     <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, overflow: "hidden" }}>
       <div style={{ display: "grid", gridTemplateColumns: cols, background: STICKY_BG_HEADER, borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
-        {["Jahr", "Reisetage", "Flugminuten"].map((h, i) => (
+        {["Jahr", "Reisetage", "Flugminuten", "Flugkosten"].map((h, i) => (
           <div key={h} style={{ ...cellStyle, padding: "8px 10px", fontSize: 11, fontWeight: 700, color: "rgba(232,244,253,0.6)", textTransform: "uppercase", letterSpacing: 0.5, textAlign: i === 0 ? "left" : "right" }}>{h}</div>
         ))}
       </div>
@@ -662,6 +698,7 @@ function ReiseanalysePivotTable({ pivot, onOpenYear }) {
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 700, color: "#7dd3fc" }}>{r.year}{r.trips.length ? " ›" : ""}</div>
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, textAlign: "right", color: r.days ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{r.days || "·"}</div>
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, textAlign: "right", color: r.minutes ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{r.minutes ? formatMinutes(r.minutes) : "·"}</div>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, textAlign: "right", color: r.cost ? "#e8f4fd" : "rgba(232,244,253,0.25)" }}>{r.cost ? formatChf(r.cost) : "·"}</div>
         </div>
       ))}
       {pivot.rows.length > 0 && (
@@ -669,6 +706,7 @@ function ReiseanalysePivotTable({ pivot, onOpenYear }) {
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800 }}>Gesamt</div>
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800, textAlign: "right" }}>{pivot.total.days}</div>
           <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{formatMinutes(pivot.total.minutes)}</div>
+          <div style={{ ...cellStyle, padding: "9px 10px", fontSize: 14, fontWeight: 800, textAlign: "right", color: "#7dd3fc" }}>{pivot.total.cost ? formatChf(pivot.total.cost) : "·"}</div>
         </div>
       )}
     </div>
@@ -693,6 +731,7 @@ function ReiseDrilldownModal({ row, onClose }) {
             <div style={{ flexShrink: 0, textAlign: "right" }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#7dd3fc" }}>{t.days} {t.days === 1 ? "Tag" : "Tage"}</div>
               <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>{t.minutes ? formatMinutes(t.minutes) : "0h 00m"}</div>
+              {t.cost ? <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)" }}>CHF {formatChf(t.cost)}</div> : null}
             </div>
           </div>
         ))}
@@ -775,7 +814,10 @@ function ReiseanalyseSection({ flights }) {
     }
   };
 
-  const pivot = React.useMemo(() => computeReiseanalysePivot(trips, flights), [trips, flights]);
+  // Beim Rendern neu gelesen (billig), damit eine Zuordnung im Budget nach
+  // Rückkehr auf diese Seite sofort sichtbar ist.
+  const costs = React.useMemo(() => loadBudgetFlightCosts(), [trips, flights]);
+  const pivot = React.useMemo(() => computeReiseanalysePivot(trips, flights, costs), [trips, flights, costs]);
   const openRow = pivot.rows.find(r => r.year === openYear) || null;
 
   if (!settingsLoaded) {
@@ -798,6 +840,11 @@ function ReiseanalyseSection({ flights }) {
       {error && (
         <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#f87171", marginBottom: 12 }}>
           {error}
+        </div>
+      )}
+      {costs.available && costs.open > 0 && (
+        <div style={{ background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#fbbf24", marginBottom: 12 }}>
+          {costs.open} Flugreise-{costs.open === 1 ? "Buchung ist" : "Buchungen sind"} im Budget noch keiner Reise zugeordnet — dort unter Einnahmen/Ausgaben „✈ Flugreisen zuordnen…“ öffnen.
         </div>
       )}
       <ReiseanalysePivotTable pivot={pivot} onOpenYear={setOpenYear} />
