@@ -740,7 +740,47 @@ function CostAssignRow({ item, trips, onSave, bookingsByTrip }) {
   );
 }
 
+// TEMPORÄR: Buchungen (links) und Reisen ohne «Fly with Andy»-Buchung
+// (rechts) nebeneinander. Buchung antippen, dann Reise antippen = zuordnen.
+function AndyCompareView({ open, trips, bookingsByTrip, onSave }) {
+  const [sel, setSel] = React.useState(null);
+  const selB = open.find(it => it.b.id === sel)?.b || null;
+  const free = trips.filter(tr => !(bookingsByTrip.get(tr.id) || []).some(isFlyWithAndy))
+    .sort((x, y) => selB ? dayDistance(selB.datum, x) - dayDistance(selB.datum, y) : x.startDate.localeCompare(y.startDate));
+  const card = on => ({ padding: "7px 8px", marginBottom: 6, borderRadius: 8, cursor: "pointer", fontSize: 12,
+    background: on ? "rgba(125,211,252,0.18)" : "rgba(255,255,255,0.06)", border: "1px solid " + (on ? "rgba(125,211,252,0.5)" : "rgba(255,255,255,0.1)") });
+  const sub = { fontSize: 11, color: "rgba(232,244,253,0.5)" };
+  return (
+    <div>
+      <div style={{ ...sub, marginBottom: 8 }}>Buchung links antippen, dann die passende Reise rechts antippen (sortiert nach Abstand zur Buchung).</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6 }}>Buchungen ({open.length})</div>
+          {open.map(({ b }) => (
+            <div key={b.id} onClick={() => setSel(b.id === sel ? null : b.id)} style={card(b.id === sel)}>
+              <div style={{ fontWeight: 700 }}>{formatIsoDe(b.datum)}</div>
+              <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name || "(ohne Bezeichnung)"}</div>
+              <div style={{ color: b.betragChf < 0 ? "#f87171" : "#4ade80", fontWeight: 700 }}>CHF {formatChf(b.betragChf)}</div>
+            </div>
+          ))}
+        </div>
+        <div>
+          <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6 }}>Reisen ohne Buchung ({free.length})</div>
+          {free.map(tr => (
+            <div key={tr.id} onClick={() => selB && onSave(selB, selB.datum, tr.id).then(() => setSel(null))} style={{ ...card(false), opacity: selB ? 1 : 0.7 }}>
+              <div style={{ fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tr.title}</div>
+              <div style={sub}>{formatTripRange(tr.startDate, tr.endDate)}</div>
+              {selB && <div style={sub}>{dayDistance(selB.datum, tr) === 0 ? "Buchung innerhalb" : dayDistance(selB.datum, tr) + " Tage Abstand"}</div>}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CostAssignModal({ open, trips, bookingsByTrip, onSave, onClose }) {
+  const [compare, setCompare] = React.useState(false);
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       <div onClick={e => e.stopPropagation()}
@@ -752,8 +792,12 @@ function CostAssignModal({ open, trips, bookingsByTrip, onSave, onClose }) {
         <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginBottom: 8 }}>
           Buchungen der Unterkategorie „Flugreisen“ ausserhalb einer Reise (Puffer: {COST_BUFFER_DAYS} Tage davor/danach). Eine Datumsänderung wird in die Buchung im Budget übernommen.
         </div>
-        {open.length === 0 && <div style={{ padding: "20px 0", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.5)" }}>Alle Flugreisekosten sind zugeordnet. ✓</div>}
-        {open.map(item => <CostAssignRow key={item.b.id + item.b.datum} item={item} trips={trips} bookingsByTrip={bookingsByTrip} onSave={onSave} />)}
+        <button onClick={() => setCompare(c => !c)} style={{ background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 8, padding: "6px 10px", color: "#7dd3fc", fontSize: 12, fontWeight: 700, cursor: "pointer", marginBottom: 8 }}>
+          {compare ? "‹ Zurück zur Liste" : "⇄ Buchungen ↔ Reisen (temporär)"}
+        </button>
+        {compare && <AndyCompareView open={open} trips={trips} bookingsByTrip={bookingsByTrip} onSave={onSave} />}
+        {!compare && open.length === 0 && <div style={{ padding: "20px 0", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.5)" }}>Alle Flugreisekosten sind zugeordnet. ✓</div>}
+        {!compare && open.map(item => <CostAssignRow key={item.b.id + item.b.datum} item={item} trips={trips} bookingsByTrip={bookingsByTrip} onSave={onSave} />)}
       </div>
     </div>
   );
