@@ -853,6 +853,129 @@ function AssignListModal({ all, trips, onSave, onClose }) {
   );
 }
 
+// TEMPORÄR / EINMALIG: Fly-with-Andy-Rechnungen (aus den Mails im Label «Reisen»)
+// zum Prüfen der Kostenzuordnung. kind: "R" Rechnung, "G" Gutschrift/Storno.
+// alt = weiterer möglicher Buchungsbetrag (z.B. vor Korrektur).
+const FWA_INVOICES = [
+  { nr: 716, kind: "R", datum: "2024-03-13", trip: "Expedition Baltikum 1", von: "2024-06-13", bis: "2024-06-22", text: "Einzelzimmer", total: 2595 },
+  { nr: 753, kind: "R", datum: "2024-03-04", trip: "Roadtrip Malaga-Lissabon", von: "2024-05-29", bis: "2024-06-07", text: "Einzelzimmer / inkl. Anreise", total: 2435 },
+  { nr: 713, kind: "R", datum: "2024-01-22", trip: "Napoli bis Rom", von: "2024-04-13", bis: "2024-04-21", text: "Doppelzimmer / eigene Anreise", total: 1490 },
+  { nr: 1193, kind: "R", datum: "2024-07-02", trip: "Südfrankreich", von: "2024-09-28", bis: "2024-10-05", text: "Einzelzimmer / inkl. Anreise", total: 1905 },
+  { nr: 1855, kind: "R", datum: "2024-07-03", trip: "Südfrankreich 2", von: "2024-10-06", bis: "2024-10-13", text: "Doppelzimmer / inkl. Anreise", total: 1670 },
+  { nr: 2165, kind: "R", datum: "2024-09-28", trip: "Pampa Tour Weihnachten / Neujahr", von: "2024-12-21", bis: "2025-01-04", text: "Einzelzimmer", total: 3400 },
+  { nr: 1800, kind: "R", datum: "2024-10-23", trip: "Pampa Tour", von: "2025-01-05", bis: "2025-01-18", text: "Einzelzimmer", total: 3490 },
+  { nr: 1938, kind: "R", datum: "2025-01-10", trip: "Bologna-Rom", von: "2025-03-27", bis: "2025-04-03", text: "Einzelzimmer", total: 1890 },
+  { nr: 1984, kind: "R", datum: "2025-01-11", trip: "Rom-Napoli", von: "2025-04-03", bis: "2025-04-10", text: "Einzelzimmer / eigene Anreise + Flug 83", total: 1933 },
+  { nr: 1924, kind: "R", datum: "2025-03-10", trip: "Expedition Baltikum 1", von: "2025-06-12", bis: "2025-06-21", text: "Einzelzimmer, korrigiert mit Gutschein -685", total: 1910, alt: 2595 },
+  { nr: 1926, kind: "R", datum: "2025-06-30", trip: "Trainingscamp Abruzzen 1", von: "2025-10-04", bis: "2025-10-11", text: "Einzelzimmer / Anreise mit Bus (später storniert/angepasst)", total: 1725, alt: 215.63 },
+  { nr: 1927, kind: "R", datum: "2025-06-30", trip: "Trainingscamp Abruzzen 2", von: "2025-10-11", bis: "2025-10-18", text: "Einzelzimmer (später storniert/angepasst)", total: 1725 },
+  { nr: "Annullierung", kind: "G", datum: "2025-10-13", trip: "Abruzzen 1+2 2025", von: "2025-10-04", bis: "2025-10-18", text: "Annullierungsrechnung (nur PDF, Betrag nicht lesbar; Abruzzen 1 evtl. 215.63, total 1940.63)", total: null, alt: 1940.63 },
+  { nr: 3568, kind: "R", datum: "2025-08-26", trip: "Pyrenäen", von: "2025-08-30", bis: "2025-09-06", text: "Einzelzimmer / inkl. Anreise", total: 2300 },
+  { nr: 3569, kind: "R", datum: "2025-08-26", trip: "Nord-/ Zentralspanien", von: "2025-09-06", bis: "2025-09-13", text: "Einzelzimmer / eigene Anreise", total: 1805 },
+  { nr: 3842, kind: "R", datum: "2025-10-30", trip: "Roadtrip Malaga-Alicante Neujahr", von: "2025-12-26", bis: "2026-01-03", text: "Einzelzimmer / eigene Anreise", total: 2050 },
+  { nr: 1921, kind: "R", datum: "2025-11-21", trip: "Espirito Santo", von: "2026-02-28", bis: "2026-03-14", text: "Einzelzimmer", total: 3050 },
+  { nr: 3161, kind: "R", datum: "2026-01-12", trip: "Sizilien-Rom", von: "2026-04-09", bis: "2026-04-17", text: "Einzelzimmer / eigene Anreise", total: 2130 },
+  { nr: 3162, kind: "R", datum: "2026-01-16", trip: "Rom-Mailand", von: "2026-04-17", bis: "2026-04-25", text: "Einzelzimmer", total: 2160 },
+  { nr: 4195, kind: "R", datum: "2026-02-08", trip: "Thermik Camp Südalpen", von: "2026-02-14", bis: "2026-02-21", text: "Einzelzimmer / inkl. Anreise mit Bus", total: 2000 },
+  { nr: 3163, kind: "R", datum: "2026-02-20", trip: "Dreiländertour Kärnten, Friaul, Slowenien", von: "2026-05-30", bis: "2026-06-06", text: "Einzelzimmer", total: 2110 },
+  { nr: 3164, kind: "R", datum: "2026-03-04", trip: "Expedition Baltikum 1", von: "2026-06-11", bis: "2026-06-20", text: "Einzelzimmer", total: 2700 },
+  { nr: 3165, kind: "R", datum: "2026-07-01", trip: "Südfrankreich 1", von: "2026-10-03", bis: "2026-10-10", text: "Einzelzimmer / inkl. Anreise", total: 2040 },
+  { nr: 4821, kind: "R", datum: "2026-08-24", trip: "Nord-/ Zentralspanien", von: "2026-09-05", bis: "2026-09-12", text: "Einzelzimmer / eigene Anreise", total: 1810 },
+];
+
+function overlapDays(aFrom, aTo, bFrom, bTo) {
+  const s = Math.max(isoToUTC(aFrom), isoToUTC(bFrom)), e = Math.min(isoToUTC(aTo), isoToUTC(bTo));
+  return e >= s ? Math.round((e - s) / DAY_MS) + 1 : 0;
+}
+
+function InvoiceRow({ inv, all, trips, onSave }) {
+  const amountOk = r => [inv.total, inv.alt].some(a => a != null && Math.abs(Math.abs(r.b.betragChf || 0) - a) < 0.6);
+  const bookings = React.useMemo(() => {
+    const iso = isoToUTC(inv.datum);
+    return [...all].sort((x, y) => {
+      const ax = amountOk(x) ? 0 : 1, ay = amountOk(y) ? 0 : 1;
+      if (ax !== ay) return ax - ay;
+      const dx = Math.abs(isoToUTC(x.b.datum) - iso), dy = Math.abs(isoToUTC(y.b.datum) - iso);
+      return dx - dy;
+    });
+  }, [all, inv]);
+  const tripsSorted = React.useMemo(() => {
+    const sc = t => overlapDays(inv.von, inv.bis, t.startDate, t.endDate);
+    return [...trips].sort((x, y) => sc(y) - sc(x) || Math.abs(isoToUTC(x.startDate) - isoToUTC(inv.von)) - Math.abs(isoToUTC(y.startDate) - isoToUTC(inv.von)));
+  }, [trips, inv]);
+  const bestTrip = tripsSorted[0] && overlapDays(inv.von, inv.bis, tripsSorted[0].startDate, tripsSorted[0].endDate) > 0 ? tripsSorted[0].id : "";
+  const best = bookings[0] && amountOk(bookings[0]) ? bookings[0] : null;
+  const [bid, setBid] = React.useState(best ? best.b.id : "");
+  const [tid, setTid] = React.useState(bestTrip);
+  const row = all.find(r => r.b.id === bid);
+  const done = row && row.status === "manuell" && row.tripId === tid && row.ok;
+  const field = { background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 8px", color: "#e8f4fd", fontSize: 12, colorScheme: "dark", width: "100%", boxSizing: "border-box", marginTop: 4 };
+  const cur = row && (row.tripId ? (trips.find(t => t.id === row.tripId)?.title || "?") : "–");
+  return (
+    <div style={{ padding: "10px 4px", borderBottom: "1px solid rgba(255,255,255,0.08)", opacity: done ? 0.55 : 1 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>{inv.kind === "G" ? "Gutschrift" : "Rechnung"} {inv.nr} · {inv.trip}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, flexShrink: 0 }}>{inv.total != null ? formatChf(inv.total) : "?"}</div>
+      </div>
+      <div style={{ fontSize: 11, color: "rgba(232,244,253,0.55)" }}>
+        Reise {formatTripRange(inv.von, inv.bis)} · Rechnung vom {formatIsoDe(inv.datum)} · {inv.text}
+      </div>
+      <select value={bid} onChange={e => setBid(e.target.value)} style={field}>
+        <option value="">– Buchung wählen –</option>
+        {bookings.map(r => <option key={r.b.id} value={r.b.id}>{amountOk(r) ? "✓ " : ""}{formatIsoDe(r.b.datum)} · {formatChf(r.b.betragChf)} · {r.b.name || "(ohne Bezeichnung)"}</option>)}
+      </select>
+      <select value={tid} onChange={e => setTid(e.target.value)} style={field}>
+        <option value="">– Reise wählen –</option>
+        {tripsSorted.map(t => <option key={t.id} value={t.id}>{overlapDays(inv.von, inv.bis, t.startDate, t.endDate) ? "✓ " : ""}{t.title} ({formatTripRange(t.startDate, t.endDate)})</option>)}
+      </select>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6, gap: 8 }}>
+        <div style={{ fontSize: 11, color: done ? "#4ade80" : "rgba(232,244,253,0.5)" }}>
+          {done ? "✓ zugeordnet und geprüft" : row ? `Aktuell: ${STATUS_LABEL[row.status]}${row.status !== "offen" && row.status !== "keine" ? " · " + cur : ""}${row.ok ? " · geprüft" : ""}` : (best ? "" : "keine Buchung mit passendem Betrag")}
+        </div>
+        <button disabled={!row || !tid || done} onClick={() => onSave(row.b, { datum: row.b.datum, tripId: tid, ok: true })}
+          style={{ background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 8, padding: "6px 12px", color: "#7dd3fc", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: !row || !tid || done ? 0.4 : 1 }}>
+          Zuordnen &amp; prüfen
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// TEMPORÄR: Korrekturdialog Rechnungen ↔ Buchungen ↔ Reisen.
+function InvoiceCheckModal({ all, trips, onSave, onClose }) {
+  const [onlyOpen, setOnlyOpen] = React.useState(false);
+  const [year, setYear] = React.useState("alle");
+  const years = [...new Set(FWA_INVOICES.map(i => i.von.slice(0, 4)))].sort();
+  const list = FWA_INVOICES.filter(i => (year === "alle" || i.von.slice(0, 4) === year))
+    .filter(i => !onlyOpen || !all.some(r => r.status === "manuell" && r.ok && r.b.datum >= i.datum && [i.total, i.alt].some(a => a != null && Math.abs(Math.abs(r.b.betragChf || 0) - a) < 0.6) && trips.some(t => t.id === r.tripId && overlapDays(i.von, i.bis, t.startDate, t.endDate) > 0)))
+    .sort((a, b) => a.von.localeCompare(b.von));
+  const field = { background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 8px", color: "#e8f4fd", fontSize: 12, colorScheme: "dark" };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 640, maxHeight: "90vh", overflowY: "auto", background: "#0f1f33", borderTop: "1px solid rgba(255,255,255,0.12)", borderRadius: "16px 16px 0 0", padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>🧾 Rechnungen prüfen (temporär)</div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
+        </div>
+        <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginBottom: 8 }}>
+          Fly-with-Andy-Rechnungen aus den Mails. Vorschlag: Buchung mit gleichem Betrag (✓) und Reise mit überlappendem Zeitraum (✓). «Zuordnen &amp; prüfen» speichert die Zuordnung und setzt «geprüft».
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+          <select value={year} onChange={e => setYear(e.target.value)} style={field}>
+            <option value="alle">Alle Reisejahre</option>
+            {years.map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+            <input type="checkbox" checked={onlyOpen} onChange={e => setOnlyOpen(e.target.checked)} /> nur ungeprüfte
+          </label>
+        </div>
+        {list.map(inv => <InvoiceRow key={inv.nr + inv.von} inv={inv} all={all} trips={trips} onSave={onSave} />)}
+      </div>
+    </div>
+  );
+}
+
 function CostAssignRow({ item, trips, onSave }) {
   const { b, k } = item;
   const [datum, setDatum] = React.useState(b.datum);
@@ -1047,6 +1170,7 @@ function ReiseanalyseSection({ flights }) {
   const [budgetTick, setBudgetTick] = React.useState(0);
   const [assignOpen, setAssignOpen] = React.useState(false);
   const [listOpen, setListOpen] = React.useState(false);
+  const [invOpen, setInvOpen] = React.useState(false); // TEMPORÄR
 
   React.useEffect(() => {
     (async () => {
@@ -1170,8 +1294,14 @@ function ReiseanalyseSection({ flights }) {
           📋 Zuordnungsliste ({costs.all.filter(r => r.ok).length}/{costs.all.length} geprüft) ›
         </div>
       )}
+      {costs.available && costs.all.length > 0 && (
+        <div onClick={() => setInvOpen(true)} style={{ cursor: "pointer", background: "rgba(167,139,250,0.1)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#c4b5fd", marginBottom: 12 }}>
+          🧾 Rechnungen prüfen (temporär) ›
+        </div>
+      )}
       <ReiseanalysePivotTable pivot={pivot} onOpenYear={setOpenYear} />
       {assignOpen && <CostAssignModal open={costs.open} trips={trips} onSave={assign} onClose={() => setAssignOpen(false)} />}
+      {invOpen && <InvoiceCheckModal all={costs.all} trips={trips} onSave={saveAssign} onClose={() => setInvOpen(false)} />}
       {listOpen && <AssignListModal all={costs.all} trips={trips} onSave={saveAssign} onClose={() => setListOpen(false)} />}
       {openRow && <ReiseDrilldownModal row={openRow} onClose={() => setOpenYear(null)} />}
     </div>
