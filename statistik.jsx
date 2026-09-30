@@ -612,8 +612,10 @@ async function fetchPistachioTrips(accessToken, calendars, pistachioLabelId) {
 //    Zuordnungsdialog entscheidet der Nutzer (Reise wählen und/oder
 //    Buchungsdatum ändern)
 // Nur diese manuellen Entscheidungen werden gespeichert
-// (reiseanalyse:kostenZuordnung = { buchungsId: reiseId | "keine" }); das
-// Buchungsdatum wird bei Änderung ins Budget zurückgeschrieben.
+// (reiseanalyse:kostenZuordnung = { buchungsId: { trip?: reiseId | "keine",
+// ok?: true } }; "trip" fehlt = automatische Zuordnung nach Datum, "ok" =
+// als geprüft markiert; ältere Einträge sind nur der String reiseId | "keine");
+// das Buchungsdatum wird bei Änderung ins Budget zurückgeschrieben.
 const BUDGET_STATE_KEY = "budgetprojektion.state.v2";
 const BUDGET_META_KEY = "budgetprojektion.backupmeta.v1";
 const COST_BUFFER_DAYS = 10;
@@ -643,12 +645,17 @@ function classifyBooking(datum, trips) {
 }
 // Kosten je Reise (Summe Ausgaben; Erstattungen mindern sie) + offene
 // Buchungen. manual = gespeicherte Entscheidungen des Nutzers.
+function normAssign(v) {
+  if (!v) return {};
+  if (typeof v === "string") return { trip: v };
+  return v;
+}
 function computeFlightCosts(trips, manual) {
-  const empty = { available: false, byTrip: new Map(), bookingsByTrip: new Map(), open: [] };
+  const empty = { available: false, byTrip: new Map(), bookingsByTrip: new Map(), open: [], all: [] };
   const st = readBudgetState();
   if (!st) return empty;
   const unter = (st.unterkategorien || []).filter(u => u.name === "Flugreisen").map(u => u.id);
-  const byTrip = new Map(), open = [], bookingsByTrip = new Map();
+  const byTrip = new Map(), open = [], bookingsByTrip = new Map(), all = [];
   const add = (tripId, b) => {
     byTrip.set(tripId, (byTrip.get(tripId) || 0) - (b.betragChf || 0));
     if (!bookingsByTrip.has(tripId)) bookingsByTrip.set(tripId, []);
@@ -656,16 +663,17 @@ function computeFlightCosts(trips, manual) {
   };
   for (const b of st.realTransaktionen || []) {
     if (!unter.includes(b.unterkategorieId) || !b.datum) continue;
-    const m = manual[b.id];
-    if (m === NO_TRIP) continue;
-    if (m && trips.some(tr => tr.id === m)) { add(m, b); continue; }
+    const m = normAssign(manual[b.id]);
+    const ok = !!m.ok;
+    if (m.trip === NO_TRIP) { all.push({ b, tripId: null, status: "keine", ok }); continue; }
+    if (m.trip && trips.some(tr => tr.id === m.trip)) { add(m.trip, b); all.push({ b, tripId: m.trip, status: "manuell", ok }); continue; }
     const k = classifyBooking(b.datum, trips);
-    if (k.status === "innen") add(k.trip.id, b);
-    else open.push({ b, k });
+    if (k.status === "innen") { add(k.trip.id, b); all.push({ b, tripId: k.trip.id, status: "automatisch", ok }); }
+    else { open.push({ b, k }); all.push({ b, tripId: null, status: "offen", ok }); }
   }
   open.sort((x, y) => x.b.datum.localeCompare(y.b.datum));
   bookingsByTrip.forEach(list => list.sort((x, y) => x.datum.localeCompare(y.datum)));
-  return { available: true, byTrip, bookingsByTrip, open };
+  return { available: true, byTrip, bookingsByTrip, open, all };
 }
 // Schreibt ein geändertes Buchungsdatum in die Buchung der Budget-App
 // zurück (Originaldatum bleibt in datumOriginal) und markiert deren Backup
@@ -699,6 +707,150 @@ function dayDistance(datum, trip) {
   if (t < s) return Math.round((s - t) / DAY_MS);
   if (t >= e) return Math.round((t - e) / DAY_MS) + 1;
   return 0;
+}
+
+const STATUS_LABEL = { offen: "Offen", manuell: "Manuell", automatisch: "Automatisch", keine: "Keine Reisekosten" };
+const STATUS_COLOR = { offen: "#fbbf24", manuell: "#7dd3fc", automatisch: "#4ade80", keine: "rgba(232,244,253,0.5)" };
+
+// Bearbeitungsdialog einer einzelnen Zuordnung (Klick auf eine Zeile der Liste).
+function AssignEditModal({ row, trips, onSave, onClose }) {
+  const { b } = row;
+  const cur = row.status === "manuell" ? row.tripId : row.status === "keine" ? NO_TRIP : "";
+  const [datum, setDatum] = React.useState(b.datum);
+  const [tripId, setTripId] = React.useState(cur);
+  const [ok, setOk] = React.useState(row.ok);
+  const sorted = React.useMemo(
+    () => [...trips].sort((x, y) => dayDistance(datum, x) - dayDistance(datum, y)),
+    [trips, datum]
+  );
+  const field = { background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "8px 10px", color: "#e8f4fd", fontSize: 13, colorScheme: "dark", width: "100%", boxSizing: "border-box" };
+  const lbl = { fontSize: 11, color: "rgba(232,244,253,0.5)", margin: "10px 0 4px" };
+  const btn = primary => ({ background: primary ? "rgba(125,211,252,0.2)" : "rgba(255,255,255,0.08)", border: "1px solid " + (primary ? "rgba(125,211,252,0.4)" : "rgba(255,255,255,0.15)"), borderRadius: 8, padding: "8px 14px", color: primary ? "#7dd3fc" : "#e8f4fd", fontSize: 12, fontWeight: 700, cursor: "pointer" });
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 110, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 520, maxHeight: "85vh", overflowY: "auto", background: "#0f1f33", borderTop: "1px solid rgba(255,255,255,0.12)", borderRadius: "16px 16px 0 0", padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>Zuordnung bearbeiten</div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
+        </div>
+        <div style={{ marginTop: 8, fontSize: 13, fontWeight: 700 }}>{b.name || "(ohne Bezeichnung)"}</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: b.betragChf < 0 ? "#f87171" : "#4ade80" }}>CHF {formatChf(b.betragChf)}</div>
+        <div style={lbl}>Buchungsdatum{datum !== b.datum ? ` (Original im Budget: ${formatIsoDe(b.datum)})` : ""}</div>
+        <input type="date" value={datum} onChange={e => setDatum(e.target.value)} style={field} />
+        <div style={lbl}>Reise</div>
+        <select value={tripId} onChange={e => setTripId(e.target.value)} style={field}>
+          <option value="">Automatisch (nach Buchungsdatum)</option>
+          {sorted.map(tr => <option key={tr.id} value={tr.id}>{tr.title} ({formatTripRange(tr.startDate, tr.endDate)})</option>)}
+          <option value={NO_TRIP}>Keine Reisekosten</option>
+        </select>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, margin: "14px 0", fontSize: 13, cursor: "pointer" }}>
+          <input type="checkbox" checked={ok} onChange={e => setOk(e.target.checked)} style={{ width: 18, height: 18 }} /> Geprüft
+        </label>
+        <div style={{ display: "flex", gap: 8, justifyContent: "space-between", flexWrap: "wrap" }}>
+          <button onClick={() => { onSave(b, { datum: b.datum, tripId: "", ok: false }); onClose(); }} style={btn(false)}>Zurücksetzen</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onClose} style={btn(false)}>Abbrechen</button>
+            <button onClick={() => { onSave(b, { datum, tripId, ok }); onClose(); }} disabled={!datum} style={btn(true)}>Speichern</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Liste aller Flugreise-Buchungen mit ihrer Zuordnung, Filter und Sortierung.
+function AssignListModal({ all, trips, onSave, onClose }) {
+  const [status, setStatus] = React.useState("alle");
+  const [checked, setChecked] = React.useState("alle");
+  const [year, setYear] = React.useState("alle");
+  const [q, setQ] = React.useState("");
+  const [sortBy, setSortBy] = React.useState("datum");
+  const [desc, setDesc] = React.useState(true);
+  const [edit, setEdit] = React.useState(null); // Buchungs-ID
+  const tripOf = id => trips.find(t => t.id === id);
+  const years = [...new Set(all.map(r => r.b.datum.slice(0, 4)))].sort().reverse();
+  const shown = all.filter(r => {
+    if (status !== "alle" && r.status !== status) return false;
+    if (checked === "ja" && !r.ok) return false;
+    if (checked === "nein" && r.ok) return false;
+    if (year !== "alle" && r.b.datum.slice(0, 4) !== year) return false;
+    if (q.trim()) {
+      const hay = ((r.b.name || "") + " " + (tripOf(r.tripId)?.title || "")).toLowerCase();
+      if (!hay.includes(q.trim().toLowerCase())) return false;
+    }
+    return true;
+  });
+  const key = r => sortBy === "betrag" ? r.b.betragChf || 0
+    : sortBy === "reise" ? (tripOf(r.tripId)?.title || "\uffff").toLowerCase()
+    : sortBy === "status" ? r.status
+    : sortBy === "geprueft" ? (r.ok ? 1 : 0)
+    : r.b.datum;
+  shown.sort((x, y) => {
+    const a = key(x), b = key(y);
+    const c = a < b ? -1 : a > b ? 1 : x.b.datum.localeCompare(y.b.datum);
+    return desc ? -c : c;
+  });
+  const editRow = edit && all.find(r => r.b.id === edit);
+  const field = { background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 8px", color: "#e8f4fd", fontSize: 12, colorScheme: "dark" };
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ width: "100%", maxWidth: 640, maxHeight: "90vh", overflowY: "auto", background: "#0f1f33", borderTop: "1px solid rgba(255,255,255,0.12)", borderRadius: "16px 16px 0 0", padding: "16px 16px calc(16px + env(safe-area-inset-bottom, 0px))" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ fontSize: 15, fontWeight: 800 }}>✈ Zuordnungen ({shown.length}/{all.length})</div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, width: 28, height: 28, color: "#e8f4fd", fontSize: 15, cursor: "pointer" }}>✕</button>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+          <input value={q} onChange={e => setQ(e.target.value)} placeholder="Suche…" style={{ ...field, flex: 1, minWidth: 100 }} />
+          <select value={status} onChange={e => setStatus(e.target.value)} style={field}>
+            <option value="alle">Alle Status</option>
+            {Object.keys(STATUS_LABEL).map(k => <option key={k} value={k}>{STATUS_LABEL[k]}</option>)}
+          </select>
+          <select value={checked} onChange={e => setChecked(e.target.value)} style={field}>
+            <option value="alle">Geprüft: alle</option>
+            <option value="ja">Geprüft</option>
+            <option value="nein">Nicht geprüft</option>
+          </select>
+          <select value={year} onChange={e => setYear(e.target.value)} style={field}>
+            <option value="alle">Alle Jahre</option>
+            {years.map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
+          <select value={sortBy} onChange={e => setSortBy(e.target.value)} style={field}>
+            <option value="datum">Sortieren: Datum</option>
+            <option value="betrag">Sortieren: Betrag</option>
+            <option value="reise">Sortieren: Reise</option>
+            <option value="status">Sortieren: Status</option>
+            <option value="geprueft">Sortieren: Geprüft</option>
+          </select>
+          <button onClick={() => setDesc(d => !d)} title="Sortierrichtung" style={{ ...field, cursor: "pointer" }}>{desc ? "↓" : "↑"}</button>
+        </div>
+        {shown.length === 0 && <div style={{ padding: "20px 0", textAlign: "center", fontSize: 13, color: "rgba(232,244,253,0.5)" }}>Keine Zuordnungen für diesen Filter.</div>}
+        {shown.map(r => {
+          const tr = tripOf(r.tripId);
+          return (
+            <div key={r.b.id} onClick={() => setEdit(r.b.id)}
+              style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 4px", borderBottom: "1px solid rgba(255,255,255,0.08)", cursor: "pointer" }}>
+              <input type="checkbox" checked={r.ok} title="Geprüft"
+                onClick={e => e.stopPropagation()} onChange={e => onSave(r.b, { datum: r.b.datum, tripId: r.status === "manuell" ? r.tripId : r.status === "keine" ? NO_TRIP : "", ok: e.target.checked })}
+                style={{ width: 18, height: 18, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{formatIsoDe(r.b.datum)} · {r.b.name || "(ohne Bezeichnung)"}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, flexShrink: 0, color: r.b.betragChf < 0 ? "#f87171" : "#4ade80" }}>{formatChf(r.b.betragChf)}</div>
+                </div>
+                <div style={{ fontSize: 11, color: "rgba(232,244,253,0.55)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  <span style={{ color: STATUS_COLOR[r.status], fontWeight: 700 }}>{STATUS_LABEL[r.status]}</span>
+                  {tr ? ` · ${tr.title} (${formatTripRange(tr.startDate, tr.endDate)})` : ""}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {editRow && <AssignEditModal key={editRow.b.id + editRow.b.datum} row={editRow} trips={trips} onSave={onSave} onClose={() => setEdit(null)} />}
+    </div>
+  );
 }
 
 function CostAssignRow({ item, trips, onSave }) {
@@ -894,6 +1046,7 @@ function ReiseanalyseSection({ flights }) {
   const [manual, setManual] = React.useState({}); // Buchungs-ID -> Reise-ID | "keine"
   const [budgetTick, setBudgetTick] = React.useState(0);
   const [assignOpen, setAssignOpen] = React.useState(false);
+  const [listOpen, setListOpen] = React.useState(false);
 
   React.useEffect(() => {
     (async () => {
@@ -965,18 +1118,24 @@ function ReiseanalyseSection({ flights }) {
   const costs = React.useMemo(() => computeFlightCosts(trips, manual), [trips, manual, budgetTick]);
   const pivot = React.useMemo(() => computeReiseanalysePivot(trips, flights, costs), [trips, flights, costs]);
 
-  const assign = async (b, datum, tripId) => {
+  // ok undefined = bisherigen Geprüft-Status behalten; tripId "" = automatisch.
+  const saveAssign = async (b, { datum, tripId, ok }) => {
     if (datum !== b.datum && !writeBookingDate(b.id, datum)) {
       setError("Das Buchungsdatum konnte im Budget nicht geändert werden.");
       return;
     }
-    if (tripId) {
-      const next = { ...manual, [b.id]: tripId };
-      setManual(next);
-      try { await window.storage.set("reiseanalyse:kostenZuordnung", JSON.stringify(next)); } catch {}
-    }
+    const old = normAssign(manual[b.id]);
+    const entry = {};
+    const trip = tripId === undefined ? old.trip : tripId;
+    if (trip) entry.trip = trip;
+    if (ok === undefined ? old.ok : ok) entry.ok = true;
+    const next = { ...manual };
+    if (entry.trip || entry.ok) next[b.id] = entry; else delete next[b.id];
+    setManual(next);
+    try { await window.storage.set("reiseanalyse:kostenZuordnung", JSON.stringify(next)); } catch {}
     setBudgetTick(t => t + 1);
   };
+  const assign = (b, datum, tripId) => saveAssign(b, { datum, tripId: tripId || undefined });
   const openRow = pivot.rows.find(r => r.year === openYear) || null;
 
   if (!settingsLoaded) {
@@ -1006,8 +1165,14 @@ function ReiseanalyseSection({ flights }) {
           ✈ {costs.open.length} Flugreise-{costs.open.length === 1 ? "Buchung ist" : "Buchungen sind"} keiner Reise eindeutig zugeordnet — tippen zum Zuordnen ›
         </div>
       )}
+      {costs.available && costs.all.length > 0 && (
+        <div onClick={() => setListOpen(true)} style={{ cursor: "pointer", background: "rgba(125,211,252,0.08)", border: "1px solid rgba(125,211,252,0.25)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#7dd3fc", marginBottom: 12 }}>
+          📋 Zuordnungsliste ({costs.all.filter(r => r.ok).length}/{costs.all.length} geprüft) ›
+        </div>
+      )}
       <ReiseanalysePivotTable pivot={pivot} onOpenYear={setOpenYear} />
       {assignOpen && <CostAssignModal open={costs.open} trips={trips} onSave={assign} onClose={() => setAssignOpen(false)} />}
+      {listOpen && <AssignListModal all={costs.all} trips={trips} onSave={saveAssign} onClose={() => setListOpen(false)} />}
       {openRow && <ReiseDrilldownModal row={openRow} onClose={() => setOpenYear(null)} />}
     </div>
   );
