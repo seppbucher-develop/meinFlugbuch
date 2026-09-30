@@ -613,8 +613,9 @@ async function fetchPistachioTrips(accessToken, calendars, pistachioLabelId) {
 //    Buchungsdatum ändern)
 // Nur diese manuellen Entscheidungen werden gespeichert
 // (reiseanalyse:kostenZuordnung = { buchungsId: { trip?: reiseId | "keine",
-// ok?: true } }; "trip" fehlt = automatische Zuordnung nach Datum, "ok" =
-// als geprüft markiert; ältere Einträge sind nur der String reiseId | "keine");
+// ok?: true, split?: [{ inv, trip, chf }] } }; "trip" fehlt = automatische
+// Zuordnung nach Datum, "ok" = als geprüft markiert, "split" = Buchung auf
+// mehrere Reisen aufgeteilt (z.B. eine Zahlung für zwei Rechnungen); ältere Einträge sind nur der String reiseId | "keine");
 // das Buchungsdatum wird bei Änderung ins Budget zurückgeschrieben.
 const BUDGET_STATE_KEY = "budgetprojektion.state.v2";
 const BUDGET_META_KEY = "budgetprojektion.backupmeta.v1";
@@ -665,6 +666,18 @@ function computeFlightCosts(trips, manual) {
     if (!unter.includes(b.unterkategorieId) || !b.datum) continue;
     const m = normAssign(manual[b.id]);
     const ok = !!m.ok;
+    if (Array.isArray(m.split) && m.split.length) {
+      const sign = (b.betragChf || 0) < 0 ? -1 : 1;
+      let sum = 0;
+      for (const part of m.split) {
+        if (!trips.some(tr => tr.id === part.trip)) continue;
+        sum += part.chf;
+        add(part.trip, { ...b, betragChf: sign * part.chf, name: `${b.name || ""} (Rechnung ${part.inv})`.trim() });
+      }
+      const ids = m.split.map(x => x.trip).filter(id => trips.some(tr => tr.id === id));
+      all.push({ b, tripId: ids[0] || null, tripIds: ids, status: "geteilt", ok, split: m.split, rest: Math.abs(b.betragChf || 0) - sum });
+      continue;
+    }
     if (m.trip === NO_TRIP) { all.push({ b, tripId: null, status: "keine", ok }); continue; }
     if (m.trip && trips.some(tr => tr.id === m.trip)) { add(m.trip, b); all.push({ b, tripId: m.trip, status: "manuell", ok }); continue; }
     const k = classifyBooking(b.datum, trips);
@@ -709,13 +722,13 @@ function dayDistance(datum, trip) {
   return 0;
 }
 
-const STATUS_LABEL = { offen: "Offen", manuell: "Manuell", automatisch: "Automatisch", keine: "Keine Reisekosten" };
-const STATUS_COLOR = { offen: "#fbbf24", manuell: "#7dd3fc", automatisch: "#4ade80", keine: "rgba(232,244,253,0.5)" };
+const STATUS_LABEL = { offen: "Offen", manuell: "Manuell", automatisch: "Automatisch", geteilt: "Geteilt", keine: "Keine Reisekosten" };
+const STATUS_COLOR = { offen: "#fbbf24", manuell: "#7dd3fc", automatisch: "#4ade80", geteilt: "#c4b5fd", keine: "rgba(232,244,253,0.5)" };
 
 // Bearbeitungsdialog einer einzelnen Zuordnung (Klick auf eine Zeile der Liste).
 function AssignEditModal({ row, trips, onSave, onClose }) {
   const { b } = row;
-  const cur = row.status === "manuell" ? row.tripId : row.status === "keine" ? NO_TRIP : "";
+  const cur = row.status === "manuell" ? row.tripId : row.status === "keine" ? NO_TRIP : row.status === "geteilt" ? "__split" : "";
   const [datum, setDatum] = React.useState(b.datum);
   const [tripId, setTripId] = React.useState(cur);
   const [ok, setOk] = React.useState(row.ok);
@@ -741,6 +754,7 @@ function AssignEditModal({ row, trips, onSave, onClose }) {
         <div style={lbl}>Reise</div>
         <select value={tripId} onChange={e => setTripId(e.target.value)} style={field}>
           <option value="">Automatisch (nach Buchungsdatum)</option>
+          {row.status === "geteilt" && <option value="__split">Geteilt auf mehrere Reisen (aus Rechnungen)</option>}
           {sorted.map(tr => <option key={tr.id} value={tr.id}>{tr.title} ({formatTripRange(tr.startDate, tr.endDate)})</option>)}
           <option value={NO_TRIP}>Keine Reisekosten</option>
         </select>
@@ -751,7 +765,7 @@ function AssignEditModal({ row, trips, onSave, onClose }) {
           <button onClick={() => { onSave(b, { datum: b.datum, tripId: "", ok: false }); onClose(); }} style={btn(false)}>Zurücksetzen</button>
           <div style={{ display: "flex", gap: 8 }}>
             <button onClick={onClose} style={btn(false)}>Abbrechen</button>
-            <button onClick={() => { onSave(b, { datum, tripId, ok }); onClose(); }} disabled={!datum} style={btn(true)}>Speichern</button>
+            <button onClick={() => { onSave(b, { datum, tripId: tripId === "__split" ? undefined : tripId, ok }); onClose(); }} disabled={!datum} style={btn(true)}>Speichern</button>
           </div>
         </div>
       </div>
@@ -769,6 +783,7 @@ function AssignListModal({ all, trips, onSave, onClose }) {
   const [desc, setDesc] = React.useState(true);
   const [edit, setEdit] = React.useState(null); // Buchungs-ID
   const tripOf = id => trips.find(t => t.id === id);
+  const tripsText = r => (r.tripIds || [r.tripId]).map(id => tripOf(id)?.title).filter(Boolean).join(", ");
   const years = [...new Set(all.map(r => r.b.datum.slice(0, 4)))].sort().reverse();
   const shown = all.filter(r => {
     if (status !== "alle" && r.status !== status) return false;
@@ -776,13 +791,13 @@ function AssignListModal({ all, trips, onSave, onClose }) {
     if (checked === "nein" && r.ok) return false;
     if (year !== "alle" && r.b.datum.slice(0, 4) !== year) return false;
     if (q.trim()) {
-      const hay = ((r.b.name || "") + " " + (tripOf(r.tripId)?.title || "")).toLowerCase();
+      const hay = ((r.b.name || "") + " " + tripsText(r)).toLowerCase();
       if (!hay.includes(q.trim().toLowerCase())) return false;
     }
     return true;
   });
   const key = r => sortBy === "betrag" ? r.b.betragChf || 0
-    : sortBy === "reise" ? (tripOf(r.tripId)?.title || "\uffff").toLowerCase()
+    : sortBy === "reise" ? (tripsText(r) || "\uffff").toLowerCase()
     : sortBy === "status" ? r.status
     : sortBy === "geprueft" ? (r.ok ? 1 : 0)
     : r.b.datum;
@@ -832,7 +847,7 @@ function AssignListModal({ all, trips, onSave, onClose }) {
             <div key={r.b.id} onClick={() => setEdit(r.b.id)}
               style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 4px", borderBottom: "1px solid rgba(255,255,255,0.08)", cursor: "pointer" }}>
               <input type="checkbox" checked={r.ok} title="Geprüft"
-                onClick={e => e.stopPropagation()} onChange={e => onSave(r.b, { datum: r.b.datum, tripId: r.status === "manuell" ? r.tripId : r.status === "keine" ? NO_TRIP : "", ok: e.target.checked })}
+                onClick={e => e.stopPropagation()} onChange={e => onSave(r.b, { datum: r.b.datum, ok: e.target.checked })}
                 style={{ width: 18, height: 18, flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
@@ -841,7 +856,9 @@ function AssignListModal({ all, trips, onSave, onClose }) {
                 </div>
                 <div style={{ fontSize: 11, color: "rgba(232,244,253,0.55)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   <span style={{ color: STATUS_COLOR[r.status], fontWeight: 700 }}>{STATUS_LABEL[r.status]}</span>
-                  {tr ? ` · ${tr.title} (${formatTripRange(tr.startDate, tr.endDate)})` : ""}
+                  {r.status === "geteilt"
+                    ? ` · ${tripsText(r)}${Math.abs(r.rest) > 0.5 ? ` · Rest ${formatChf(r.rest)} nicht zugeordnet` : ""}`
+                    : tr ? ` · ${tr.title} (${formatTripRange(tr.startDate, tr.endDate)})` : ""}
                 </div>
               </div>
             </div>
@@ -891,11 +908,15 @@ function overlapDays(aFrom, aTo, bFrom, bTo) {
 }
 
 function InvoiceRow({ inv, all, trips, onSave }) {
-  const amountOk = r => [inv.total, inv.alt].some(a => a != null && Math.abs(Math.abs(r.b.betragChf || 0) - a) < 0.6);
+  const near = (a, b) => a != null && Math.abs(a - b) < 0.6;
+  const exactOk = r => [inv.total, inv.alt].some(a => near(a, Math.abs(r.b.betragChf || 0)));
+  // Eine Zahlung kann mehrere Rechnungen abdecken (Rechnungen im Abstand von max. 7 Tagen).
+  const sumOk = r => FWA_INVOICES.some(o => o !== inv && o.total != null && inv.total != null && Math.abs(isoToUTC(o.datum) - isoToUTC(inv.datum)) <= 7 * DAY_MS && near(inv.total + o.total, Math.abs(r.b.betragChf || 0)));
+  const amountOk = r => exactOk(r) || sumOk(r);
   const bookings = React.useMemo(() => {
     const iso = isoToUTC(inv.datum);
     return [...all].sort((x, y) => {
-      const ax = amountOk(x) ? 0 : 1, ay = amountOk(y) ? 0 : 1;
+      const ax = exactOk(x) ? 0 : sumOk(x) ? 1 : 2, ay = exactOk(y) ? 0 : sumOk(y) ? 1 : 2;
       if (ax !== ay) return ax - ay;
       const dx = Math.abs(isoToUTC(x.b.datum) - iso), dy = Math.abs(isoToUTC(y.b.datum) - iso);
       return dx - dy;
@@ -910,9 +931,10 @@ function InvoiceRow({ inv, all, trips, onSave }) {
   const [bid, setBid] = React.useState(best ? best.b.id : "");
   const [tid, setTid] = React.useState(bestTrip);
   const row = all.find(r => r.b.id === bid);
-  const done = row && row.status === "manuell" && row.tripId === tid && row.ok;
+  const donePart = row && row.status === "geteilt" && (row.split || []).some(x => String(x.inv) === String(inv.nr) && x.trip === tid);
+  const done = row && row.ok && ((row.status === "manuell" && row.tripId === tid) || donePart);
   const field = { background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 8px", color: "#e8f4fd", fontSize: 12, colorScheme: "dark", width: "100%", boxSizing: "border-box", marginTop: 4 };
-  const cur = row && (row.tripId ? (trips.find(t => t.id === row.tripId)?.title || "?") : "–");
+  const cur = row && ((row.tripIds || [row.tripId]).map(id => trips.find(t => t.id === id)?.title).filter(Boolean).join(", ") || "–");
   return (
     <div style={{ padding: "10px 4px", borderBottom: "1px solid rgba(255,255,255,0.08)", opacity: done ? 0.55 : 1 }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
@@ -924,7 +946,7 @@ function InvoiceRow({ inv, all, trips, onSave }) {
       </div>
       <select value={bid} onChange={e => setBid(e.target.value)} style={field}>
         <option value="">– Buchung wählen –</option>
-        {bookings.map(r => <option key={r.b.id} value={r.b.id}>{amountOk(r) ? "✓ " : ""}{formatIsoDe(r.b.datum)} · {formatChf(r.b.betragChf)} · {r.b.name || "(ohne Bezeichnung)"}</option>)}
+        {bookings.map(r => <option key={r.b.id} value={r.b.id}>{exactOk(r) ? "✓ " : sumOk(r) ? "Σ " : ""}{formatIsoDe(r.b.datum)} · {formatChf(r.b.betragChf)} · {r.b.name || "(ohne Bezeichnung)"}</option>)}
       </select>
       <select value={tid} onChange={e => setTid(e.target.value)} style={field}>
         <option value="">– Reise wählen –</option>
@@ -932,9 +954,15 @@ function InvoiceRow({ inv, all, trips, onSave }) {
       </select>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6, gap: 8 }}>
         <div style={{ fontSize: 11, color: done ? "#4ade80" : "rgba(232,244,253,0.5)" }}>
-          {done ? "✓ zugeordnet und geprüft" : row ? `Aktuell: ${STATUS_LABEL[row.status]}${row.status !== "offen" && row.status !== "keine" ? " · " + cur : ""}${row.ok ? " · geprüft" : ""}` : (best ? "" : "keine Buchung mit passendem Betrag")}
+          {done ? `✓ zugeordnet und geprüft${donePart ? " (Teilbetrag)" : ""}` : row ? `Aktuell: ${STATUS_LABEL[row.status]}${row.status !== "offen" && row.status !== "keine" ? " · " + cur : ""}${row.status === "geteilt" && Math.abs(row.rest) > 0.5 ? ` (Rest ${formatChf(row.rest)})` : ""}${row.ok ? " · geprüft" : ""}` : (best ? "" : "keine Buchung mit passendem Betrag")}
         </div>
-        <button disabled={!row || !tid || done} onClick={() => onSave(row.b, { datum: row.b.datum, tripId: tid, ok: true })}
+        <button disabled={!row || !tid || done} onClick={() => {
+          // Deckt die Buchung nur einen Teil (mehrere Rechnungen in einer Zahlung), wird sie aufgeteilt.
+          if (exactOk(row)) return onSave(row.b, { datum: row.b.datum, tripId: tid, ok: true });
+          const parts = (row.status === "geteilt" ? row.split : []).filter(x => String(x.inv) !== String(inv.nr));
+          parts.push({ inv: inv.nr, trip: tid, chf: inv.total != null ? inv.total : Math.abs(row.b.betragChf || 0) });
+          onSave(row.b, { datum: row.b.datum, split: parts, ok: true });
+        }}
           style={{ background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 8, padding: "6px 12px", color: "#7dd3fc", fontSize: 12, fontWeight: 700, cursor: "pointer", opacity: !row || !tid || done ? 0.4 : 1 }}>
           Zuordnen &amp; prüfen
         </button>
@@ -949,7 +977,9 @@ function InvoiceCheckModal({ all, trips, onSave, onClose }) {
   const [year, setYear] = React.useState("alle");
   const years = [...new Set(FWA_INVOICES.map(i => i.von.slice(0, 4)))].sort();
   const list = FWA_INVOICES.filter(i => (year === "alle" || i.von.slice(0, 4) === year))
-    .filter(i => !onlyOpen || !all.some(r => r.status === "manuell" && r.ok && r.b.datum >= i.datum && [i.total, i.alt].some(a => a != null && Math.abs(Math.abs(r.b.betragChf || 0) - a) < 0.6) && trips.some(t => t.id === r.tripId && overlapDays(i.von, i.bis, t.startDate, t.endDate) > 0)))
+    .filter(i => !onlyOpen || !all.some(r => r.ok && (
+      (r.status === "geteilt" && (r.split || []).some(x => String(x.inv) === String(i.nr)))
+      || (r.status === "manuell" && r.b.datum >= i.datum && [i.total, i.alt].some(a => a != null && Math.abs(Math.abs(r.b.betragChf || 0) - a) < 0.6) && trips.some(t => t.id === r.tripId && overlapDays(i.von, i.bis, t.startDate, t.endDate) > 0)))))
     .sort((a, b) => a.von.localeCompare(b.von));
   const field = { background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 8px", color: "#e8f4fd", fontSize: 12, colorScheme: "dark" };
   return (
@@ -1245,18 +1275,22 @@ function ReiseanalyseSection({ flights }) {
   const pivot = React.useMemo(() => computeReiseanalysePivot(trips, flights, costs), [trips, flights, costs]);
 
   // ok undefined = bisherigen Geprüft-Status behalten; tripId "" = automatisch.
-  const saveAssign = async (b, { datum, tripId, ok }) => {
+  // split (Array | null) teilt die Buchung auf mehrere Reisen auf.
+  const saveAssign = async (b, { datum, tripId, ok, split }) => {
     if (datum !== b.datum && !writeBookingDate(b.id, datum)) {
       setError("Das Buchungsdatum konnte im Budget nicht geändert werden.");
       return;
     }
     const old = normAssign(manual[b.id]);
     const entry = {};
+    // Wird eine Reise (oder "automatisch") gewählt, entfällt eine bisherige Aufteilung.
+    const parts = split !== undefined ? split : tripId === undefined ? old.split : null;
     const trip = tripId === undefined ? old.trip : tripId;
-    if (trip) entry.trip = trip;
+    if (parts && parts.length) entry.split = parts;
+    else if (trip) entry.trip = trip;
     if (ok === undefined ? old.ok : ok) entry.ok = true;
     const next = { ...manual };
-    if (entry.trip || entry.ok) next[b.id] = entry; else delete next[b.id];
+    if (entry.trip || entry.split || entry.ok) next[b.id] = entry; else delete next[b.id];
     setManual(next);
     try { await window.storage.set("reiseanalyse:kostenZuordnung", JSON.stringify(next)); } catch {}
     setBudgetTick(t => t + 1);
