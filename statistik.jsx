@@ -859,6 +859,8 @@ function AssignListModal({ all, trips, onSave, onClose }) {
 const FWA_INVOICES = [
   { nr: 716, kind: "R", datum: "2024-03-13", trip: "Expedition Baltikum 1", von: "2024-06-13", bis: "2024-06-22", text: "Einzelzimmer", total: 2595 },
   { nr: 753, kind: "R", datum: "2024-03-04", trip: "Roadtrip Malaga-Lissabon", von: "2024-05-29", bis: "2024-06-07", text: "Einzelzimmer / inkl. Anreise", total: 2435 },
+  { nr: 712, kind: "R", datum: "2024-01-22", trip: "Sizilien bis Napoli", von: "2024-04-05", bis: "2024-04-13", text: "Doppelzimmer / eigene Anreise (im Mail nochmals mit Datum 03.04.25 verschickt)", total: 1490 },
+  { nr: 715, kind: "R", datum: "2024-01-22", trip: "Sizilien bis Napoli (für Andrea)", von: "2024-04-05", bis: "2024-04-13", text: "Rechnung auf Andrea Stirnimann, Zimmerpartnerin; von dir bezahlt", total: 1490 },
   { nr: 713, kind: "R", datum: "2024-01-22", trip: "Napoli bis Rom", von: "2024-04-13", bis: "2024-04-21", text: "Doppelzimmer / eigene Anreise", total: 1490 },
   { nr: 1193, kind: "R", datum: "2024-07-02", trip: "Südfrankreich", von: "2024-09-28", bis: "2024-10-05", text: "Einzelzimmer / inkl. Anreise", total: 1905 },
   { nr: 1855, kind: "R", datum: "2024-07-03", trip: "Südfrankreich 2", von: "2024-10-06", bis: "2024-10-13", text: "Doppelzimmer / inkl. Anreise", total: 1670 },
