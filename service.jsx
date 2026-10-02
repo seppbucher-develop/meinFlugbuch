@@ -169,6 +169,161 @@ function SectionHeader({ title, sectionKey, open, onToggle }) {
   );
 }
 
+// Notizen: einfacher Zeileneditor, jede Zeile wahlweise normaler Text oder
+// Todo mit Checkbox. Gespeichert als Liste { id, todo, erledigt, text } unter
+// "settings:serviceNotizen" — landet damit automatisch im Backup (das sichert
+// jeden Schlüssel) und markiert dieses als veraltet ("backupDirty").
+const NOTIZEN_KEY = "settings:serviceNotizen";
+let notizenZaehler = 0;
+function neueNotizZeile(todo = false, text = "") {
+  notizenZaehler += 1;
+  return { id: Date.now().toString(36) + notizenZaehler.toString(36) + Math.random().toString(36).slice(2, 6), todo, erledigt: false, text };
+}
+
+function NotizenCard({ open, onToggle }) {
+  const [liste, setListe] = React.useState([]);
+  const [geladen, setGeladen] = React.useState(false);
+  const listeRef = React.useRef([]);
+  const aktiv = React.useRef(null);
+  const fokus = React.useRef(null); // { id } — nach dem Rendern fokussieren
+  const timer = React.useRef(null);
+  const root = React.useRef(null);
+  const [platzhalter, setPlatzhalter] = React.useState(() => neueNotizZeile());
+
+  React.useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get(NOTIZEN_KEY);
+        const roh = r && r.value ? JSON.parse(r.value) : [];
+        if (Array.isArray(roh)) {
+          const l = roh.filter(z => z && typeof z.id === "string" && typeof z.text === "string")
+            .map(z => ({ id: z.id, todo: !!z.todo, erledigt: !!z.todo && !!z.erledigt, text: z.text }));
+          listeRef.current = l;
+          setListe(l);
+        }
+      } catch {}
+      setGeladen(true);
+    })();
+  }, []);
+
+  React.useEffect(() => {
+    if (!fokus.current) return;
+    const input = root.current && root.current.querySelector('[data-id="' + fokus.current + '"] input[type="text"]');
+    if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+    fokus.current = null;
+  });
+
+  // Speichern leicht verzögert, damit nicht jeder Tastendruck in die DB schreibt.
+  const speichere = (l) => {
+    clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      try {
+        await window.storage.set(NOTIZEN_KEY, JSON.stringify(l));
+        await window.storage.set("settings:backupDirty", "1");
+      } catch {}
+    }, 300);
+  };
+  const aendere = (f) => {
+    let basis = listeRef.current;
+    if (basis.length === 0) { basis = [platzhalter]; setPlatzhalter(neueNotizZeile()); }
+    const neu = f(basis);
+    listeRef.current = neu;
+    setListe(neu);
+    speichere(neu);
+  };
+  const ersetze = (l, id, f) => l.map(z => z.id === id ? f(z) : z);
+
+  const anzeige = liste.length ? liste : [platzhalter];
+  const nachbar = (id, d) => { const z = anzeige[anzeige.findIndex(x => x.id === id) + d]; return z && z.id; };
+
+  const taste = (e, z) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const neu = neueNotizZeile(z.todo);
+      aendere(l => { const i = l.findIndex(x => x.id === z.id); return [...l.slice(0, i + 1), neu, ...l.slice(i + 1)]; });
+      fokus.current = neu.id;
+    } else if (e.key === "Backspace" && e.target.value === "") {
+      if (z.todo) {
+        e.preventDefault();
+        aendere(l => ersetze(l, z.id, x => ({ ...x, todo: false, erledigt: false })));
+        fokus.current = z.id;
+      } else if (liste.length > 1) {
+        e.preventDefault();
+        fokus.current = nachbar(z.id, -1) || nachbar(z.id, 1);
+        aendere(l => l.filter(x => x.id !== z.id));
+      }
+    } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      const id = nachbar(z.id, e.key === "ArrowUp" ? -1 : 1);
+      if (id) { e.preventDefault(); fokus.current = id; setListe(l => [...l]); }
+    }
+  };
+
+  // Mehrzeiliger Text wird auf mehrere Zeilen verteilt; "- [ ] "/"- [x] " am
+  // Zeilenanfang ergibt direkt Todos.
+  const einfuegen = (e, z) => {
+    const text = e.clipboardData.getData("text");
+    if (text.indexOf("\n") === -1) return;
+    e.preventDefault();
+    const inp = e.target;
+    const vorne = inp.value.slice(0, inp.selectionStart);
+    const hinten = inp.value.slice(inp.selectionEnd);
+    const teile = text.replace(/\r/g, "").split("\n").filter((t, i, a) => t !== "" || i < a.length - 1);
+    const neue = teile.map((t, i) => {
+      const k = neueNotizZeile(z.todo);
+      const m = /^\s*[-*]\s\[( |x|X)\]\s?(.*)$/.exec(t);
+      if (m) { k.todo = true; k.erledigt = m[1] !== " "; k.text = m[2]; } else { k.text = t; }
+      if (i === 0) k.text = vorne + k.text;
+      if (i === teile.length - 1) k.text += hinten;
+      return k;
+    });
+    aendere(l => { const i = l.findIndex(x => x.id === z.id); return [...l.slice(0, i), ...neue, ...l.slice(i + 1)]; });
+    fokus.current = neue[neue.length - 1].id;
+  };
+
+  const todoUmschalten = () => {
+    const id = anzeige.some(z => z.id === aktiv.current) ? aktiv.current : anzeige[anzeige.length - 1].id;
+    aendere(l => ersetze(l, id, x => ({ ...x, todo: !x.todo, erledigt: false })));
+    fokus.current = id;
+  };
+  const hatErledigte = liste.some(z => z.todo && z.erledigt);
+  const aufraeumen = () => {
+    if (!hatErledigte || !confirm("Alle erledigten Todos entfernen?")) return;
+    aendere(l => l.filter(z => !(z.todo && z.erledigt)));
+  };
+
+  const btn = { background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 10, padding: "8px 14px", color: "#7dd3fc", fontSize: 13, fontWeight: 700, cursor: "pointer" };
+  return (
+    <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+      <SectionHeader title="📝 Notizen" sectionKey="notizen" open={open} onToggle={onToggle} />
+      {open && (
+        <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
+          Freie Notizen, Zeile für Zeile. „☑ Todo” macht die aktuelle Zeile zu einem Todo mit Checkbox (nochmals klicken = wieder normaler Text). Enter = neue Zeile, Rückschritt in leerer Zeile = Zeile entfernen. Wird mit dem Backup gesichert.
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        <button onClick={todoUmschalten} style={btn}>☑ Todo</button>
+        <button onClick={aufraeumen} disabled={!hatErledigte} style={{ ...btn, opacity: hatErledigte ? 1 : 0.4, cursor: hatErledigte ? "pointer" : "default" }}>Erledigte entfernen</button>
+      </div>
+      <div ref={root}>
+        {geladen && anzeige.map(z => (
+          <div key={z.id} data-id={z.id} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, opacity: z.todo && z.erledigt ? 0.5 : 1 }}>
+            {z.todo && (
+              <input type="checkbox" aria-label="Erledigt" checked={z.erledigt}
+                onChange={e => aendere(l => ersetze(l, z.id, x => ({ ...x, erledigt: e.target.checked })))}
+                style={{ width: 20, height: 20, flexShrink: 0 }} />
+            )}
+            <input type="text" value={z.text} placeholder={anzeige.length <= 1 ? "Notiz schreiben …" : ""}
+              onFocus={() => { aktiv.current = z.id; }}
+              onChange={e => aendere(l => ersetze(l, z.id, x => ({ ...x, text: e.target.value })))}
+              onKeyDown={e => taste(e, z)} onPaste={e => einfuegen(e, z)}
+              style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "8px 10px", color: "#e8f4fd", fontSize: 14, textDecoration: z.todo && z.erledigt ? "line-through" : "none" }} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ServiceApp() {
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState(null); // {type:"ok"|"error", text}
@@ -784,6 +939,8 @@ function ServiceApp() {
       </div>
 
       <div style={{ padding: "16px" }}>
+        <NotizenCard open={!!openInfo.notizen} onToggle={toggleInfo} />
+
         <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
           <SectionHeader title="🔑 API-Zugangsdaten" sectionKey="maptiler" open={!!openInfo.maptiler} onToggle={toggleInfo} />
           {openInfo.maptiler && (
