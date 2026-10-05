@@ -180,6 +180,13 @@ function neueNotizZeile(todo = false, text = "") {
   return { id: Date.now().toString(36) + notizenZaehler.toString(36) + Math.random().toString(36).slice(2, 6), todo, erledigt: false, text };
 }
 
+// Textfeld wächst mit dem Inhalt (lange Notizen brechen um statt abzuschneiden).
+function passeHoehe(el) {
+  if (!el.scrollHeight) return;
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
+}
+
 function NotizenCard({ open, onToggle }) {
   const [liste, setListe] = React.useState([]);
   const [geladen, setGeladen] = React.useState(false);
@@ -208,7 +215,7 @@ function NotizenCard({ open, onToggle }) {
 
   React.useEffect(() => {
     if (!fokus.current) return;
-    const input = root.current && root.current.querySelector('[data-id="' + fokus.current + '"] input[type="text"]');
+    const input = root.current && root.current.querySelector('[data-id="' + fokus.current + '"] textarea');
     if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
     fokus.current = null;
   });
@@ -312,11 +319,12 @@ function NotizenCard({ open, onToggle }) {
                 onChange={e => aendere(l => ersetze(l, z.id, x => ({ ...x, erledigt: e.target.checked })))}
                 style={{ width: 20, height: 20, flexShrink: 0 }} />
             )}
-            <input type="text" value={z.text} placeholder={anzeige.length <= 1 ? "Notiz schreiben …" : ""}
+            <textarea rows={1} value={z.text} placeholder={anzeige.length <= 1 ? "Notiz schreiben …" : ""}
+              ref={el => { if (el) passeHoehe(el); }}
               onFocus={() => { aktiv.current = z.id; }}
-              onChange={e => aendere(l => ersetze(l, z.id, x => ({ ...x, text: e.target.value })))}
+              onChange={e => { passeHoehe(e.target); aendere(l => ersetze(l, z.id, x => ({ ...x, text: e.target.value }))); }}
               onKeyDown={e => taste(e, z)} onPaste={e => einfuegen(e, z)}
-              style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "8px 10px", color: "#e8f4fd", fontSize: 14, textDecoration: z.todo && z.erledigt ? "line-through" : "none" }} />
+              style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: "8px 10px", color: "#e8f4fd", fontSize: 14, fontFamily: "inherit", lineHeight: 1.4, resize: "none", overflow: "hidden", overflowWrap: "anywhere", textDecoration: z.todo && z.erledigt ? "line-through" : "none" }} />
           </div>
         ))}
       </div>
