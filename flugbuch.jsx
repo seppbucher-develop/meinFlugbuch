@@ -4661,6 +4661,39 @@ function StaticField({label, value, unit}) {
   );
 }
 
+// URL-Feld: zeigt gesetzte Adresse als Link (öffnet in neuem Tab), Bearbeiten
+// per Tipp auf das Stift-Symbol bzw. auf "—" wenn leer.
+function UrlField({label, value, onSave}) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(value||"");
+  const commit = () => {
+    setEditing(false);
+    let v = val.trim();
+    if (v && !/^[a-z][a-z0-9+.-]*:\/\//i.test(v)) v = "https://" + v;
+    if (v !== (value||"")) onSave(v);
+  };
+  const safe = value && /^https?:\/\//i.test(value);
+  return (
+    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
+      <span style={{fontSize:13,color:"rgba(232,244,253,0.45)",minWidth:90}}>{label}</span>
+      {editing ? (
+        <input type="url" value={val} onChange={e=>setVal(e.target.value)} onBlur={commit} autoFocus placeholder="https://…"
+          onKeyDown={e=>{ if(e.key==="Enter"){e.preventDefault();e.target.blur();} }}
+          style={{flex:1,minWidth:0,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,padding:"4px 8px",color:"#e8f4fd",fontSize:13,textAlign:"right"}} />
+      ) : (
+        <span style={{display:"flex",alignItems:"center",gap:8,minWidth:0}}>
+          {value && (safe
+            ? <a href={value} target="_blank" rel="noopener noreferrer"
+                style={{fontSize:13,fontWeight:500,color:"#7dd3fc",textDecoration:"underline",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{value}</a>
+            : <span style={{fontSize:13,color:"#e8f4fd",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{value}</span>)}
+          <span onClick={()=>{setVal(value||"");setEditing(true);}}
+            style={{fontSize:13,cursor:"pointer",color:value?"rgba(232,244,253,0.35)":"rgba(232,244,253,0.25)"}}>{value?"✎":"—"}</span>
+        </span>
+      )}
+    </div>
+  );
+}
+
 function InlineField({label, value, onSave, multiline, unit}) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(value||"");
@@ -5468,6 +5501,7 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
             <InlineField label="Land" value={fl.customFields?.land||""} onSave={v=>saveField({customFields:{land:v}})} />
             <ReiseSelect value={fl.customFields?.reise} flights={flights} onSave={v=>saveField({customFields:{reise:v}})} />
             {fl.customFields?.igcFilename && <StaticField label="IGC-Dateiname" value={fl.customFields.igcFilename} />}
+            <UrlField label="OGOY" value={fl.customFields?.ogoy||""} onSave={v=>saveField({customFields:{ogoy:v}})} />
             <InlineField label="Start müM"   value={fl.startAlt>0?String(fl.startAlt):(fl.customFields?.msa||"")}  onSave={v=>saveComputedField(fl,{startAlt:+v,customFields:{msa:v}})} unit="m" />
             <InlineField label="Landung müM" value={fl.endAlt>0?String(fl.endAlt):(fl.customFields?.ml||"")}       onSave={v=>saveComputedField(fl,{endAlt:+v,customFields:{ml:v}})} unit="m" />
             <InlineField label="Max. Höhe"   value={fl.maxAlt?String(fl.maxAlt):""}                                onSave={v=>saveField({maxAlt:+v,customFields:{hm:v}})} unit="m" />
