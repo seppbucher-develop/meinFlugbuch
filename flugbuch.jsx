@@ -1534,6 +1534,8 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   const fullMapRef = useRef(null);
   const fullRefMarkerRef = useRef(null);
   const fullReadyRef = useRef(false);
+  // Marker der Vollbild-Karte, die auf Flughöhe angehoben werden (siehe liftMarker).
+  const fullLiftRef = useRef([]);
   // Nummerierte Wendepunkt-Marker der Distanz-Linie (siehe applyDistanceRoute
   // unten) — eigene Ref-Arrays statt einzelner Refs, da es bis zu 3 davon
   // gleichzeitig geben kann.
@@ -1795,6 +1797,26 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     return expr;
   };
 
+  // Hebt einen Marker (der in MapLibre immer auf dem Gelände sitzt) auf die
+  // GPS-Flughöhe an: Höhe über Grund (GPS-Höhe − Geländehöhe) in Metern wird in
+  // Bildschirm-Pixel umgerechnet. Vertikaler Versatz auf dem Bildschirm
+  // wächst mit dem Kippwinkel (Draufsicht 0°: kein Versatz, Seitenansicht: voll).
+  // Näherung ohne Perspektive — für ein Symbol völlig ausreichend.
+  const applyLift = (map, marker) => {
+    const L = marker._lift;
+    if (!map || !marker._map || !L || !isFinite(L.alt)) return;
+    const ground = map.queryTerrainElevation ? map.queryTerrainElevation([L.lon, L.lat]) : null;
+    const h = Math.max(0, L.alt - (ground || 0));
+    const mpp = 40075016.686 * Math.cos(L.lat*Math.PI/180) / (512 * Math.pow(2, map.getZoom()));
+    const px = h / mpp * Math.sin(map.getPitch()*Math.PI/180);
+    marker.setOffset([0, -px]);
+  };
+  const liftMarker = (map, marker, lon, lat, alt) => {
+    marker._lift = { lon, lat, alt };
+    if (!fullLiftRef.current.includes(marker)) fullLiftRef.current.push(marker);
+    applyLift(map, marker);
+  };
+
   const buildMap = (container, mapRefObj, readyRef) => {
     if (!container || !window.maptilersdk || !hasMap || !mapTilerKey) return;
     const sdk = window.maptilersdk;
@@ -1819,6 +1841,13 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     if (isFull) {
       setFsPitch(0);
       map.on("pitch", () => setFsPitch(Math.round(map.getPitch())));
+      fullLiftRef.current = [];
+      const relift = () => {
+        fullLiftRef.current = fullLiftRef.current.filter(m => m._map);
+        fullLiftRef.current.forEach(m => applyLift(map, m));
+      };
+      map.on("move", relift);
+      map.on("idle", relift); // Geländekacheln können erst nach dem Laden Höhen liefern
     }
 
     // "The WebGL context was lost" is a platform-level thing (iOS Safari in
@@ -1933,6 +1962,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       // ever applies to it.
       refMarkerRefObj.current = new sdk.Marker({ element: el, rotationAlignment: "viewport", pitchAlignment: "viewport" })
         .setLngLat([refPoint.lon, refPoint.lat]).addTo(map);
+      if (refMarkerRefObj === fullRefMarkerRef) liftMarker(map, refMarkerRefObj.current, refPoint.lon, refPoint.lat, refPoint.gpsAlt);
     }
   };
   // Kamera-Fit auf das Profil-Segment (bzw. den ganzen Track) — wird
@@ -2184,6 +2214,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       } else {
         ref.current.setLngLat([lon, lat]);
       }
+      if (ref === playMarkerRef) liftMarker(map, ref.current, lon, lat, alt);
       if (ref.current._imgEl) ref.current._imgEl.style.transform = `rotate(${hdg}deg)`;
       if (ref.current._altEl) ref.current._altEl.textContent = (alt!=null ? Math.round(alt) : "")+"m";
       if (isPlaying && map.jumpTo) {
