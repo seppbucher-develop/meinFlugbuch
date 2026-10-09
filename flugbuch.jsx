@@ -1426,6 +1426,105 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
 }
 
 
+// ── Track in echter Flughöhe (nur Vollbild-Karte) ────────────────────────
+// MapLibre kennt keine 3D-Linien — daher ein eigener WebGL-"custom layer":
+// der Track wird als bildschirmbreites Band (feste Pixelbreite) in der echten
+// GPS-Höhe (m ü. M.) gezeichnet, passend zum 3D-Gelände (Terrain, Faktor 1).
+// Koordinaten werden relativ zum Track-Mittelpunkt in doppelter Genauigkeit
+// vorbereitet und die Matrix entsprechend verschoben, sonst "zittert" die
+// Linie wegen der Float32-Genauigkeit der Mercator-Koordinaten (0..1).
+// Farbe wie die Kartenlinie: Steig-/Sinkrate (rot=Sinken … grün=Steigen).
+function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
+  const stride = Math.max(1, Math.ceil(pts.length / 3000));
+  const P = [];
+  for (let i = 0; i < pts.length; i += stride) P.push(i);
+  if (P[P.length-1] !== pts.length-1) P.push(pts.length-1);
+  const merc = (p) => {
+    const lat = p.lat * Math.PI/180;
+    const x = (p.lon + 180) / 360;
+    const y = 0.5 - Math.log(Math.tan(Math.PI/4 + lat/2)) / (2*Math.PI);
+    const z = (p.gpsAlt || 0) / (40075016.686 * Math.cos(lat));
+    return [x, y, z];
+  };
+  const hslToRgb = (h, s, l) => { // h in Grad, s/l 0..1
+    const k = n => (n + h/30) % 12, a = s * Math.min(l, 1-l);
+    const f = n => l - a * Math.max(-1, Math.min(k(n)-3, Math.min(9-k(n), 1)));
+    return [f(0), f(8), f(4)];
+  };
+  const xyz = P.map(i => merc(pts[i]));
+  const cx = xyz.reduce((a, v) => a + v[0], 0) / xyz.length;
+  const cy = xyz.reduce((a, v) => a + v[1], 0) / xyz.length;
+  const cz = 0;
+  const colors = P.map((i, k) => {
+    if (k === 0) return hslToRgb(70, 0.9, 0.5);
+    const a = pts[P[k-1]], b = pts[i], dt = b.timeSec - a.timeSec;
+    const rate = dt > 0 ? (b.gpsAlt - a.gpsAlt) / dt : 0;
+    return hslToRgb((Math.max(-4, Math.min(4, rate)) + 4) / 8 * 140, 0.9, 0.5);
+  });
+  // 6 Vertices je Segment: a(3) b(3) t(1) side(1) rgb(3) = 11 Floats
+  const data = [];
+  for (let k = 0; k < P.length-1; k++) {
+    const a = xyz[k], b = xyz[k+1], c = colors[k+1];
+    const A = [a[0]-cx, a[1]-cy, a[2]-cz], B = [b[0]-cx, b[1]-cy, b[2]-cz];
+    for (const [t, sd] of [[0,-1],[0,1],[1,-1],[1,-1],[0,1],[1,1]]) data.push(...A, ...B, t, sd, ...c);
+  }
+  const vertCount = (P.length-1) * 6;
+  let prog = null, buf = null;
+  return {
+    id: "track-altitude", type: "custom", renderingMode: "3d",
+    onAdd(map, gl) {
+      const sh = (type, src) => { const o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o); return o; };
+      const vs = sh(gl.VERTEX_SHADER, `
+        uniform mat4 u_m; uniform vec2 u_res; uniform float u_w;
+        attribute vec3 a_a; attribute vec3 a_b; attribute float a_t; attribute float a_s; attribute vec3 a_c;
+        varying vec3 v_c;
+        void main() {
+          vec4 ca = u_m * vec4(a_a, 1.0), cb = u_m * vec4(a_b, 1.0);
+          vec4 cp = a_t < 0.5 ? ca : cb;
+          vec2 sa = ca.xy / ca.w * u_res * 0.5, sb = cb.xy / cb.w * u_res * 0.5;
+          vec2 d = sb - sa; float l = length(d);
+          d = l > 0.0001 ? d / l : vec2(1.0, 0.0);
+          vec2 n = vec2(-d.y, d.x);
+          cp.xy += n * a_s * u_w * 0.5 / (u_res * 0.5) * cp.w;
+          gl_Position = cp; v_c = a_c;
+        }`);
+      const fs = sh(gl.FRAGMENT_SHADER, `precision mediump float; varying vec3 v_c; void main(){ gl_FragColor = vec4(v_c, 1.0); }`);
+      prog = gl.createProgram();
+      gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+      buf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+    },
+    render(gl, args) {
+      // MapLibre v5: args.defaultProjectionData.mainMatrix; ältere: args = Matrix
+      const M = args && args.defaultProjectionData ? args.defaultProjectionData.mainMatrix : args;
+      if (!prog || !M) return;
+      // Matrix um den Track-Mittelpunkt verschoben (Spalte 3 = M * [cx,cy,cz,1])
+      const m = Array.from(M);
+      for (let r = 0; r < 4; r++) m[12+r] = M[r]*cx + M[4+r]*cy + M[8+r]*cz + M[12+r];
+      gl.useProgram(prog);
+      gl.uniformMatrix4fv(gl.getUniformLocation(prog, "u_m"), false, m);
+      gl.uniform2f(gl.getUniformLocation(prog, "u_res"), gl.drawingBufferWidth, gl.drawingBufferHeight);
+      gl.uniform1f(gl.getUniformLocation(prog, "u_w"), lineWidthPx * (window.devicePixelRatio || 1));
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      const F = 4, stride = 11*F;
+      [["a_a",3,0],["a_b",3,3],["a_t",1,6],["a_s",1,7],["a_c",3,8]].forEach(([n, size, off]) => {
+        const loc = gl.getAttribLocation(prog, n);
+        gl.enableVertexAttribArray(loc);
+        gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, off*F);
+      });
+      gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
+      gl.disable(gl.CULL_FACE);
+      gl.drawArrays(gl.TRIANGLES, 0, vertCount);
+    },
+    onRemove(map, gl) {
+      if (buf) gl.deleteBuffer(buf);
+      if (prog) gl.deleteProgram(prog);
+      buf = prog = null;
+    },
+  };
+}
+
 function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, onPlaybackPhaseChange, controlsSlot, isWide, mapTilerKey, onFullscreenProfileSlot, scrubDistanceKm }) {
   const previewDivRef = useRef(null);
   const previewMapRef = useRef(null);
@@ -1762,6 +1861,11 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
         map.addLayer({ id: "track-line", type: "line", source: "track",
           layout: { "line-join": "round", "line-cap": "round" },
           paint: gradient ? { "line-gradient": gradient, "line-width": 2.4, "line-blur": 0 } : { "line-color": "#1e40af", "line-width": 2.4, "line-blur": 0 } });
+      }
+      // Vollbild: zusätzlich der Track in echter Flughöhe (die Linie am Boden
+      // bleibt als "Schatten" erhalten).
+      if (isFull && fullTrace.length > 1) {
+        try { map.addLayer(createAltitudeTrackLayer(fullTrace)); } catch (e) { console.warn("3D-Track nicht möglich", e); }
       }
       if (track.length) {
         addMarker(track[0], "#22c55e", "S");
