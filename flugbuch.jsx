@@ -4676,8 +4676,8 @@ function UrlField({label, value, onSave}) {
   return (
     <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8,padding:"6px 0",borderBottom:"1px solid rgba(255,255,255,0.04)"}}>
       <span style={{fontSize:13,color:"rgba(232,244,253,0.45)",minWidth:90}}>{label}</span>
-      {editing ? (
-        <input type="url" value={val} onChange={e=>setVal(e.target.value)} onBlur={commit} autoFocus placeholder="https://…"
+      {(editing || !value) ? (
+        <input type="url" value={val} autoFocus={editing} onChange={e=>setVal(e.target.value)} onBlur={commit} placeholder="URL einfügen (https://…)"
           onKeyDown={e=>{ if(e.key==="Enter"){e.preventDefault();e.target.blur();} }}
           style={{flex:1,minWidth:0,background:"rgba(255,255,255,0.08)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,padding:"4px 8px",color:"#e8f4fd",fontSize:13,textAlign:"right"}} />
       ) : (
