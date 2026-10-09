@@ -1452,6 +1452,10 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   const previewScrubMarkerRef = useRef(null);
   const fullScrubMarkerRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  // Kippwinkel der Vollbild-Karte (0° = Sicht von oben, 85° = fast Seitenansicht).
+  // Wird vom Slider gesetzt und umgekehrt von der Karte selbst nachgeführt, wenn
+  // man mit zwei Fingern / rechter Maustaste kippt (Event "pitch" in buildMap).
+  const [fsPitch, setFsPitch] = useState(0);
   // Nur genutzt, um den Vollbild-Profilstreifen unterhalb der Karte im
   // Quermodus schmal statt hoch zu halten (siehe unten) — derselbe Hook, den
   // auch die Listenansicht für ihr Quermodus-Layout verwendet.
@@ -1703,11 +1707,20 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
     container.innerHTML = "";
     readyRef.current = false;
     const initialCenter = track.length ? [track[0].lon, track[0].lat] : [sP.lon, sP.lat];
+    // Nur die Vollbild-Karte lässt sich kippen (Seitenansicht) und bekommt
+    // dafür 3D-Gelände — sonst wäre die Seitenansicht eine flache Ebene. Die
+    // Vorschau bleibt bewusst 2D (leichter, nur ein WebGL-Kontext mit Terrain).
+    const isFull = mapRefObj === fullMapRef;
     const map = new sdk.Map({
       container, apiKey: mapTilerKey, style: sdk.MapStyle.OUTDOOR,
       language: "de", center: initialCenter, zoom: 11,
+      ...(isFull ? { terrain: true, maxPitch: 85, pitchWithRotate: true, touchPitch: true } : {}),
     });
     mapRefObj.current = map;
+    if (isFull) {
+      setFsPitch(0);
+      map.on("pitch", () => setFsPitch(Math.round(map.getPitch())));
+    }
 
     // "The WebGL context was lost" is a platform-level thing (iOS Safari in
     // particular reclaims GPU contexts aggressively under memory pressure or
@@ -1829,7 +1842,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
       if (!pts.length) return;
       const lons = pts.map(p=>p.lon), lats = pts.map(p=>p.lat);
       if (pts.length === 1) { map.jumpTo({ center: [lons[0], lats[0]], zoom: 12 }); return; }
-      map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 36, animate: false });
+      map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 36, animate: false, pitch: map.getPitch(), bearing: map.getBearing() });
     };
     if (segment && segment.length > 1) fitToPoints(segment);
     else if (track.length) fitToPoints(cleanTrack.length ? cleanTrack : track);
@@ -2352,6 +2365,21 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
                   )}
                 </div>
               )}
+            </div>
+            {/* Kipp-Regler: Sicht von oben (0°) ↔ Seitenansicht (85°). Zusätzlich
+                zu den nativen Gesten (zwei Finger vertikal ziehen bzw. rechte
+                Maustaste / Ctrl + Ziehen kippt und dreht die Karte). Der Regler
+                liegt links unten, weit weg von Zoom-Buttons und Play-Steuerung. */}
+            <div style={{position:"absolute",left:10,bottom:14,zIndex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:8,background:"rgba(4,14,32,0.7)",border:"1px solid rgba(255,255,255,0.18)",borderRadius:20,padding:"10px 6px",boxShadow:"0 2px 10px rgba(0,0,0,0.5)"}}>
+              <button title="Sicht von oben" onClick={()=>fullMapRef.current?.easeTo({pitch:0,bearing:0,duration:500})}
+                style={{background:"none",border:"none",color:"#e8f4fd",fontSize:15,cursor:"pointer",padding:0,lineHeight:1}}>🗺️</button>
+              <input type="range" min={0} max={85} step={1} value={fsPitch}
+                onChange={e=>{ const v=+e.target.value; setFsPitch(v); fullMapRef.current?.setPitch(v); }}
+                aria-label="Kippwinkel"
+                style={{writingMode:"vertical-lr",width:24,height:110,margin:0,cursor:"pointer",touchAction:"none"}} />
+              <button title="Seitenansicht" onClick={()=>fullMapRef.current?.easeTo({pitch:80,duration:500})}
+                style={{background:"none",border:"none",color:"#e8f4fd",fontSize:15,cursor:"pointer",padding:0,lineHeight:1}}>🏔️</button>
+              <div style={{color:"#7dd3fc",fontSize:10,fontWeight:700}}>{fsPitch}°</div>
             </div>
             {flight?.track?.length > 1 && (
               <div style={{position:"absolute",bottom:14,right:14,display:"flex",gap:6,alignItems:"center"}}>
