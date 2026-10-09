@@ -3912,8 +3912,11 @@ function evalToken(f, tok){
     // igc:ja / igc:nein — presence of an imported IGC flight track, not a
     // value comparison. training:ja / training:nein likewise checks the
     // Excel "Training" flag (cf.training === "T"), not a text comparison.
-    if(field==="igc" || field==="training"){
-      const has = field==="igc" ? (f.track?.length>1) : (f.customFields?.training||"").trim().toUpperCase()==="T";
+    // ogoy:ja / ogoy:nein — OGOY-URL gesetzt (nicht leer) bzw. leer.
+    if(field==="igc" || field==="training" || field==="ogoy"){
+      const has = field==="igc" ? (f.track?.length>1)
+        : field==="ogoy" ? !!(f.customFields?.ogoy||"").trim()
+        : (f.customFields?.training||"").trim().toUpperCase()==="T";
       const want = ["ja","vorhanden","true","1"].includes(raw.toLowerCase());
       return op==="!=" ? has!==want : has===want;
     }
@@ -4245,6 +4248,7 @@ const SEARCH_FIELDS = [
   { id: "naehe",     label: "In der Nähe (Standort)", type: "geo" },
   { id: "igc",       label: "IGC-Track",      type: "bool" },
   { id: "training",  label: "Training",       type: "bool" },
+  { id: "ogoy",      label: "OGOY",           type: "bool" },
 ];
 const BOOL_OPTIONS = [
   { value: "ja",   label: "Vorhanden" },
