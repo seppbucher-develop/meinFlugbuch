@@ -4666,10 +4666,13 @@ function StaticField({label, value, unit}) {
 }
 
 // URL-Feld: zeigt gesetzte Adresse als Link (öffnet in neuem Tab), Bearbeiten
-// per Tipp auf das Stift-Symbol bzw. auf "—" wenn leer.
+// per Tipp auf ✎, Löschen per ✕; bei leerem Wert direkt Eingabefeld.
 function UrlField({label, value, onSave}) {
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(value||"");
+  // Eingabewert mit dem gespeicherten Wert synchron halten (z.B. nach Löschen
+  // oder beim Wechsel auf einen anderen Flug), sonst bleibt alter Text stehen.
+  useEffect(() => { setVal(value||""); }, [value]);
   const commit = () => {
     setEditing(false);
     let v = val.trim();
@@ -4690,8 +4693,10 @@ function UrlField({label, value, onSave}) {
             ? <a href={value} target="_blank" rel="noopener noreferrer"
                 style={{fontSize:13,fontWeight:500,color:"#7dd3fc",textDecoration:"underline",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{value}</a>
             : <span style={{fontSize:13,color:"#e8f4fd",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:200}}>{value}</span>)}
-          <span onClick={()=>{setVal(value||"");setEditing(true);}}
-            style={{fontSize:13,cursor:"pointer",color:value?"rgba(232,244,253,0.35)":"rgba(232,244,253,0.25)"}}>{value?"✎":"—"}</span>
+          <span onClick={()=>{setVal(value||"");setEditing(true);}} title="Bearbeiten"
+            style={{fontSize:16,cursor:"pointer",padding:"2px 6px",color:"rgba(232,244,253,0.5)"}}>✎</span>
+          <span onClick={()=>{ setVal(""); onSave(""); }} title="Link löschen"
+            style={{fontSize:16,cursor:"pointer",padding:"2px 6px",color:"#f87171"}}>✕</span>
         </span>
       )}
     </div>
