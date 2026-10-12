@@ -1786,8 +1786,12 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
   const picks = [];
   const okCenter = (c) => c.center > t0 + 75 && c.center < t1 - 100 && picks.every(p => Math.abs(p.center - c.center) > (p.kind === c.kind ? 300 : 110));
   const kindCount = (k) => picks.filter(p => p.kind === k).length;
-  const take = (list) => { for (const c of list.sort((a, b) => b.score - a.score)) { if (picks.length >= maxPicks) return; if (okCenter(c) && kindCount(c.kind) < 2) picks.push(c); } };
-  take(cands.filter(c => c.primary));
+  // Qualität vor Menge: ab der dritten Szene nur noch, was mindestens 70 % der
+  // Punkte der besten Szene erreicht (sonst belegt z.B. eine knapp über der
+  // Schwelle liegende Thermik einen Platz, der besser frei bleibt).
+  const topScore = Math.max(0, ...cands.filter(c => c.primary).map(c => c.score));
+  const take = (list, strict) => { for (const c of list.sort((a, b) => b.score - a.score)) { if (picks.length >= maxPicks) return; if (strict && picks.length >= 2 && c.score < 0.7 * topScore) continue; if (okCenter(c) && kindCount(c.kind) < 2) picks.push(c); } };
+  take(cands.filter(c => c.primary), true);
   if (!picks.some(p => p.kind !== "peak")) take(maneuvers);
   take(cands.filter(c => c.kind === "glide"));
   return picks.sort((a, b) => a.center - b.center);
