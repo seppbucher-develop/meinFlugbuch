@@ -1541,77 +1541,246 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
 // alle Kartenkacheln im Cache liegen und das Video nicht unscharf startet.
 // Es entsteht kein Server-Upload — alles passiert im Browser.
 
-// Gleitende 60-s-Fenster auf dem Track: bestes Steigen im Kreisflug
-// (= guter Thermikschlauch), höchster Punkt (Panorama) und schnellste
-// Gleitphase. "Interessante Landschaft" lässt sich ohne Geländedaten nicht
-// sicher erkennen — der höchste Punkt ist dafür der beste Stellvertreter
-// (grösste Weitsicht, meist über dem Grat/Gipfel).
-function computeVideoHighlights(track) {
+// ── Geländedaten für die Ereigniserkennung ───────────────────────────────
+// Lädt die MapTiler-Höhenkacheln (Terrain-RGB) über dem Track einmal selbst
+// herunter und dekodiert sie zu einer Höhenfunktion elev(lat, lon). Damit
+// lassen sich Relief, Gratnähe und Höhe über Grund für den ganzen Flug
+// bestimmen — unabhängig davon, welche Kacheln die Live-Karte gerade geladen
+// hat. Schlägt der Abruf fehl, liefert die Funktion null und die Erkennung
+// arbeitet ohne Geländedaten (dann nur Thermik > 3 m/s, Gipfel/Gleiten).
+function makeDemSampler(z, tiles) {
+  const n = Math.pow(2, z);
+  return function elev(lat, lon) {
+    const fx = (lon + 180) / 360 * n;
+    const s = Math.sin(lat * Math.PI / 180);
+    const fy = (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n;
+    const tx = Math.floor(fx), ty = Math.floor(fy);
+    const t = tiles.get(tx + "," + ty);
+    if (!t) return null;
+    const px = (fx - tx) * t.size - 0.5, py = (fy - ty) * t.size - 0.5;
+    const x0 = Math.max(0, Math.min(t.size - 1, Math.floor(px))), y0 = Math.max(0, Math.min(t.size - 1, Math.floor(py)));
+    const x1 = Math.min(t.size - 1, x0 + 1), y1 = Math.min(t.size - 1, y0 + 1);
+    const ax = Math.max(0, Math.min(1, px - x0)), ay = Math.max(0, Math.min(1, py - y0));
+    const d = t.data;
+    const a = d[y0 * t.size + x0] * (1 - ax) + d[y0 * t.size + x1] * ax;
+    const b = d[y1 * t.size + x0] * (1 - ax) + d[y1 * t.size + x1] * ax;
+    return a * (1 - ay) + b * ay;
+  };
+}
+async function loadVideoDem(track, apiKey) {
+  if (!apiKey || typeof createImageBitmap === "undefined") return null;
+  const pad = 0.012;
+  const lats = track.map(p => p.lat), lons = track.map(p => p.lon);
+  const bb = { s: Math.min(...lats) - pad, n: Math.max(...lats) + pad, w: Math.min(...lons) - pad, e: Math.max(...lons) + pad };
+  const tileXY = (lat, lon, z) => { const n = Math.pow(2, z), s = Math.sin(lat * Math.PI / 180); return [Math.floor((lon + 180) / 360 * n), Math.floor((0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n)]; };
+  let z = 12, list = [];
+  for (; z >= 8; z--) {
+    const [x0, y0] = tileXY(bb.n, bb.w, z), [x1, y1] = tileXY(bb.s, bb.e, z);
+    list = [];
+    for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) list.push([x, y]);
+    if (list.length <= 30) break;
+  }
+  const tiles = new Map();
+  const cv = document.createElement("canvas");
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  await Promise.all(list.map(async ([x, y]) => {
+    for (const ext of ["webp", "png"]) {
+      try {
+        const r = await fetch(`https://api.maptiler.com/tiles/terrain-rgb-v2/${z}/${x}/${y}.${ext}?key=${apiKey}`);
+        if (!r.ok) continue;
+        const bmp = await createImageBitmap(await r.blob(), { colorSpaceConversion: "none" });
+        cv.width = bmp.width; cv.height = bmp.height;
+        ctx.clearRect(0, 0, cv.width, cv.height); ctx.drawImage(bmp, 0, 0);
+        const px = ctx.getImageData(0, 0, cv.width, cv.height).data;
+        const data = new Float32Array(bmp.width * bmp.height);
+        for (let i = 0; i < data.length; i++) data[i] = -10000 + (px[i*4] * 65536 + px[i*4+1] * 256 + px[i*4+2]) * 0.1;
+        tiles.set(x + "," + y, { size: bmp.width, data });
+        return;
+      } catch (e) { /* nächste Variante */ }
+    }
+  }));
+  if (!tiles.size) return null;
+  return { elev: makeDemSampler(z, tiles), tiles: tiles.size, z };
+}
+
+// ── Ereigniserkennung ────────────────────────────────────────────────────
+// Findet sehenswerte Flugphasen und bewertet sie (score). Reihenfolge der
+// Wichtigkeit: Thermik (> 3 m/s oder im schroffen Gelände), Hang-/Gratflug,
+// Gipfelüberflug, Talquerung; danach Höchster Punkt und schnelle Gleitphase
+// als Füller. Spiralen/Wingover nur, wenn sonst nichts Interessantes da ist.
+// elev (optional) = Höhenfunktion aus loadVideoDem.
+function computeVideoHighlights(track, elev, maxPicks = 3) {
   const n = track.length;
   if (n < 30) return [];
   const t0 = track[0].timeSec, t1 = track[n-1].timeSec, total = t1 - t0;
   if (total < 180) return [];
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const mLat = 111320;
+  const ground = (lat, lon) => { if (!elev) return null; const g = elev(lat, lon); return g != null && isFinite(g) ? g : null; };
+  const offs = (lat, lon, bearing, m) => { const b = bearing * Math.PI / 180; return [lat + Math.cos(b) * m / mLat, lon + Math.sin(b) * m / (mLat * Math.cos(lat * Math.PI / 180))]; };
+  // Schroffheit 0..1: Höhenunterschied und Steilheit im Umkreis von 500 m
+  const rugged = (lat, lon) => {
+    const c = ground(lat, lon); if (c == null) return 0;
+    let mn = c, mx = c, maxD = 0;
+    for (let k = 0; k < 8; k++) {
+      const [la, lo] = offs(lat, lon, k * 45, 500);
+      const g = ground(la, lo); if (g == null) continue;
+      mn = Math.min(mn, g); mx = Math.max(mx, g); maxD = Math.max(maxD, Math.abs(g - c));
+    }
+    const slope = Math.atan(maxD / 500) * 180 / Math.PI;
+    return 0.6 * clamp((mx - mn - 300) / 700, 0, 1) + 0.4 * clamp((slope - 25) / 20, 0, 1);
+  };
+  const RUGGED = 0.5;
+  const meanPos = (i, j) => { let la = 0, lo = 0, c = 0; for (let k = i; k <= j; k++) { la += track[k].lat; lo += track[k].lon; c++; } return { lat: la / c, lon: lo / c }; };
+  const at = (tc) => { let lo = 0, hi = n - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (track[m].timeSec <= tc) lo = m; else hi = m; } return lo; };
+  const headingOver = (i, j) => bearingDeg(track[i], track[j]);
+
+  const cands = []; // { kind, primary, score, center, f0, f1, lat, lon, label, orbit?, bSide? }
+  const push = (e) => cands.push(e);
+
+  // 1) Thermik: 60-s-Fenster mit Kreisen
   const W = 60;
-  const picks = [];
-  const okCenter = (tc) => tc > t0 + 75 && tc < t1 - 100 && picks.every(p => Math.abs(p.center - tc) > 110);
-  const meanPos = (i, j) => {
-    let la = 0, lo = 0, c = 0;
-    for (let k = i; k <= j; k++) { la += track[k].lat; lo += track[k].lon; c++; }
-    return { lat: la / c, lon: lo / c };
-  };
-
-  // Thermik
-  const th = [];
-  let j = 0;
-  for (let i = 0; i < n - 1; i++) {
-    while (j < n - 1 && track[j].timeSec - track[i].timeSec < W) j++;
-    const dt = track[j].timeSec - track[i].timeSec;
-    if (dt < W * 0.8) break;
-    const gain = track[j].gpsAlt - track[i].gpsAlt;
-    if (gain < 40) continue;
-    if (turnSumDegBetween(track, i, j) < 270) continue;
-    th.push({ i, j, rate: gain / dt, center: (track[i].timeSec + track[j].timeSec) / 2 });
+  { let j = 0;
+    for (let i = 0; i < n - 1; i += 2) {
+      if (j < i) j = i;
+      while (j < n - 1 && track[j].timeSec - track[i].timeSec < W) j++;
+      const dt = track[j].timeSec - track[i].timeSec;
+      if (dt < W * 0.8) break;
+      const gain = track[j].gpsAlt - track[i].gpsAlt;
+      if (gain < 40) continue;
+      const rate = gain / dt;
+      if (rate < 1.0) continue;
+      if (turnSumDegBetween(track, i, j) < 270) continue;
+      const m = meanPos(i, j);
+      const rg = rugged(m.lat, m.lon);
+      const strong = rate >= 3.0, rough = rg >= RUGGED;
+      if (!strong && !rough) continue;
+      push({ kind: "thermal", primary: true, score: strong ? 5 + rate * 1.2 + rg * 2 : 4 + rg * 3 + rate,
+        center: (track[i].timeSec + track[j].timeSec) / 2, f0: track[i].timeSec - 8, f1: track[j].timeSec + 8, lat: m.lat, lon: m.lon, orbit: true,
+        label: `${strong ? "Starke Thermik" : "Thermik am Berg"} · +${rate.toFixed(1)} m/s` });
+    }
   }
-  th.sort((a, b) => b.rate - a.rate);
-  const takeThermal = () => {
-    const c = th.find(x => okCenter(x.center));
-    if (!c) return;
-    const m = meanPos(c.i, c.j);
-    picks.push({ kind: "thermal", center: c.center, f0: track[c.i].timeSec - 8, f1: track[c.j].timeSec + 8,
-      lat: m.lat, lon: m.lon, label: `Thermik · +${c.rate.toFixed(1)} m/s` });
-  };
 
-  // Höchster Punkt (über 9 Punkte geglättet, damit ein GPS-Ausreisser nicht gewinnt)
-  const takePeak = () => {
-    let best = -1, bestAlt = -Infinity;
+  if (elev) {
+    // 2) Hang-/Gratflug: 45 s dicht über dem Gelände, geradeaus, im schroffen Gelände
+    for (let i = 0; i < n - 1; i += 5) {
+      const j = at(track[i].timeSec + 45);
+      if (track[j].timeSec - track[i].timeSec < 36) break;
+      if (turnSumDegBetween(track, i, j) > 150) continue;
+      const kmh = (haversineDistKm(track[i], track[j]) || 0) / ((track[j].timeSec - track[i].timeSec) / 3600);
+      if (kmh < 15) continue;
+      let sum = 0, cnt = 0, bad = false;
+      for (let k = i; k <= j; k += Math.max(1, Math.floor((j - i) / 8))) {
+        const g = ground(track[k].lat, track[k].lon); if (g == null) { bad = true; break; }
+        const a = track[k].gpsAlt - g; if (a < -30 || a > 300) { bad = true; break; } sum += a; cnt++;
+      }
+      if (bad || !cnt) continue;
+      const mid = Math.floor((i + j) / 2);
+      const rg = rugged(track[mid].lat, track[mid].lon);
+      if (rg < 0.45) continue;
+      const h = headingOver(i, j);
+      const L = offs(track[mid].lat, track[mid].lon, h - 90, 400), R = offs(track[mid].lat, track[mid].lon, h + 90, 400);
+      const gl = ground(L[0], L[1]), gr = ground(R[0], R[1]);
+      const bSide = (gl != null && gr != null && gl > gr) ? h - 90 : h + 90; // Blick Richtung Hang
+      push({ kind: "ridge", primary: true, score: 4 + rg * 3 + (300 - sum / cnt) / 150,
+        center: (track[i].timeSec + track[j].timeSec) / 2, f0: track[i].timeSec - 6, f1: track[j].timeSec + 6, lat: track[mid].lat, lon: track[mid].lon,
+        bSide, label: "Hangflug am Grat" });
+    }
+
+    // 3) Gipfelüberflug: knapp über einem lokalen Höhenmaximum
+    for (let i = 0; i < n; i += 5) {
+      const p = track[i];
+      const g = ground(p.lat, p.lon); if (g == null) continue;
+      const agl = p.gpsAlt - g;
+      if (agl < -20 || agl > 220) continue;
+      let ringMin = g, ringMax = g, ok = true;
+      for (let k = 0; k < 8; k++) {
+        const [la, lo] = offs(p.lat, p.lon, k * 45, 700);
+        const e = ground(la, lo); if (e == null) { ok = false; break; }
+        ringMin = Math.min(ringMin, e); ringMax = Math.max(ringMax, e);
+      }
+      if (!ok || ringMax > g + 25 || ringMin > g - 150) continue;
+      const k0 = Math.max(0, i - 8), k1 = Math.min(n - 1, i + 8);
+      const h = headingOver(k0, k1);
+      push({ kind: "summit", primary: true, score: 5 + (220 - Math.max(0, agl)) / 90 + (g - ringMin) / 400,
+        center: p.timeSec, f0: p.timeSec - 22, f1: p.timeSec + 22, lat: p.lat, lon: p.lon, heading: h,
+        label: `Gipfelüberflug · ${Math.round(g).toLocaleString("de-CH")} m` });
+    }
+
+    // 4) Talquerung: geradeaus über ein tiefes Tal
+    for (let i = 0; i < n - 1; i += 5) {
+      const j = at(track[i].timeSec + 60);
+      if (track[j].timeSec - track[i].timeSec < 48) break;
+      if (turnSumDegBetween(track, i, j) > 45) continue;
+      const gs = [];
+      for (let s = 0; s <= 6; s++) { const k = i + Math.round((j - i) * s / 6); gs.push(ground(track[k].lat, track[k].lon)); }
+      if (gs.some(v => v == null)) continue;
+      const mid = Math.min(gs[2], gs[3], gs[4]);
+      const rim = Math.min(Math.max(gs[0], gs[1]), Math.max(gs[5], gs[6]));
+      if (rim - mid < 250 || Math.max(...gs) - Math.min(...gs) < 450) continue;
+      const km = Math.floor((i + j) / 2);
+      if (track[km].gpsAlt - mid < 250) continue;
+      push({ kind: "crossing", primary: true, score: 3.5 + (rim - mid) / 400,
+        center: (track[i].timeSec + track[j].timeSec) / 2, f0: track[i].timeSec - 4, f1: track[j].timeSec + 4, lat: track[km].lat, lon: track[km].lon,
+        bSide: headingOver(i, j) + 90, label: "Talquerung" });
+    }
+  }
+
+  // Füller: höchster Punkt (Panorama) und schnellste Gleitphase
+  { let best = -1, bestAlt = -Infinity;
     for (let i = 4; i < n - 4; i++) {
       let s = 0; for (let k = -4; k <= 4; k++) s += track[i+k].gpsAlt;
-      const a = s / 9;
-      if (a > bestAlt && okCenter(track[i].timeSec)) { bestAlt = a; best = i; }
+      if (s / 9 > bestAlt) { bestAlt = s / 9; best = i; }
     }
-    if (best < 0) return;
-    picks.push({ kind: "peak", center: track[best].timeSec, f0: track[best].timeSec - 22, f1: track[best].timeSec + 22,
-      label: `Höchster Punkt · ${Math.round(bestAlt).toLocaleString("de-CH")} m` });
-  };
-
-  // Schnellste Gleitphase (40 s, ohne Kreisen)
-  const takeGlide = () => {
-    let best = null; let k = 0;
-    for (let i = 0; i < n - 1; i++) {
+    if (best >= 0) push({ kind: "peak", primary: false, score: 3, center: track[best].timeSec, f0: track[best].timeSec - 22, f1: track[best].timeSec + 22,
+      lat: track[best].lat, lon: track[best].lon, label: `Höchster Punkt · ${Math.round(bestAlt).toLocaleString("de-CH")} m` });
+  }
+  { let bestG = null, k = 0;
+    for (let i = 0; i < n - 1; i += 2) {
+      if (k < i) k = i;
       while (k < n - 1 && track[k].timeSec - track[i].timeSec < 40) k++;
       const dt = track[k].timeSec - track[i].timeSec;
       if (dt < 32) break;
-      const c = (track[i].timeSec + track[k].timeSec) / 2;
-      if (!okCenter(c)) continue;
       const kmh = (haversineDistKm(track[i], track[k]) || 0) / (dt / 3600);
-      if ((!best || kmh > best.kmh) && turnSumDegBetween(track, i, k) < 60) best = { kmh, c };
+      if ((!bestG || kmh > bestG.kmh) && turnSumDegBetween(track, i, k) < 60) bestG = { kmh, i, k };
     }
-    if (best) picks.push({ kind: "glide", center: best.c, f0: best.c - 20, f1: best.c + 20, label: `Schnelle Gleitphase · ${Math.round(best.kmh)} km/h` });
-  };
+    if (bestG) { const c = (track[bestG.i].timeSec + track[bestG.k].timeSec) / 2, m = track[at(c)];
+      push({ kind: "glide", primary: false, score: 2.5, center: c, f0: c - 20, f1: c + 20, lat: m.lat, lon: m.lon, label: `Schnelle Gleitphase · ${Math.round(bestG.kmh)} km/h` }); }
+  }
 
-  takeThermal(); takePeak(); takeThermal();
-  if (picks.length < 3) takeGlide();
-  return picks.slice(0, 3).sort((a, b) => a.center - b.center);
+  // Spiralen / Wingover: nur falls sonst nichts Interessantes gefunden wurde
+  const maneuvers = [];
+  if (!cands.some(c => c.primary)) {
+    const glitch = buildAltitudeGlitchPrefix(track);
+    for (const { startIdx, endIdx } of findRawManeuverRuns(track)) {
+      const dur = track[endIdx].timeSec - track[startIdx].timeSec;
+      const totalTurn = turnSumDegBetween(track, startIdx, endIdx);
+      if (dur < MANEUVER_MIN_DURATION_SEC || totalTurn < MANEUVER_MIN_TURN_DEG) continue;
+      const avgSink = (track[endIdx].gpsAlt - track[startIdx].gpsAlt) / dur;
+      if (avgSink > MANEUVER_MIN_AVG_SINK) continue;
+      const ratio = totalTurn > 0 ? Math.abs(turnNetSumDegBetween(track, startIdx, endIdx)) / totalTurn : 0;
+      const spiral = ratio >= SPIRAL_NET_RATIO;
+      if (spiral && totalTurn < SPIRAL_MIN_TURN_DEG) continue;
+      if (!spiral && countWingoverSwings(track, startIdx, endIdx) < 1) continue;
+      const maxSink = maxSinkInRange(track, startIdx, endIdx, glitch);
+      const m = meanPos(startIdx, endIdx);
+      maneuvers.push({ kind: spiral ? "spiral" : "wingover", primary: false, score: 2 + Math.min(2, Math.abs(maxSink) / 10), center: (track[startIdx].timeSec + track[endIdx].timeSec) / 2,
+        f0: track[startIdx].timeSec - 6, f1: track[endIdx].timeSec + 6, lat: m.lat, lon: m.lon, orbit: true,
+        label: `${spiral ? "Spirale" : "Wingover"} · ${maxSink.toFixed(0)} m/s` });
+    }
+  }
+
+  // Auswahl: beste zuerst, nicht überlappend, nicht im Start-/Landebereich,
+  // höchstens 2 pro Art
+  const picks = [];
+  const okCenter = (c) => c.center > t0 + 75 && c.center < t1 - 100 && picks.every(p => Math.abs(p.center - c.center) > 110);
+  const kindCount = (k) => picks.filter(p => p.kind === k).length;
+  const take = (list) => { for (const c of list.sort((a, b) => b.score - a.score)) { if (picks.length >= maxPicks) return; if (okCenter(c) && kindCount(c.kind) < 2) picks.push(c); } };
+  take(cands.filter(c => c.primary));
+  if (!picks.length) take(maneuvers);
+  take(cands.filter(c => c.kind === "peak"));
+  take(cands.filter(c => c.kind === "glide"));
+  return picks.sort((a, b) => a.center - b.center);
 }
 
 function videoPosAt(track, tSec) {
@@ -1630,31 +1799,41 @@ function videoHeadingAt(track, tSec, w) {
 
 // Drehbuch: Liste von Einstellungen (Shots) mit Videozeit [t0,t1] und
 // Flugzeitbereich [f0,f1]. Abfolge: Start · Highlight* · Landung · Rückzug
-// auf die Gesamtansicht, dazwischen jeweils Aus-/Einblenden.
+// auf die Gesamtansicht. Die Länge der Highlights richtet sich nach ihrer
+// Bewertung; innerhalb eines Highlights läuft die Zeit in der Mitte langsamer
+// als an den Rändern (warp). Liegen zwei Szenen nahe beieinander, gleitet die
+// Kamera ineinander über (near) und blendet nur kurz aus.
 function buildVideoScript(track, highlights, D, flight) {
   const t0 = track[0].timeSec, t1 = track[track.length-1].timeSec, total = t1 - t0;
   const startLen = Math.min(70, total * 0.08), landLen = Math.min(80, total * 0.1);
   const hl = highlights.filter(h => h.f0 > t0 + startLen + 10 && h.f1 < t1 - landLen - 10);
   const dStart = D * 0.16, dLand = D * 0.16, dOutro = Math.max(3, D * 0.07);
-  const dHl = hl.length ? Math.min((D - dStart - dLand - dOutro) / hl.length, D * 0.24) : 0;
+  const avail = D - dStart - dLand - dOutro;
+  const wts = hl.map(h => 0.7 + 0.6 * Math.max(0, Math.min(1, (h.score - 2) / 5)));
+  const wSum = wts.reduce((a, b) => a + b, 0) || 1;
   const shots = [];
   const push = (s) => shots.push(s);
   const b0 = (f) => { const h = videoHeadingAt(track, f, 20); return h == null ? 0 : h; };
   const where = flight?.site ? ` · ${flight.site}` : "";
-  // Zwischen den Szenen wird aus- und eingeblendet (kein schneller Flug
-  // dazwischen — der liess die Kartenkacheln nicht nachkommen und ruckelte).
-  push({ kind: "start", label: `START${where}`, f0: t0, f1: t0 + startLen, d: dStart, b0: b0(t0 + 30) });
-  hl.forEach(h => push({ kind: h.kind, label: h.label, f0: h.f0, f1: h.f1, d: dHl, b0: b0(h.f0), center: [h.lon, h.lat] }));
-  push({ kind: "land", label: "LANDUNG", f0: t1 - landLen, f1: t1, d: dLand });
+  push({ kind: "start", label: `START${where}`, f0: t0, f1: t0 + startLen, d: dStart, warp: 0, b0: b0(t0 + 30) });
+  hl.forEach((h, k) => push({ kind: h.kind, label: h.label, f0: h.f0, f1: h.f1, d: Math.min(avail * wts[k] / wSum, D * 0.26), warp: 0.6, b0: b0(h.f0),
+    center: h.orbit ? [h.lon, h.lat] : null, pin: [h.lon, h.lat], bSide: h.bSide, heading: h.heading }));
+  push({ kind: "land", label: "LANDUNG", f0: t1 - landLen, f1: t1, d: dLand, warp: 0 });
   const land = shots[shots.length-1];
   let dist = 0;
   for (let i = 1; i < track.length; i++) dist += haversineDistKm(track[i-1], track[i]) || 0;
   const h = Math.floor(total / 3600), m = Math.round((total % 3600) / 60);
-  push({ kind: "outro", label: `${h > 0 ? h + ":" + String(m).padStart(2, "0") + " h" : m + " min"} · ${dist.toFixed(1)} km`, f0: t1, f1: t1, d: dOutro, prev: land });
+  push({ kind: "outro", label: `${h > 0 ? h + ":" + String(m).padStart(2, "0") + " h" : m + " min"} · ${dist.toFixed(1)} km`, f0: t1, f1: t1, d: dOutro, warp: 0, prev: land });
   // auf exakt D normieren (Rundung/Verteilung) und Videozeiten setzen
   const sum = shots.reduce((a, s) => a + s.d, 0);
   let acc = 0;
   shots.forEach(s => { s.d *= D / sum; s.t0 = acc; acc += s.d; s.t1 = acc; });
+  // nahe beieinanderliegende Szenen: weicher Übergang
+  shots.forEach((s, k) => {
+    if (k === 0 || s.kind === "outro" || shots[k-1].kind === "outro") return;
+    const a = videoPosAt(track, shots[k-1].f1), b = videoPosAt(track, s.f0);
+    s.near = (haversineDistKm(a, b) || 0) < 1.5;
+  });
   return shots;
 }
 
@@ -1709,7 +1888,14 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       const lats = track.map(p => p.lat), lons = track.map(p => p.lon);
       const bounds = [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]];
 
-      const shots = buildVideoScript(track, computeVideoHighlights(track), D, flight);
+      setStatus("Gelände wird analysiert …", 0);
+      let dem = null;
+      try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); }
+      if (cancelled) return;
+      const maxPicks = D >= 60 ? 4 : D >= 45 ? 3 : 2;
+      const events = computeVideoHighlights(track, dem && dem.elev, maxPicks);
+      const shots = buildVideoScript(track, events, D, flight);
+      console.info("Flug-Video: Gelände " + (dem ? `${dem.tiles} Kacheln (z${dem.z})` : "nicht verfügbar") + " · Szenen:", events.map(e => e.label));
       const stride = Math.max(1, Math.ceil(n / 700));
       const dec = []; for (let i = 0; i < n; i += stride) dec.push(i);
       if (dec[dec.length-1] !== n-1) dec.push(n-1);
@@ -1745,7 +1931,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       mb.save(); mb.scale(2, 2); mb.lineJoin = "round"; mb.lineCap = "round";
       trace(mb, decPx, decPx.length); mb.strokeStyle = "rgba(255,255,255,0.85)"; mb.lineWidth = 5; mb.stroke();
       trace(mb, decPx, decPx.length); mb.strokeStyle = "rgba(30,58,138,0.6)"; mb.lineWidth = 2.2; mb.stroke();
-      shots.filter(s => s.center).forEach(s => { const q = miniPx(s.center[0], s.center[1]); mb.beginPath(); mb.arc(q[0], q[1], 5, 0, 7); mb.fillStyle = "#facc15"; mb.fill(); mb.strokeStyle = "#fff"; mb.lineWidth = 2; mb.stroke(); });
+      shots.filter(s => s.pin).forEach(s => { const q = miniPx(s.pin[0], s.pin[1]); mb.beginPath(); mb.arc(q[0], q[1], 5, 0, 7); mb.fillStyle = "#facc15"; mb.fill(); mb.strokeStyle = "#fff"; mb.lineWidth = 2; mb.stroke(); });
       mb.restore();
       mini.remove(); mini = null;
 
@@ -1771,6 +1957,10 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
           case "transit": { const h = videoHeadingAt(track, ft, 25); c = { center: [pos.lon, pos.lat], bearing: h == null ? sh.b0 || 0 : h, pitch: 58, zoom: 12.6 }; break; }
           case "thermal": c = { center: sh.center, bearing: sh.b0 + 170 * u, pitch: 56, zoom: 14.7 }; break;
           case "peak": { const h = videoHeadingAt(track, ft, 10); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) + 80 + 25 * e, pitch: 60, zoom: 13.9 }; break; }
+          case "ridge": c = { center: [pos.lon, pos.lat], bearing: sh.bSide + 12 * Math.sin(u * Math.PI), pitch: 50, zoom: 14.3 }; break;
+          case "summit": c = { center: [pos.lon, pos.lat], bearing: (sh.heading || 0) + 180 - 70 * e, pitch: 60, zoom: 14.6 }; break;
+          case "crossing": c = { center: [pos.lon, pos.lat], bearing: sh.bSide, pitch: 55, zoom: 13.5 }; break;
+          case "spiral": case "wingover": c = { center: sh.center, bearing: sh.b0 + 170 * u, pitch: 58, zoom: 14.5 }; break;
           case "glide": { const h = videoHeadingAt(track, ft, 15); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) - 50, pitch: 58, zoom: 14 }; break; }
           case "land": {
             // Ruhige Landekamera: Blick auf die Strecke Anflugbeginn → Landeplatz
@@ -1797,14 +1987,22 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         let si = shots.findIndex(s => t < s.t1); if (si < 0) si = shots.length - 1;
         const sh = shots[si];
         const u = clamp((t - sh.t0) / Math.max(1e-6, sh.d), 0, 1);
-        const ft = lerp(sh.f0, sh.f1, u);
+        // Zeit nach Interesse: in der Szenenmitte langsamer, an den Rändern schneller
+        const ft = lerp(sh.f0, sh.f1, u + (sh.warp || 0) * Math.sin(2 * Math.PI * u) / (2 * Math.PI));
         const pos = videoPosAt(track, ft);
-        const cam = cameraFor(sh, u, pos);
+        let cam = cameraFor(sh, u, pos);
+        if (sh.near && si > 0 && t - sh.t0 < 1.2) {
+          // weicher Kameraübergang aus der vorigen Szene (nahe Szenen)
+          const pv = shots[si-1], a = cameraFor(pv, 1, videoPosAt(track, pv.f1));
+          const fr = (t - sh.t0) / 1.2, ee = fr * fr * (3 - 2 * fr);
+          cam = { center: [lerp(a.center[0], cam.center[0], ee), lerp(a.center[1], cam.center[1], ee)], zoom: lerp(a.zoom, cam.zoom, ee),
+            bearing: a.bearing + wrapDelta(a.bearing, cam.bearing) * ee, pitch: lerp(a.pitch, cam.pitch, ee) };
+        }
         // Überblendung (kurz schwarz) an jedem harten Schnitt – nicht vor dem Rückzug
-        const cuts = [0, D];
-        shots.forEach((s, k) => { if (k < shots.length - 1 && shots[k+1].kind !== "outro") cuts.push(s.t1); });
+        const cuts = [[0, 0.5], [D, 0.5]];
+        shots.forEach((s, k) => { if (k < shots.length - 1 && shots[k+1].kind !== "outro") cuts.push([s.t1, shots[k+1].near ? 0.25 : 0.5]); });
         let fade = 0;
-        cuts.forEach(bt => { fade = Math.max(fade, 1 - Math.abs(t - bt) / 0.5); });
+        cuts.forEach(([bt, w]) => { fade = Math.max(fade, 1 - Math.abs(t - bt) / w); });
         return { sh, u, ft, pos, cam, fade: clamp(fade, 0, 1) };
       };
       const mercPerPx = (lat, zoom) => 40075016.686 * Math.cos(lat * Math.PI / 180) / (512 * Math.pow(2, zoom));
@@ -2099,8 +2297,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   };
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
-  const highlightCount = useMemo(() => computeVideoHighlights(track).length, [track]);
-  const fileName = `Flug_${(flight?.date || "").replace(/[^0-9A-Za-z]+/g, "-")}_${(flight?.site || "").replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_")}`;
+    const fileName = `Flug_${(flight?.date || "").replace(/[^0-9A-Za-z]+/g, "-")}_${(flight?.site || "").replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_")}`;
   const chip = (active) => ({ flex:1, height:40, borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const canShare = result && navigator.canShare && (() => { try { return navigator.canShare({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })] }); } catch { return false; } })();
@@ -2126,7 +2323,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             )}
             <div style={{fontSize:13,color:"rgba(232,244,253,0.75)",lineHeight:1.5}}>
               Erzeugt ein kurzes Video mit 3D-Satellitenkarte und wechselnden Kameras:
-              Start → {highlightCount > 0 ? `${highlightCount} Highlight${highlightCount>1?"s":""} (Thermik, höchster Punkt, schnelle Gleitphase)` : "Flug"} → Landung.
+              Start → Highlights (starke Thermik, Hang-/Gratflug, Gipfelüberflug, Talquerung …) → Landung.
               In der Ecke läuft eine Geländekarte von oben mit dem Positionspunkt mit.
             </div>
             <div>
