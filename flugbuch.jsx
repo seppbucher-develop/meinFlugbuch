@@ -1696,7 +1696,14 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       const n = track.length;
       const t0 = track[0].timeSec, t1 = track[n-1].timeSec;
       const D = duration;
+      // MapLibre 5: der Zeichenpuffer bleibt nur mit canvasContextAttributes
+      // erhalten — das alte Top-Level-"preserveDrawingBuffer" wird ignoriert.
+      // Bilder, die ausserhalb des Karten-Renderings abgegriffen wurden,
+      // waren dadurch leer/schwarz (schwarzes Aufblitzen im Video, leere
+      // Minikarte). Beide Schreibweisen setzen und zusätzlich direkt beim
+      // Rendern in ein eigenes Canvas kopieren (siehe frameCopy/miniBase).
       const base = { apiKey: mapTilerKey, language: "de", interactive: false, pixelRatio: 1, preserveDrawingBuffer: true,
+        canvasContextAttributes: { preserveDrawingBuffer: true },
         fadeDuration: 0, attributionControl: false, navigationControl: false, geolocateControl: false,
         scaleControl: false, fullscreenControl: false, terrainControl: false };
       const lats = track.map(p => p.lat), lons = track.map(p => p.lon);
@@ -1716,12 +1723,13 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       setStatus("Geländekarte wird geladen …", 0);
       mini = new sdk.Map({ ...base, pixelRatio: 2, container: miniDivRef.current, style: sdk.MapStyle.OUTDOOR, terrain: false,
         bounds, fitBoundsOptions: { padding: 30 } });
+      const miniBase = document.createElement("canvas"); miniBase.width = M * 2; miniBase.height = M * 2;
+      const mb = miniBase.getContext("2d", { willReadFrequently: true });
+      // Im Render-Moment kopieren (dann ist der Zeichenpuffer garantiert gefüllt)
+      mini.on("render", () => { try { mb.drawImage(mini.getCanvas(), 0, 0, M * 2, M * 2); } catch {} });
       await waitLoad(mini);
       await waitIdle(mini, 8000);
       if (cancelled) return;
-      const miniBase = document.createElement("canvas"); miniBase.width = M * 2; miniBase.height = M * 2;
-      const mb = miniBase.getContext("2d");
-      mb.drawImage(mini.getCanvas(), 0, 0, M * 2, M * 2);
       // Leer geblieben? (z.B. WebGL-Problem) → heller Papier-Hintergrund statt Durchsicht
       let blank = true;
       try { for (const [fx, fy] of [[.2,.2],[.5,.5],[.8,.8],[.2,.8],[.8,.2]]) if (mb.getImageData(Math.floor(fx*M*2), Math.floor(fy*M*2), 1, 1).data[3] > 0) blank = false; } catch { blank = false; }
@@ -1874,7 +1882,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       const draw = (t) => {
         if (!snap) return;
         const st = snap.st, curLift = snap.lift;
-        ctx.drawImage(main.getCanvas(), 0, 0, W, H);
+        ctx.drawImage(frameCopy, 0, 0, W, H);
         const s = portrait ? 0.8 : 1;
         // Pilot (in Flughöhe, mit "Lot" zum Boden)
         if (st.sh.kind !== "outro" || st.u < 0.6) {
@@ -1945,7 +1953,10 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       // festgehalten (snap) — das Ausgabebild zeigt so immer Karte, Marker
       // und Anzeigen vom selben Zustand, ohne dass die Aufnahme je auf die
       // Karten warten muss (das war die Ursache für das Ruckeln).
+      const frameCopy = document.createElement("canvas"); frameCopy.width = W; frameCopy.height = H;
+      const fctx = frameCopy.getContext("2d");
       main.on("render", () => {
+        try { fctx.drawImage(main.getCanvas(), 0, 0, W, H); } catch {}
         if (!curState) return;
         const g = main.project([curState.pos.lon, curState.pos.lat]);
         snap = { st: curState, lift: curLift, gx: g.x, gy: g.y };
