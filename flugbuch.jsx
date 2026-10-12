@@ -1534,8 +1534,8 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
 // (Start → Highlights → Landung) und – in einer Ecke – eine Geländekarte
 // (Outdoor-Stil) von oben mit dem synchron mitlaufenden Positionspunkt.
 //
-// Technik: zwei MapTiler-Karten (Haupt + Minikarte) rendern in versteckten
-// Containern; jedes Bild wird in ein Ausgabe-Canvas zusammenkopiert (Karte,
+// Technik: die Geländekarte (Minikarte) wird einmal als Bild gerendert, die
+// 3D-Satellitenkarte läuft live in einem versteckten Container; jedes Bild wird in ein Ausgabe-Canvas zusammenkopiert (Karte,
 // Minikarte, Texteinblendungen) und per MediaRecorder in Echtzeit
 // aufgenommen. Vorher läuft die Kamerafahrt einmal "trocken" durch, damit
 // alle Kartenkacheln im Cache liegen und das Video nicht unscharf startet.
@@ -1629,36 +1629,22 @@ function videoHeadingAt(track, tSec, w) {
 }
 
 // Drehbuch: Liste von Einstellungen (Shots) mit Videozeit [t0,t1] und
-// Flugzeitbereich [f0,f1]. Abfolge: Start · (Anflug → Highlight)* · Anflug ·
-// Landung · Rückzug auf die Gesamtansicht.
+// Flugzeitbereich [f0,f1]. Abfolge: Start · Highlight* · Landung · Rückzug
+// auf die Gesamtansicht, dazwischen jeweils Aus-/Einblenden.
 function buildVideoScript(track, highlights, D, flight) {
   const t0 = track[0].timeSec, t1 = track[track.length-1].timeSec, total = t1 - t0;
   const startLen = Math.min(70, total * 0.08), landLen = Math.min(80, total * 0.1);
   const hl = highlights.filter(h => h.f0 > t0 + startLen + 10 && h.f1 < t1 - landLen - 10);
-  const dStart = D * 0.14, dLand = D * 0.14, dOutro = Math.max(3, D * 0.07);
-  const avail = D - dStart - dLand - dOutro;
-  const hlTotal = hl.length ? Math.min(hl.length * D * 0.15, avail * 0.7) : 0;
-  const dHl = hl.length ? hlTotal / hl.length : 0;
-  // Flugzeitlücken zwischen den Szenen
-  const gaps = [];
-  let prevEnd = t0 + startLen;
-  hl.forEach(h => { gaps.push({ f0: prevEnd, f1: h.f0 }); prevEnd = h.f1; });
-  gaps.push({ f0: prevEnd, f1: t1 - landLen });
-  const weights = gaps.map(g => (g.f1 - g.f0) > 8 ? Math.sqrt(g.f1 - g.f0) : 0);
-  const wSum = weights.reduce((a, b) => a + b, 0);
-  const transitTotal = avail - hlTotal;
+  const dStart = D * 0.16, dLand = D * 0.16, dOutro = Math.max(3, D * 0.07);
+  const dHl = hl.length ? Math.min((D - dStart - dLand - dOutro) / hl.length, D * 0.24) : 0;
   const shots = [];
   const push = (s) => shots.push(s);
   const b0 = (f) => { const h = videoHeadingAt(track, f, 20); return h == null ? 0 : h; };
   const where = flight?.site ? ` · ${flight.site}` : "";
+  // Zwischen den Szenen wird aus- und eingeblendet (kein schneller Flug
+  // dazwischen — der liess die Kartenkacheln nicht nachkommen und ruckelte).
   push({ kind: "start", label: `START${where}`, f0: t0, f1: t0 + startLen, d: dStart, b0: b0(t0 + 30) });
-  hl.forEach((h, k) => {
-    if (weights[k] > 0 && wSum > 0) push({ kind: "transit", label: null, f0: gaps[k].f0, f1: gaps[k].f1, d: transitTotal * weights[k] / wSum });
-    push({ kind: h.kind, label: h.label, f0: h.f0, f1: h.f1, d: dHl, b0: b0(h.f0), center: [h.lon, h.lat] });
-  });
-  const last = gaps.length - 1;
-  if (weights[last] > 0 && wSum > 0) push({ kind: "transit", label: null, f0: gaps[last].f0, f1: gaps[last].f1, d: transitTotal * weights[last] / wSum });
-  else if (wSum === 0) shots[shots.length-1].d += transitTotal;
+  hl.forEach(h => push({ kind: h.kind, label: h.label, f0: h.f0, f1: h.f1, d: dHl, b0: b0(h.f0), center: [h.lon, h.lat] }));
   push({ kind: "land", label: "LANDUNG", f0: t1 - landLen, f1: t1, d: dLand });
   const land = shots[shots.length-1];
   let dist = 0;
@@ -1716,37 +1702,55 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       const lats = track.map(p => p.lat), lons = track.map(p => p.lon);
       const bounds = [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]];
 
-      setStatus("Karten werden geladen …", 0);
+      const shots = buildVideoScript(track, computeVideoHighlights(track), D, flight);
+      const stride = Math.max(1, Math.ceil(n / 700));
+      const dec = []; for (let i = 0; i < n; i += stride) dec.push(i);
+      if (dec[dec.length-1] !== n-1) dec.push(n-1);
+      const decCoords = dec.map(i => [track[i].lon, track[i].lat]);
+
+      // Minikarte (Geländekarte, Outdoor-Stil): wird EINMAL gerendert und als
+      // Bild festgehalten; danach wird die Karte wieder entfernt. Pro Bild
+      // zeichnen wir nur noch Linie und Positionspunkt flach darüber. So gibt
+      // es nur einen WebGL-Kontext und keine GeoJSON-Updates während der
+      // Aufnahme (früher: zweite Live-Karte, die leer blieb und ruckelte).
+      setStatus("Geländekarte wird geladen …", 0);
+      mini = new sdk.Map({ ...base, pixelRatio: 2, container: miniDivRef.current, style: sdk.MapStyle.OUTDOOR, terrain: false,
+        bounds, fitBoundsOptions: { padding: 30 } });
+      await waitLoad(mini);
+      await waitIdle(mini, 8000);
+      if (cancelled) return;
+      const miniBase = document.createElement("canvas"); miniBase.width = M * 2; miniBase.height = M * 2;
+      const mb = miniBase.getContext("2d");
+      mb.drawImage(mini.getCanvas(), 0, 0, M * 2, M * 2);
+      // Leer geblieben? (z.B. WebGL-Problem) → heller Papier-Hintergrund statt Durchsicht
+      let blank = true;
+      try { for (const [fx, fy] of [[.2,.2],[.5,.5],[.8,.8],[.2,.8],[.8,.2]]) if (mb.getImageData(Math.floor(fx*M*2), Math.floor(fy*M*2), 1, 1).data[3] > 0) blank = false; } catch { blank = false; }
+      if (blank) { console.warn("Flug-Video: Minikarte blieb leer – Ersatzhintergrund"); mb.fillStyle = "#e9efe4"; mb.fillRect(0, 0, M * 2, M * 2); }
+      const miniZoom = mini.getZoom();
+      const p0 = mini.project(decCoords[0]);
+      const mercOf = (lon, lat) => [(lon + 180) / 360, 0.5 - Math.log(Math.tan(Math.PI / 4 + lat * Math.PI / 360)) / (2 * Math.PI)];
+      const m0 = mercOf(decCoords[0][0], decCoords[0][1]);
+      const MS = 512 * Math.pow(2, miniZoom);
+      const miniPx = (lon, lat) => { const m = mercOf(lon, lat); return [p0.x + (m[0] - m0[0]) * MS, p0.y + (m[1] - m0[1]) * MS]; };
+      const decPx = decCoords.map(cc => miniPx(cc[0], cc[1]));
+      const trace = (g, pts, upto) => { g.beginPath(); pts.slice(0, upto).forEach((q, i) => i ? g.lineTo(q[0], q[1]) : g.moveTo(q[0], q[1])); };
+      mb.save(); mb.scale(2, 2); mb.lineJoin = "round"; mb.lineCap = "round";
+      trace(mb, decPx, decPx.length); mb.strokeStyle = "rgba(255,255,255,0.85)"; mb.lineWidth = 5; mb.stroke();
+      trace(mb, decPx, decPx.length); mb.strokeStyle = "rgba(30,58,138,0.6)"; mb.lineWidth = 2.2; mb.stroke();
+      shots.filter(s => s.center).forEach(s => { const q = miniPx(s.center[0], s.center[1]); mb.beginPath(); mb.arc(q[0], q[1], 5, 0, 7); mb.fillStyle = "#facc15"; mb.fill(); mb.strokeStyle = "#fff"; mb.lineWidth = 2; mb.stroke(); });
+      mb.restore();
+      mini.remove(); mini = null;
+
+      setStatus("Satellitenkarte wird geladen …", 0);
       main = new sdk.Map({ ...base, container: mainDivRef.current, style: sdk.MapStyle.SATELLITE, terrain: true, maxPitch: 85, maxTileCacheSize: 600,
         center: [track[0].lon, track[0].lat], zoom: 13, pitch: 60 });
-      mini = new sdk.Map({ ...base, container: miniDivRef.current, style: sdk.MapStyle.OUTDOOR, terrain: false,
-        bounds, fitBoundsOptions: { padding: 26 } });
-      await Promise.all([waitLoad(main), waitLoad(mini)]);
+      await waitLoad(main);
       if (cancelled) return;
 
       const altLayer = createAltitudeTrackLayer(track, 4);
       main.addLayer(altLayer);
       altLayer.setProgress(0);
       const overview = main.cameraForBounds(bounds, { padding: portrait ? 50 : 90, pitch: 0, bearing: 0 }) || { center: main.getCenter(), zoom: 11 };
-
-      // Minikarte: ganzer Track, bisher geflogener Teil, Position, Highlights
-      const stride = Math.max(1, Math.ceil(n / 700));
-      const dec = []; for (let i = 0; i < n; i += stride) dec.push(i);
-      if (dec[dec.length-1] !== n-1) dec.push(n-1);
-      const decCoords = dec.map(i => [track[i].lon, track[i].lat]);
-      const hlList = computeVideoHighlights(track);
-      const shots = buildVideoScript(track, hlList, D, flight);
-      const feat = (coords) => ({ type: "Feature", geometry: { type: "LineString", coordinates: coords } });
-      mini.addSource("full", { type: "geojson", data: feat(decCoords) });
-      mini.addSource("flown", { type: "geojson", data: feat(decCoords.slice(0, 2)) });
-      mini.addSource("pos", { type: "geojson", data: { type: "Feature", geometry: { type: "Point", coordinates: decCoords[0] } } });
-      mini.addSource("hl", { type: "geojson", data: { type: "FeatureCollection", features: shots.filter(s => s.center).map(s => ({ type: "Feature", geometry: { type: "Point", coordinates: s.center } })) } });
-      mini.addLayer({ id: "full-casing", type: "line", source: "full", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#ffffff", "line-width": 5, "line-opacity": 0.8 } });
-      mini.addLayer({ id: "full-line", type: "line", source: "full", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#1e3a8a", "line-width": 2.2, "line-opacity": 0.55 } });
-      mini.addLayer({ id: "flown-line", type: "line", source: "flown", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#f97316", "line-width": 3.6 } });
-      mini.addLayer({ id: "hl-dots", type: "circle", source: "hl", paint: { "circle-radius": 5, "circle-color": "#facc15", "circle-stroke-color": "#fff", "circle-stroke-width": 2 } });
-      mini.addLayer({ id: "pos-dot", type: "circle", source: "pos", paint: { "circle-radius": 7, "circle-color": "#ef4444", "circle-stroke-color": "#fff", "circle-stroke-width": 3 } });
-      await waitIdle(mini, 5000);
 
       // ── Zustand zu einem Videozeitpunkt (rein rechnerisch, ohne Zeitverlauf) ──
       let lastGround = 0;
@@ -1781,12 +1785,12 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         const cuts = [0, D];
         shots.forEach((s, k) => { if (k < shots.length - 1 && shots[k+1].kind !== "outro") cuts.push(s.t1); });
         let fade = 0;
-        cuts.forEach(bt => { fade = Math.max(fade, 1 - Math.abs(t - bt) / 0.3); });
+        cuts.forEach(bt => { fade = Math.max(fade, 1 - Math.abs(t - bt) / 0.5); });
         return { sh, u, ft, pos, cam, fade: clamp(fade, 0, 1) };
       };
       const mercPerPx = (lat, zoom) => 40075016.686 * Math.cos(lat * Math.PI / 180) / (512 * Math.pow(2, zoom));
 
-      let curLift = 0, curState = null, snap = null, lastFlownT = -1;
+      let curLift = 0, curState = null, snap = null;
       const applyState = (t, force) => {
         const st = stateAt(t);
         const ground = main.queryTerrainElevation ? main.queryTerrainElevation([st.pos.lon, st.pos.lat]) : null;
@@ -1797,12 +1801,6 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         const pad = Math.min(liftPx, H * 0.3);
         main.jumpTo({ center: st.cam.center, zoom, bearing: st.cam.bearing, pitch: st.cam.pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
         altLayer.setProgress(st.pos.idx);
-        // Minikarte: geflogener Teil + Position
-        let k = 0; while (k < dec.length && track[dec[k]].timeSec <= st.ft) k++;
-        const flown = decCoords.slice(0, Math.max(2, k)); flown.push([st.pos.lon, st.pos.lat]);
-        // Die Linie nur ca. 4×/s neu setzen (GeoJSON-Update ist teuer), den Punkt jedes Bild.
-        if (force || Math.abs(t - lastFlownT) >= 0.25) { mini.getSource("flown").setData(feat(flown)); lastFlownT = t; }
-        mini.getSource("pos").setData({ type: "Feature", geometry: { type: "Point", coordinates: [st.pos.lon, st.pos.lat] } });
         curLift = liftPx; curState = { ...st, zoom };
         return st;
       };
@@ -1872,7 +1870,14 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         // Minikarte (rechts unten)
         const mx = W - mg - M, my = H - mg - M - 8 * s;
         ctx.save(); rr(mx, my, M, M, 16 * s); ctx.clip();
-        ctx.drawImage(mini.getCanvas(), mx, my, M, M);
+        ctx.drawImage(miniBase, mx, my, M, M);
+        ctx.translate(mx, my);
+        let kk = 0; while (kk < dec.length && track[dec[kk]].timeSec <= st.ft) kk++;
+        const cur = miniPx(st.pos.lon, st.pos.lat);
+        const flownPx = decPx.slice(0, Math.max(1, kk)); flownPx.push(cur);
+        ctx.lineJoin = "round"; ctx.lineCap = "round";
+        trace(ctx, flownPx, flownPx.length); ctx.strokeStyle = "#f97316"; ctx.lineWidth = 3.6; ctx.stroke();
+        ctx.beginPath(); ctx.arc(cur[0], cur[1], 7, 0, 7); ctx.fillStyle = "#ef4444"; ctx.fill(); ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.stroke();
         ctx.restore();
         ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; rr(mx, my, M, M, 16 * s); ctx.stroke();
         txt("N ↑", mx + M - 10, my + 22, 16, 800, "#1e3a8a", "right");
@@ -1892,7 +1897,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       });
       const warm = async (t) => {
         applyState(t, true);
-        await Promise.all([waitIdle(main, 3000), waitIdle(mini, 1500)]);
+        await waitIdle(main, 3000);
         draw(t);
       };
 
@@ -1961,7 +1966,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       {ReactDOM.createPortal(
         <>
           <div style={{position:"fixed",left:0,top:0,width:W,height:H,zIndex:1,pointerEvents:"none"}} ref={mainDivRef} />
-          <div style={{position:"fixed",left:0,top:H+10,width:M,height:M,zIndex:1,pointerEvents:"none"}} ref={miniDivRef} />
+          <div style={{position:"fixed",left:0,top:0,width:M,height:M,zIndex:1,pointerEvents:"none"}} ref={miniDivRef} />
         </>,
         document.body
       )}
