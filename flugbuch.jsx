@@ -1635,6 +1635,16 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
   const at = (tc) => { let lo = 0, hi = n - 1; while (hi - lo > 1) { const m = (lo + hi) >> 1; if (track[m].timeSec <= tc) lo = m; else hi = m; } return lo; };
   const headingOver = (i, j) => bearingDeg(track[i], track[j]);
 
+  // Höhenbonus 0..5.5: Ereignisse nahe der höchsten Flughöhe (im Verhältnis zur
+  // Starthöhe) zählen mehr; ab 3500 m zusätzlich ein Alpinbonus. Der Höhepunkt
+  // eines Flugs ist fast immer dort, wo er am höchsten (und am hochalpinsten) ist.
+  let maxAlt = -Infinity;
+  for (let i = 4; i < n - 4; i++) { let s = 0; for (let k = -4; k <= 4; k++) s += track[i+k].gpsAlt; maxAlt = Math.max(maxAlt, s / 9); }
+  const startAlt = track[0].gpsAlt;
+  const altBonus = (alt) => {
+    const rel = maxAlt > startAlt + 200 ? clamp((alt - startAlt) / (maxAlt - startAlt), 0, 1) : 0;
+    return 4 * rel * rel + (alt >= 3500 ? 1.5 : 0);
+  };
   const cands = []; // { kind, primary, score, center, f0, f1, lat, lon, label, orbit?, bSide? }
   const push = (e) => cands.push(e);
 
@@ -1655,7 +1665,7 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
       const rg = rugged(m.lat, m.lon);
       const strong = rate >= 3.0, rough = rg >= RUGGED;
       if (!strong && !rough) continue;
-      push({ kind: "thermal", primary: true, score: strong ? 5 + rate * 1.2 + rg * 2 : 4 + rg * 3 + rate,
+      push({ kind: "thermal", primary: true, score: (strong ? 5 + rate * 1.2 + rg * 2 : 4 + rg * 3 + rate) + altBonus((track[i].gpsAlt + track[j].gpsAlt) / 2),
         center: (track[i].timeSec + track[j].timeSec) / 2, f0: track[i].timeSec - 8, f1: track[j].timeSec + 8, lat: m.lat, lon: m.lon, orbit: true,
         label: `${strong ? "Starke Thermik" : "Thermik am Berg"} · +${rate.toFixed(1)} m/s` });
     }
@@ -1682,7 +1692,7 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
       const L = offs(track[mid].lat, track[mid].lon, h - 90, 400), R = offs(track[mid].lat, track[mid].lon, h + 90, 400);
       const gl = ground(L[0], L[1]), gr = ground(R[0], R[1]);
       const bSide = (gl != null && gr != null && gl > gr) ? h - 90 : h + 90; // Blick Richtung Hang
-      push({ kind: "ridge", primary: true, score: 4 + rg * 3 + (300 - sum / cnt) / 150,
+      push({ kind: "ridge", primary: true, score: 4 + rg * 3 + (300 - sum / cnt) / 150 + altBonus(track[mid].gpsAlt),
         center: (track[i].timeSec + track[j].timeSec) / 2, f0: track[i].timeSec - 6, f1: track[j].timeSec + 6, lat: track[mid].lat, lon: track[mid].lon,
         bSide, label: "Hangflug am Grat" });
     }
@@ -1692,7 +1702,7 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
       const p = track[i];
       const g = ground(p.lat, p.lon); if (g == null) continue;
       const agl = p.gpsAlt - g;
-      if (agl < -20 || agl > 220) continue;
+      if (agl < -20 || agl > 450) continue;
       let ringMin = g, ringMax = g, ok = true;
       for (let k = 0; k < 8; k++) {
         const [la, lo] = offs(p.lat, p.lon, k * 45, 700);
@@ -1700,10 +1710,11 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
         ringMin = Math.min(ringMin, e); ringMax = Math.max(ringMax, e);
       }
       if (!ok || ringMax > g + 25 || ringMin > g - 150) continue;
+      if (agl > 220 && ringMin > g - 400) continue; // höher über Grund nur bei markantem Gipfel
       const k0 = Math.max(0, i - 8), k1 = Math.min(n - 1, i + 8);
       const h = headingOver(k0, k1);
-      push({ kind: "summit", primary: true, score: 5 + (220 - Math.max(0, agl)) / 90 + (g - ringMin) / 400,
-        center: p.timeSec, f0: p.timeSec - 22, f1: p.timeSec + 22, lat: p.lat, lon: p.lon, heading: h,
+      push({ kind: "summit", primary: true, score: 5 + (450 - Math.max(0, agl)) / 200 + (g - ringMin) / 400 + altBonus(p.gpsAlt),
+        center: p.timeSec, f0: p.timeSec - 38, f1: p.timeSec + 18, lat: p.lat, lon: p.lon, heading: h,
         label: `Gipfelüberflug · ${Math.round(g).toLocaleString("de-CH")} m` });
     }
 
@@ -1732,7 +1743,7 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
       let s = 0; for (let k = -4; k <= 4; k++) s += track[i+k].gpsAlt;
       if (s / 9 > bestAlt) { bestAlt = s / 9; best = i; }
     }
-    if (best >= 0) push({ kind: "peak", primary: false, score: 3, center: track[best].timeSec, f0: track[best].timeSec - 22, f1: track[best].timeSec + 22,
+    if (best >= 0) push({ kind: "peak", primary: true, score: 5 + altBonus(bestAlt), center: track[best].timeSec, f0: track[best].timeSec - 22, f1: track[best].timeSec + 22,
       lat: track[best].lat, lon: track[best].lon, label: `Höchster Punkt · ${Math.round(bestAlt).toLocaleString("de-CH")} m` });
   }
   { let bestG = null, k = 0;
@@ -1750,7 +1761,7 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
 
   // Spiralen / Wingover: nur falls sonst nichts Interessantes gefunden wurde
   const maneuvers = [];
-  if (!cands.some(c => c.primary)) {
+  if (!cands.some(c => c.primary && c.kind !== "peak")) {
     const glitch = buildAltitudeGlitchPrefix(track);
     for (const { startIdx, endIdx } of findRawManeuverRuns(track)) {
       const dur = track[endIdx].timeSec - track[startIdx].timeSec;
@@ -1773,12 +1784,11 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
   // Auswahl: beste zuerst, nicht überlappend, nicht im Start-/Landebereich,
   // höchstens 2 pro Art
   const picks = [];
-  const okCenter = (c) => c.center > t0 + 75 && c.center < t1 - 100 && picks.every(p => Math.abs(p.center - c.center) > 110);
+  const okCenter = (c) => c.center > t0 + 75 && c.center < t1 - 100 && picks.every(p => Math.abs(p.center - c.center) > (p.kind === c.kind ? 300 : 110));
   const kindCount = (k) => picks.filter(p => p.kind === k).length;
   const take = (list) => { for (const c of list.sort((a, b) => b.score - a.score)) { if (picks.length >= maxPicks) return; if (okCenter(c) && kindCount(c.kind) < 2) picks.push(c); } };
   take(cands.filter(c => c.primary));
-  if (!picks.length) take(maneuvers);
-  take(cands.filter(c => c.kind === "peak"));
+  if (!picks.some(p => p.kind !== "peak")) take(maneuvers);
   take(cands.filter(c => c.kind === "glide"));
   return picks.sort((a, b) => a.center - b.center);
 }
