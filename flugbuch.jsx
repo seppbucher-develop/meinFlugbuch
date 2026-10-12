@@ -1470,7 +1470,10 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
   }
   const vertCount = (P.length-1) * 6;
   let prog = null, buf = null;
+  let drawSegs = P.length - 1;
   return {
+    // Zeigt nur den Teil des Tracks bis Trackindex idx (Flug-Video: Linie wächst mit).
+    setProgress(idx) { let k = 0; while (k < P.length-1 && P[k+1] <= idx) k++; drawSegs = k; },
     id: "track-altitude", type: "custom", renderingMode: "3d",
     onAdd(map, gl) {
       const sh = (type, src) => { const o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o); return o; };
@@ -1515,7 +1518,7 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
       });
       gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL);
       gl.disable(gl.CULL_FACE);
-      gl.drawArrays(gl.TRIANGLES, 0, vertCount);
+      gl.drawArrays(gl.TRIANGLES, 0, drawSegs * 6);
     },
     onRemove(map, gl) {
       if (buf) gl.deleteBuffer(buf);
@@ -1523,6 +1526,513 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
       buf = prog = null;
     },
   };
+}
+
+// ── Flug-Video (30–60 s) ─────────────────────────────────────────────────
+// Per Knopf (🎬 in der Kartenleiste von FlightMap) erzeugt die App ein
+// kurzes Video des Flugs: 3D-Satellitenkarte mit wechselnden Kameras
+// (Start → Highlights → Landung) und – in einer Ecke – eine Geländekarte
+// (Outdoor-Stil) von oben mit dem synchron mitlaufenden Positionspunkt.
+//
+// Technik: zwei MapTiler-Karten (Haupt + Minikarte) rendern in versteckten
+// Containern; jedes Bild wird in ein Ausgabe-Canvas zusammenkopiert (Karte,
+// Minikarte, Texteinblendungen) und per MediaRecorder in Echtzeit
+// aufgenommen. Vorher läuft die Kamerafahrt einmal "trocken" durch, damit
+// alle Kartenkacheln im Cache liegen und das Video nicht unscharf startet.
+// Es entsteht kein Server-Upload — alles passiert im Browser.
+
+// Gleitende 60-s-Fenster auf dem Track: bestes Steigen im Kreisflug
+// (= guter Thermikschlauch), höchster Punkt (Panorama) und schnellste
+// Gleitphase. "Interessante Landschaft" lässt sich ohne Geländedaten nicht
+// sicher erkennen — der höchste Punkt ist dafür der beste Stellvertreter
+// (grösste Weitsicht, meist über dem Grat/Gipfel).
+function computeVideoHighlights(track) {
+  const n = track.length;
+  if (n < 30) return [];
+  const t0 = track[0].timeSec, t1 = track[n-1].timeSec, total = t1 - t0;
+  if (total < 180) return [];
+  const W = 60;
+  const picks = [];
+  const okCenter = (tc) => tc > t0 + 75 && tc < t1 - 100 && picks.every(p => Math.abs(p.center - tc) > 110);
+  const meanPos = (i, j) => {
+    let la = 0, lo = 0, c = 0;
+    for (let k = i; k <= j; k++) { la += track[k].lat; lo += track[k].lon; c++; }
+    return { lat: la / c, lon: lo / c };
+  };
+
+  // Thermik
+  const th = [];
+  let j = 0;
+  for (let i = 0; i < n - 1; i++) {
+    while (j < n - 1 && track[j].timeSec - track[i].timeSec < W) j++;
+    const dt = track[j].timeSec - track[i].timeSec;
+    if (dt < W * 0.8) break;
+    const gain = track[j].gpsAlt - track[i].gpsAlt;
+    if (gain < 40) continue;
+    if (turnSumDegBetween(track, i, j) < 270) continue;
+    th.push({ i, j, rate: gain / dt, center: (track[i].timeSec + track[j].timeSec) / 2 });
+  }
+  th.sort((a, b) => b.rate - a.rate);
+  const takeThermal = () => {
+    const c = th.find(x => okCenter(x.center));
+    if (!c) return;
+    const m = meanPos(c.i, c.j);
+    picks.push({ kind: "thermal", center: c.center, f0: track[c.i].timeSec - 8, f1: track[c.j].timeSec + 8,
+      lat: m.lat, lon: m.lon, label: `Thermik · +${c.rate.toFixed(1)} m/s` });
+  };
+
+  // Höchster Punkt (über 9 Punkte geglättet, damit ein GPS-Ausreisser nicht gewinnt)
+  const takePeak = () => {
+    let best = -1, bestAlt = -Infinity;
+    for (let i = 4; i < n - 4; i++) {
+      let s = 0; for (let k = -4; k <= 4; k++) s += track[i+k].gpsAlt;
+      const a = s / 9;
+      if (a > bestAlt && okCenter(track[i].timeSec)) { bestAlt = a; best = i; }
+    }
+    if (best < 0) return;
+    picks.push({ kind: "peak", center: track[best].timeSec, f0: track[best].timeSec - 22, f1: track[best].timeSec + 22,
+      label: `Höchster Punkt · ${Math.round(bestAlt).toLocaleString("de-CH")} m` });
+  };
+
+  // Schnellste Gleitphase (40 s, ohne Kreisen)
+  const takeGlide = () => {
+    let best = null; let k = 0;
+    for (let i = 0; i < n - 1; i++) {
+      while (k < n - 1 && track[k].timeSec - track[i].timeSec < 40) k++;
+      const dt = track[k].timeSec - track[i].timeSec;
+      if (dt < 32) break;
+      const c = (track[i].timeSec + track[k].timeSec) / 2;
+      if (!okCenter(c)) continue;
+      const kmh = (haversineDistKm(track[i], track[k]) || 0) / (dt / 3600);
+      if ((!best || kmh > best.kmh) && turnSumDegBetween(track, i, k) < 60) best = { kmh, c };
+    }
+    if (best) picks.push({ kind: "glide", center: best.c, f0: best.c - 20, f1: best.c + 20, label: `Schnelle Gleitphase · ${Math.round(best.kmh)} km/h` });
+  };
+
+  takeThermal(); takePeak(); takeThermal();
+  if (picks.length < 3) takeGlide();
+  return picks.slice(0, 3).sort((a, b) => a.center - b.center);
+}
+
+function videoPosAt(track, tSec) {
+  const n = track.length;
+  if (tSec <= track[0].timeSec) return { ...track[0] };
+  if (tSec >= track[n-1].timeSec) return { ...track[n-1] };
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const m = (lo + hi) >> 1; if (track[m].timeSec <= tSec) lo = m; else hi = m; }
+  const a = track[lo], b = track[hi], f = (tSec - a.timeSec) / Math.max(1e-6, b.timeSec - a.timeSec);
+  return { lat: a.lat + (b.lat - a.lat) * f, lon: a.lon + (b.lon - a.lon) * f, gpsAlt: a.gpsAlt + (b.gpsAlt - a.gpsAlt) * f, timeSec: tSec, idx: lo };
+}
+function videoHeadingAt(track, tSec, w) {
+  const a = videoPosAt(track, tSec - w), b = videoPosAt(track, tSec + w);
+  return (haversineDistKm(a, b) || 0) < 0.003 ? null : bearingDeg(a, b);
+}
+
+// Drehbuch: Liste von Einstellungen (Shots) mit Videozeit [t0,t1] und
+// Flugzeitbereich [f0,f1]. Abfolge: Start · (Anflug → Highlight)* · Anflug ·
+// Landung · Rückzug auf die Gesamtansicht.
+function buildVideoScript(track, highlights, D, flight) {
+  const t0 = track[0].timeSec, t1 = track[track.length-1].timeSec, total = t1 - t0;
+  const startLen = Math.min(70, total * 0.08), landLen = Math.min(80, total * 0.1);
+  const hl = highlights.filter(h => h.f0 > t0 + startLen + 10 && h.f1 < t1 - landLen - 10);
+  const dStart = D * 0.14, dLand = D * 0.14, dOutro = Math.max(3, D * 0.07);
+  const avail = D - dStart - dLand - dOutro;
+  const hlTotal = hl.length ? Math.min(hl.length * D * 0.15, avail * 0.7) : 0;
+  const dHl = hl.length ? hlTotal / hl.length : 0;
+  // Flugzeitlücken zwischen den Szenen
+  const gaps = [];
+  let prevEnd = t0 + startLen;
+  hl.forEach(h => { gaps.push({ f0: prevEnd, f1: h.f0 }); prevEnd = h.f1; });
+  gaps.push({ f0: prevEnd, f1: t1 - landLen });
+  const weights = gaps.map(g => (g.f1 - g.f0) > 8 ? Math.sqrt(g.f1 - g.f0) : 0);
+  const wSum = weights.reduce((a, b) => a + b, 0);
+  const transitTotal = avail - hlTotal;
+  const shots = [];
+  const push = (s) => shots.push(s);
+  const b0 = (f) => { const h = videoHeadingAt(track, f, 20); return h == null ? 0 : h; };
+  const where = flight?.site ? ` · ${flight.site}` : "";
+  push({ kind: "start", label: `START${where}`, f0: t0, f1: t0 + startLen, d: dStart, b0: b0(t0 + 30) });
+  hl.forEach((h, k) => {
+    if (weights[k] > 0 && wSum > 0) push({ kind: "transit", label: null, f0: gaps[k].f0, f1: gaps[k].f1, d: transitTotal * weights[k] / wSum });
+    push({ kind: h.kind, label: h.label, f0: h.f0, f1: h.f1, d: dHl, b0: b0(h.f0), center: [h.lon, h.lat] });
+  });
+  const last = gaps.length - 1;
+  if (weights[last] > 0 && wSum > 0) push({ kind: "transit", label: null, f0: gaps[last].f0, f1: gaps[last].f1, d: transitTotal * weights[last] / wSum });
+  else if (wSum === 0) shots[shots.length-1].d += transitTotal;
+  push({ kind: "land", label: "LANDUNG", f0: t1 - landLen, f1: t1, d: dLand });
+  const land = shots[shots.length-1];
+  let dist = 0;
+  for (let i = 1; i < track.length; i++) dist += haversineDistKm(track[i-1], track[i]) || 0;
+  const h = Math.floor(total / 3600), m = Math.round((total % 3600) / 60);
+  push({ kind: "outro", label: `${h > 0 ? h + ":" + String(m).padStart(2, "0") + " h" : m + " min"} · ${dist.toFixed(1)} km`, f0: t1, f1: t1, d: dOutro, prev: land });
+  // auf exakt D normieren (Rundung/Verteilung) und Videozeiten setzen
+  const sum = shots.reduce((a, s) => a + s.d, 0);
+  let acc = 0;
+  shots.forEach(s => { s.d *= D / sum; s.t0 = acc; acc += s.d; s.t1 = acc; });
+  return shots;
+}
+
+function pickVideoMime() {
+  if (typeof MediaRecorder === "undefined") return null;
+  const c = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+  return c.find(m => { try { return MediaRecorder.isTypeSupported(m); } catch { return false; } }) || null;
+}
+
+// Zeichnet das Video in Echtzeit auf. Läuft komplett in einem Effekt, damit
+// React nur den Fortschritt (Text/Prozent) und am Ende das fertige Blob sieht.
+function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onDone, onError, onCancelRef, setStatus }) {
+  const mainDivRef = useRef(null), miniDivRef = useRef(null), outRef = useRef(null);
+  const W = portrait ? 720 : 1280, H = portrait ? 1280 : 720, M = portrait ? 270 : 330;
+
+  useEffect(() => {
+    let cancelled = false;
+    let main = null, mini = null, wake = null, rec = null;
+    onCancelRef.current = () => { cancelled = true; };
+    const sdk = window.maptilersdk;
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, f) => a + (b - a) * f;
+    const wrapDelta = (a, b) => ((b - a + 540) % 360 + 360) % 360 - 180;
+    const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
+    const waitIdle = (map, ms) => new Promise(res => {
+      let done = false;
+      const fin = () => { if (done) return; done = true; clearTimeout(to); map.off("idle", fin); res(); };
+      const to = setTimeout(fin, ms);
+      map.on("idle", fin); map.triggerRepaint();
+    });
+    const waitRender = (map, ms) => new Promise(res => {
+      let done = false;
+      const fin = () => { if (done) return; done = true; clearTimeout(to); map.off("render", fin); res(); };
+      const to = setTimeout(fin, ms);
+      map.on("render", fin); map.triggerRepaint();
+    });
+    const waitLoad = (map) => new Promise((res, rej) => {
+      if (map.loaded()) { res(); return; }
+      const to = setTimeout(() => rej(new Error("Karte konnte nicht geladen werden (Netzwerk/MapTiler-Schlüssel?)")), 25000);
+      map.once("load", () => { clearTimeout(to); res(); });
+    });
+
+    const run = async () => {
+      if (!sdk) throw new Error("MapTiler-SDK nicht geladen");
+      const n = track.length;
+      const t0 = track[0].timeSec, t1 = track[n-1].timeSec;
+      const D = duration;
+      const base = { apiKey: mapTilerKey, language: "de", interactive: false, pixelRatio: 1, preserveDrawingBuffer: true,
+        fadeDuration: 0, attributionControl: false, navigationControl: false, geolocateControl: false,
+        scaleControl: false, fullscreenControl: false, terrainControl: false };
+      const lats = track.map(p => p.lat), lons = track.map(p => p.lon);
+      const bounds = [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]];
+
+      setStatus("Karten werden geladen …", 0);
+      main = new sdk.Map({ ...base, container: mainDivRef.current, style: sdk.MapStyle.SATELLITE, terrain: true, maxPitch: 85,
+        center: [track[0].lon, track[0].lat], zoom: 13, pitch: 60 });
+      mini = new sdk.Map({ ...base, container: miniDivRef.current, style: sdk.MapStyle.OUTDOOR, terrain: false,
+        bounds, fitBoundsOptions: { padding: 26 } });
+      await Promise.all([waitLoad(main), waitLoad(mini)]);
+      if (cancelled) return;
+
+      const altLayer = createAltitudeTrackLayer(track, 4);
+      main.addLayer(altLayer);
+      altLayer.setProgress(0);
+      const overview = main.cameraForBounds(bounds, { padding: portrait ? 50 : 90, pitch: 0, bearing: 0 }) || { center: main.getCenter(), zoom: 11 };
+
+      // Minikarte: ganzer Track, bisher geflogener Teil, Position, Highlights
+      const stride = Math.max(1, Math.ceil(n / 700));
+      const dec = []; for (let i = 0; i < n; i += stride) dec.push(i);
+      if (dec[dec.length-1] !== n-1) dec.push(n-1);
+      const decCoords = dec.map(i => [track[i].lon, track[i].lat]);
+      const hlList = computeVideoHighlights(track);
+      const shots = buildVideoScript(track, hlList, D, flight);
+      const feat = (coords) => ({ type: "Feature", geometry: { type: "LineString", coordinates: coords } });
+      mini.addSource("full", { type: "geojson", data: feat(decCoords) });
+      mini.addSource("flown", { type: "geojson", data: feat(decCoords.slice(0, 2)) });
+      mini.addSource("pos", { type: "geojson", data: { type: "Feature", geometry: { type: "Point", coordinates: decCoords[0] } } });
+      mini.addSource("hl", { type: "geojson", data: { type: "FeatureCollection", features: shots.filter(s => s.center).map(s => ({ type: "Feature", geometry: { type: "Point", coordinates: s.center } })) } });
+      mini.addLayer({ id: "full-casing", type: "line", source: "full", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#ffffff", "line-width": 5, "line-opacity": 0.8 } });
+      mini.addLayer({ id: "full-line", type: "line", source: "full", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#1e3a8a", "line-width": 2.2, "line-opacity": 0.55 } });
+      mini.addLayer({ id: "flown-line", type: "line", source: "flown", layout: { "line-join": "round", "line-cap": "round" }, paint: { "line-color": "#f97316", "line-width": 3.6 } });
+      mini.addLayer({ id: "hl-dots", type: "circle", source: "hl", paint: { "circle-radius": 5, "circle-color": "#facc15", "circle-stroke-color": "#fff", "circle-stroke-width": 2 } });
+      mini.addLayer({ id: "pos-dot", type: "circle", source: "pos", paint: { "circle-radius": 7, "circle-color": "#ef4444", "circle-stroke-color": "#fff", "circle-stroke-width": 3 } });
+      await waitIdle(mini, 5000);
+
+      // ── Zustand zu einem Videozeitpunkt (rein rechnerisch, ohne Zeitverlauf) ──
+      let lastGround = 0;
+      const cameraFor = (sh, u, pos) => {
+        const e = u * u * (3 - 2 * u);
+        const ft = pos.timeSec;
+        let c;
+        switch (sh.kind) {
+          case "start": c = { center: [pos.lon, pos.lat], bearing: sh.b0 + 160 - 110 * e, pitch: 58 + 10 * e, zoom: 15.3 - 0.7 * e }; break;
+          case "transit": { const h = videoHeadingAt(track, ft, 25); c = { center: [pos.lon, pos.lat], bearing: h == null ? sh.b0 || 0 : h, pitch: 64, zoom: 13.6 }; break; }
+          case "thermal": c = { center: sh.center, bearing: sh.b0 + 170 * u, pitch: 56, zoom: 14.7 }; break;
+          case "peak": { const h = videoHeadingAt(track, ft, 10); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) + 80 + 25 * e, pitch: 74, zoom: 13.9 }; break; }
+          case "glide": { const h = videoHeadingAt(track, ft, 15); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) - 50, pitch: 64, zoom: 14 }; break; }
+          case "land": { const h = videoHeadingAt(track, ft, 10); c = { center: [pos.lon, pos.lat], bearing: (h == null ? 0 : h) + 25 + 60 * e, pitch: 72 - 14 * e, zoom: 14.4 + 1.4 * e }; break; }
+          default: {
+            const a = cameraFor(sh.prev, 1, pos);
+            const ov = { center: [overview.center.lng ?? overview.center[0], overview.center.lat ?? overview.center[1]], zoom: overview.zoom - 0.15, bearing: 0, pitch: 35 };
+            return { center: [lerp(a.center[0], ov.center[0], e), lerp(a.center[1], ov.center[1], e)], zoom: lerp(a.zoom, ov.zoom, e),
+              bearing: a.bearing + wrapDelta(a.bearing, ov.bearing) * e, pitch: lerp(a.pitch, ov.pitch, e) };
+          }
+        }
+        return c;
+      };
+      const stateAt = (t) => {
+        let si = shots.findIndex(s => t < s.t1); if (si < 0) si = shots.length - 1;
+        const sh = shots[si];
+        const u = clamp((t - sh.t0) / Math.max(1e-6, sh.d), 0, 1);
+        const ft = lerp(sh.f0, sh.f1, u);
+        const pos = videoPosAt(track, ft);
+        const cam = cameraFor(sh, u, pos);
+        // Überblendung (kurz schwarz) an jedem harten Schnitt – nicht vor dem Rückzug
+        const cuts = [0, D];
+        shots.forEach((s, k) => { if (k < shots.length - 1 && shots[k+1].kind !== "outro") cuts.push(s.t1); });
+        let fade = 0;
+        cuts.forEach(bt => { fade = Math.max(fade, 1 - Math.abs(t - bt) / 0.3); });
+        return { sh, u, ft, pos, cam, fade: clamp(fade, 0, 1) };
+      };
+      const mercPerPx = (lat, zoom) => 40075016.686 * Math.cos(lat * Math.PI / 180) / (512 * Math.pow(2, zoom));
+
+      let curLift = 0, curState = null;
+      const applyState = (t) => {
+        const st = stateAt(t);
+        const ground = main.queryTerrainElevation ? main.queryTerrainElevation([st.pos.lon, st.pos.lat]) : null;
+        if (ground != null && isFinite(ground)) lastGround = ground;
+        const h = Math.max(0, st.pos.gpsAlt - lastGround);
+        const zoom = st.sh.kind === "outro" ? st.cam.zoom : st.cam.zoom - clamp(Math.log2(1 + h / 450), 0, 1.2);
+        const liftPx = st.sh.kind === "outro" ? 0 : h / mercPerPx(st.pos.lat, zoom) * Math.sin(st.cam.pitch * Math.PI / 180);
+        const pad = Math.min(liftPx, H * 0.3);
+        main.jumpTo({ center: st.cam.center, zoom, bearing: st.cam.bearing, pitch: st.cam.pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
+        altLayer.setProgress(st.pos.idx);
+        // Minikarte: geflogener Teil + Position
+        let k = 0; while (k < dec.length && track[dec[k]].timeSec <= st.ft) k++;
+        const flown = decCoords.slice(0, Math.max(2, k)); flown.push([st.pos.lon, st.pos.lat]);
+        mini.getSource("flown").setData(feat(flown));
+        mini.getSource("pos").setData({ type: "Feature", geometry: { type: "Point", coordinates: [st.pos.lon, st.pos.lat] } });
+        curLift = liftPx; curState = { ...st, zoom };
+        return st;
+      };
+
+      // ── Ausgabe-Canvas ──
+      const out = outRef.current; out.width = W; out.height = H;
+      const ctx = out.getContext("2d");
+      const rr = (x, y, w, h, r) => { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); };
+      const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+      const txt = (s, x, y, size, weight, color, align) => {
+        ctx.font = `${weight} ${size}px ${FONT}`; ctx.textAlign = align || "left"; ctx.textBaseline = "alphabetic";
+        ctx.shadowColor = "rgba(0,0,0,0.75)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 1;
+        ctx.fillStyle = color; ctx.fillText(s, x, y);
+        ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+      };
+      const draw = (t, st) => {
+        ctx.drawImage(main.getCanvas(), 0, 0, W, H);
+        const s = portrait ? 0.8 : 1;
+        // Pilot (in Flughöhe, mit "Lot" zum Boden)
+        if (st.sh.kind !== "outro" || st.u < 0.6) {
+          const g = main.project([st.pos.lon, st.pos.lat]);
+          const py = g.y - curLift, px = g.x;
+          if (px > -50 && px < W + 50 && py > -50 && py < H + 50) {
+            if (curLift > 6) { ctx.strokeStyle = "rgba(255,255,255,0.55)"; ctx.setLineDash([4, 5]); ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(g.x, g.y); ctx.stroke(); ctx.setLineDash([]); }
+            const hd = videoHeadingAt(track, st.ft, 6);
+            ctx.save(); ctx.translate(px, py);
+            ctx.shadowColor = "rgba(0,0,0,0.6)"; ctx.shadowBlur = 10;
+            if (hd != null) { ctx.rotate((hd - curState.cam.bearing) * Math.PI / 180); ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.moveTo(0, -17 * s); ctx.lineTo(11 * s, 11 * s); ctx.lineTo(0, 5 * s); ctx.lineTo(-11 * s, 11 * s); ctx.closePath(); ctx.fill(); ctx.fillStyle = "#ef4444"; ctx.beginPath(); ctx.moveTo(0, -12 * s); ctx.lineTo(7 * s, 8 * s); ctx.lineTo(0, 3 * s); ctx.lineTo(-7 * s, 8 * s); ctx.closePath(); ctx.fill(); }
+            else { ctx.fillStyle = "#ef4444"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 8 * s, 0, 7); ctx.fill(); ctx.stroke(); }
+            ctx.restore();
+          }
+        }
+        // Phasen-Titel (links oben)
+        const mg = 22 * s;
+        if (st.sh.label) {
+          const a = clamp(Math.min((t - st.sh.t0) / 0.5, (st.sh.t1 - t) / 0.5, 1), 0, 1);
+          ctx.globalAlpha = a;
+          ctx.font = `800 ${28 * s}px ${FONT}`;
+          const w = ctx.measureText(st.sh.label).width + 36 * s;
+          ctx.fillStyle = "rgba(4,14,32,0.62)"; rr(mg, mg, w, 52 * s, 14 * s); ctx.fill();
+          txt(st.sh.label, mg + 18 * s, mg + 36 * s, 28 * s, 800, "#fff");
+          ctx.globalAlpha = 1;
+        }
+        // Titel zu Beginn
+        if (t < 3.2) {
+          const a = clamp(Math.min(t / 0.5, (3.2 - t) / 0.7, 1), 0, 1);
+          ctx.globalAlpha = a;
+          txt(flight?.date || "", W / 2, H * 0.2 + 52 * s, 30 * s, 600, "rgba(255,255,255,0.9)", "center");
+          if (flight?.glider) txt(flight.glider, W / 2, H * 0.2 + 90 * s, 24 * s, 500, "rgba(255,255,255,0.8)", "center");
+          ctx.globalAlpha = 1;
+        }
+        // Kennwerte (links unten)
+        const pA = videoPosAt(track, st.ft - 3), pB = videoPosAt(track, st.ft + 3);
+        const dtw = Math.max(1, pB.timeSec - pA.timeSec);
+        const kmh = (haversineDistKm(pA, pB) || 0) / (dtw / 3600), vario = (pB.gpsAlt - pA.gpsAlt) / dtw;
+        const bx = mg, bw = 230 * s, bh = 112 * s, by = H - mg - bh - 8 * s;
+        ctx.fillStyle = "rgba(4,14,32,0.62)"; rr(bx, by, bw, bh, 14 * s); ctx.fill();
+        txt(`${Math.round(st.pos.gpsAlt).toLocaleString("de-CH")} m`, bx + 16 * s, by + 38 * s, 30 * s, 800, "#fff");
+        txt(`${Math.round(kmh)} km/h`, bx + 16 * s, by + 70 * s, 22 * s, 600, "#bfdbfe");
+        txt(`${vario >= 0 ? "+" : "−"}${Math.abs(vario).toFixed(1)} m/s`, bx + 16 * s, by + 100 * s, 22 * s, 700, vario >= 0.3 ? "#4ade80" : vario <= -2 ? "#f87171" : "#e5e7eb");
+        // Flugfortschritt (unten)
+        const fr = clamp((st.ft - t0) / (t1 - t0), 0, 1);
+        ctx.fillStyle = "rgba(255,255,255,0.28)"; ctx.fillRect(0, H - 6, W, 6);
+        ctx.fillStyle = "#f97316"; ctx.fillRect(0, H - 6, W * fr, 6);
+        // Minikarte (rechts unten)
+        const mx = W - mg - M, my = H - mg - M - 8 * s;
+        ctx.save(); rr(mx, my, M, M, 16 * s); ctx.clip();
+        ctx.drawImage(mini.getCanvas(), mx, my, M, M);
+        ctx.restore();
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; rr(mx, my, M, M, 16 * s); ctx.stroke();
+        txt("N ↑", mx + M - 10, my + 22, 16, 800, "#1e3a8a", "right");
+        // Quellenhinweis (MapTiler-Lizenz)
+        txt("© MapTiler © OpenStreetMap contributors", W - 8, H - 12, 11, 500, "rgba(255,255,255,0.75)", "right");
+        // Überblendung zwischen den Einstellungen
+        if (st.fade > 0) { ctx.fillStyle = `rgba(0,0,0,${st.fade})`; ctx.fillRect(0, 0, W, H); }
+      };
+      const frame = async (t, tilesWait) => {
+        const st = applyState(t);
+        if (tilesWait) await Promise.all([waitIdle(main, 3000), waitIdle(mini, 1500)]);
+        else await Promise.all([waitRender(main, 250), waitRender(mini, 250)]);
+        draw(t, curState);
+      };
+
+      // ── 1) Kartenkacheln vorladen ──
+      const STEP = 0.8;
+      const steps = Math.ceil(D / STEP);
+      for (let i = 0; i <= steps; i++) {
+        if (cancelled) return;
+        await frame(Math.min(D - 0.01, i * STEP), true);
+        setStatus("Karten werden vorgeladen …", Math.round(i / steps * 100));
+      }
+
+      // ── 2) Aufnahme in Echtzeit ──
+      const mime = pickVideoMime();
+      if (!mime) throw new Error("Dieser Browser kann keine Videos aufnehmen (MediaRecorder fehlt).");
+      try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch {}
+      const stream = out.captureStream(30);
+      rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8000000 });
+      const chunks = [];
+      rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      const stopped = new Promise(r => { rec.onstop = r; });
+      await frame(0, true);
+      rec.start(1000);
+      const startMs = performance.now();
+      for (;;) {
+        if (cancelled) { try { rec.stop(); } catch {} return; }
+        const t = (performance.now() - startMs) / 1000;
+        if (t >= D) break;
+        await frame(t, false);
+        setStatus("Video wird aufgenommen – Bildschirm bitte eingeschaltet lassen …", Math.round(t / D * 100));
+        await nextFrame();
+      }
+      await frame(D - 0.01, false);
+      rec.stop();
+      await stopped;
+      if (cancelled) return;
+      const blob = new Blob(chunks, { type: mime.split(";")[0] });
+      onDone(blob, mime.startsWith("video/mp4") ? "mp4" : "webm");
+    };
+
+    run().catch(e => { if (!cancelled) { console.error("Flug-Video:", e); onError(e && e.message ? e.message : String(e)); } });
+    return () => {
+      cancelled = true;
+      try { if (rec && rec.state !== "inactive") rec.stop(); } catch {}
+      try { if (wake) wake.release(); } catch {}
+      try { main && main.remove(); } catch {}
+      try { mini && mini.remove(); } catch {}
+    };
+  }, []);
+
+  // Die Karten liegen hinter dem Dialog (z-index) — sichtbar ist nur das
+  // zusammengesetzte Ausgabe-Canvas.
+  return (
+    <>
+      {ReactDOM.createPortal(
+        <>
+          <div style={{position:"fixed",left:0,top:0,width:W,height:H,zIndex:1,pointerEvents:"none"}} ref={mainDivRef} />
+          <div style={{position:"fixed",left:0,top:H+10,width:M,height:M,zIndex:1,pointerEvents:"none"}} ref={miniDivRef} />
+        </>,
+        document.body
+      )}
+      <canvas ref={outRef} style={{width:"100%",maxWidth:portrait?340:760,maxHeight:"62vh",aspectRatio:`${W}/${H}`,borderRadius:12,background:"#000",display:"block",margin:"0 auto"}} />
+    </>
+  );
+}
+
+function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
+  const [stage, setStage] = useState("options"); // options | render | done | error
+  const [duration, setDuration] = useState(45);
+  const [portrait, setPortrait] = useState(false);
+  const [progress, setProgress] = useState({ text: "", pct: 0 });
+  const [result, setResult] = useState(null); // { url, ext, blob }
+  const [err, setErr] = useState("");
+  const cancelRef = useRef(null);
+  useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
+  useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
+  const highlightCount = useMemo(() => computeVideoHighlights(track).length, [track]);
+  const fileName = `Flug_${(flight?.date || "").replace(/[^0-9A-Za-z]+/g, "-")}_${(flight?.site || "").replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_")}`;
+  const chip = (active) => ({ flex:1, height:40, borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
+  const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
+  const canShare = result && navigator.canShare && (() => { try { return navigator.canShare({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })] }); } catch { return false; } })();
+  return ReactDOM.createPortal(
+    <div style={{position:"fixed",inset:0,zIndex:400,background:"#040e20",overflowY:"auto",color:"#e8f4fd",fontFamily:"inherit"}}>
+      <div style={{maxWidth:820,margin:"0 auto",padding:"18px 16px 40px",display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{fontSize:18,fontWeight:800}}>🎬 Flug-Video</div>
+          <button onClick={()=>{ if (cancelRef.current) cancelRef.current(); onClose(); }} style={{...btn("rgba(255,255,255,0.1)"),height:36}}>✕</button>
+        </div>
+        {stage === "options" && (
+          <>
+            <div style={{fontSize:13,color:"rgba(232,244,253,0.75)",lineHeight:1.5}}>
+              Erzeugt ein kurzes Video mit 3D-Satellitenkarte und wechselnden Kameras:
+              Start → {highlightCount > 0 ? `${highlightCount} Highlight${highlightCount>1?"s":""} (Thermik, höchster Punkt, schnelle Gleitphase)` : "Flug"} → Landung.
+              In der Ecke läuft eine Geländekarte von oben mit dem Positionspunkt mit.
+            </div>
+            <div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Länge</div>
+              <div style={{display:"flex",gap:8}}>{[30,45,60].map(d => <button key={d} onClick={()=>setDuration(d)} style={chip(duration===d)}>{d} s</button>)}</div>
+            </div>
+            <div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Format</div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setPortrait(false)} style={chip(!portrait)}>Quer 16:9</button>
+                <button onClick={()=>setPortrait(true)} style={chip(portrait)}>Hoch 9:16</button>
+              </div>
+            </div>
+            <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
+              Ablauf: Zuerst werden die Karten vorgeladen (ca. 20–60 s), dann wird das Video in Echtzeit aufgenommen ({duration} s).
+              Während dieser Zeit die App im Vordergrund und den Bildschirm eingeschaltet lassen.
+            </div>
+            <button onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn("#16a34a")}>Video erstellen</button>
+          </>
+        )}
+        {stage === "render" && (
+          <>
+            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} portrait={portrait}
+              onCancelRef={cancelRef}
+              setStatus={(text, pct) => setProgress({ text, pct })}
+              onDone={(blob, ext) => { setResult({ url: URL.createObjectURL(blob), ext, blob }); setStage("done"); }}
+              onError={(m) => { setErr(m); setStage("error"); }} />
+            <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
+            <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
+            <button onClick={()=>{ if (cancelRef.current) cancelRef.current(); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Abbrechen</button>
+          </>
+        )}
+        {stage === "done" && result && (
+          <>
+            <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
+              {canShare && <button onClick={()=>{ try { navigator.share({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })], title: "Mein Flug" }); } catch {} }} style={btn("#7c3aed")}>Teilen</button>}
+              <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
+            </div>
+          </>
+        )}
+        {stage === "error" && (
+          <>
+            <div style={{color:"#fca5a5",fontSize:14,lineHeight:1.5}}>Das Video konnte nicht erstellt werden:<br/>{err}</div>
+            <button onClick={()=>setStage("options")} style={btn("rgba(255,255,255,0.12)")}>Zurück</button>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body
+  );
 }
 
 function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybackActiveChange, onPlaybackPhaseChange, controlsSlot, isWide, mapTilerKey, onFullscreenProfileSlot, scrubDistanceKm }) {
@@ -1626,6 +2136,8 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
   // — siehe refPoint/highlightRange weiter unten, bzw. die Fluglinienmitte
   // ohne gezoomtes Profil).
   const [showMonitor, setShowMonitor] = useState(false);
+  // 🎬-Button: öffnet den Dialog für das Flug-Video (siehe FlightVideoDialog).
+  const [showVideo, setShowVideo] = useState(false);
 
   const togglePlay = () => setIsPlaying(p => !p);
 
@@ -2440,9 +2952,17 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
             style={{flex:"0.85 1 0",minWidth:0,height:34,boxSizing:"border-box",background:showMonitor?"rgba(125,211,252,0.25)":"rgba(125,211,252,0.1)",border:"1px solid rgba(125,211,252,0.4)",borderRadius:8,color:"#7dd3fc",fontSize:14,fontWeight:700,cursor:"pointer"}}>
             📊
           </button>
+          {track.length > 30 && mapTilerKey && (
+            <button onClick={()=>setShowVideo(true)}
+              title="Kurzes Flug-Video erzeugen (30–60 s)"
+              style={{flex:"0.85 1 0",minWidth:0,height:34,boxSizing:"border-box",background:"rgba(244,114,182,0.12)",border:"1px solid rgba(244,114,182,0.45)",borderRadius:8,color:"#f472b6",fontSize:14,fontWeight:700,cursor:"pointer"}}>
+              🎬
+            </button>
+          )}
         </>,
         controlsSlot
       )}
+      {showVideo && <FlightVideoDialog flight={flight} track={cleanTrack.length ? cleanTrack : track} mapTilerKey={mapTilerKey} onClose={()=>setShowVideo(false)} />}
       {isFullscreen && (
         <div
           style={{position:"fixed",inset:0,background:"#000",zIndex:200,display:"flex",flexDirection:"column",overflow:"hidden"}}
