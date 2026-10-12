@@ -1759,11 +1759,11 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         const ft = pos.timeSec;
         let c;
         switch (sh.kind) {
-          case "start": c = { center: [pos.lon, pos.lat], bearing: sh.b0 + 160 - 110 * e, pitch: 58 + 10 * e, zoom: 15.3 - 0.7 * e }; break;
+          case "start": c = { center: [pos.lon, pos.lat], bearing: sh.b0 + 160 - 110 * e, pitch: 52 + 8 * e, zoom: 15.3 - 0.7 * e }; break;
           case "transit": { const h = videoHeadingAt(track, ft, 25); c = { center: [pos.lon, pos.lat], bearing: h == null ? sh.b0 || 0 : h, pitch: 58, zoom: 12.6 }; break; }
           case "thermal": c = { center: sh.center, bearing: sh.b0 + 170 * u, pitch: 56, zoom: 14.7 }; break;
-          case "peak": { const h = videoHeadingAt(track, ft, 10); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) + 80 + 25 * e, pitch: 74, zoom: 13.9 }; break; }
-          case "glide": { const h = videoHeadingAt(track, ft, 15); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) - 50, pitch: 64, zoom: 14 }; break; }
+          case "peak": { const h = videoHeadingAt(track, ft, 10); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) + 80 + 25 * e, pitch: 60, zoom: 13.9 }; break; }
+          case "glide": { const h = videoHeadingAt(track, ft, 15); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) - 50, pitch: 58, zoom: 14 }; break; }
           case "land": {
             // Ruhige Landekamera: Blick auf die Strecke Anflugbeginn → Landeplatz
             // (feste Richtung, nur langsam drehend) und Kamerazentrum, das
@@ -1773,7 +1773,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
             const a0 = videoPosAt(track, sh.f0), a1 = videoPosAt(track, sh.f1);
             const far = (haversineDistKm(a0, a1) || 0) > 0.04;
             const brg = far ? bearingDeg(a0, a1) : (sh.b0 || 0);
-            c = { center: [lerp(a0.lon, a1.lon, e), lerp(a0.lat, a1.lat, e)], bearing: brg + 20 + 50 * e, pitch: 68 - 10 * e, zoom: 14.3 + 1.4 * e };
+            c = { center: [lerp(a0.lon, a1.lon, e), lerp(a0.lat, a1.lat, e)], bearing: brg + 20 + 50 * e, pitch: 62 - 8 * e, zoom: 14.3 + 1.4 * e };
             break;
           }
           default: {
@@ -1802,6 +1802,33 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       const mercPerPx = (lat, zoom) => 40075016.686 * Math.cos(lat * Math.PI / 180) / (512 * Math.pow(2, zoom));
 
       let curLift = 0, curState = null, snap = null, smoothH = null, smoothT = 0;
+      let smoothPitch = null, smoothPitchT = 0, smoothPitchShot = null;
+      // Sichtlinie Kamera → Pilot gegen das Gelände prüfen. Die Kamera sitzt
+      // (näherungsweise) hinter dem Zielpunkt in Blickrichtung; schneidet die
+      // Linie zum Piloten einen Berg, wird die Kamera schrittweise steiler
+      // (mehr Draufsicht) gestellt, bis der Pilot frei sichtbar ist.
+      const elevAt = (lon, lat) => { const g = main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null; return g != null && isFinite(g) ? g : null; };
+      const clearPitch = (cam, zoom, pos) => {
+        const dist = 1.5 * H * mercPerPx(pos.lat, zoom); // Kameraabstand zum Zielpunkt (m), vertikales FOV ≈ 36.9°
+        const cg = elevAt(cam.center[0], cam.center[1]) ?? lastGround;
+        const mLat = 111320, mLon = 111320 * Math.cos(pos.lat * Math.PI / 180);
+        let pitch = cam.pitch;
+        for (let it = 0; it < 8 && pitch > 20; it++) {
+          const pr = pitch * Math.PI / 180, br = cam.bearing * Math.PI / 180;
+          const hz = dist * Math.sin(pr);
+          const cLat = cam.center[1] - Math.cos(br) * hz / mLat, cLon = cam.center[0] - Math.sin(br) * hz / mLon;
+          const cAlt = cg + dist * Math.cos(pr);
+          let ok = true;
+          for (let s = 1; s <= 9 && ok; s++) {
+            const fr = s / 10;
+            const g = elevAt(lerp(cLon, pos.lon, fr), lerp(cLat, pos.lat, fr));
+            if (g != null && g > lerp(cAlt, pos.gpsAlt, fr) - 12) ok = false;
+          }
+          if (ok) break;
+          pitch -= 7;
+        }
+        return pitch;
+      };
       const applyState = (t, force) => {
         const st = stateAt(t);
         const ground = main.queryTerrainElevation ? main.queryTerrainElevation([st.pos.lon, st.pos.lat]) : null;
@@ -1814,11 +1841,22 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         smoothT = t;
         const h = smoothH;
         const zoom = st.sh.kind === "outro" ? st.cam.zoom : st.cam.zoom - clamp(Math.log2(1 + h / 450), 0, 1.2);
-        const liftPx = st.sh.kind === "outro" ? 0 : h / mercPerPx(st.pos.lat, zoom) * Math.sin(st.cam.pitch * Math.PI / 180);
-        const pad = Math.min(liftPx, H * 0.3);
-        main.jumpTo({ center: st.cam.center, zoom, bearing: st.cam.bearing, pitch: st.cam.pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
+        let pitch = st.cam.pitch;
+        if (st.sh.kind !== "outro") {
+          const target = clearPitch(st.cam, zoom, st.pos);
+          const dtP = Math.abs(t - smoothPitchT);
+          if (smoothPitch == null || smoothPitchShot !== st.sh || dtP > 1.5) smoothPitch = target;
+          else smoothPitch += (target - smoothPitch) * Math.min(1, dtP / (target < smoothPitch ? 0.35 : 1.2));
+          smoothPitchT = t; smoothPitchShot = st.sh;
+          pitch = smoothPitch;
+        }
+        const liftPx = st.sh.kind === "outro" ? 0 : h / mercPerPx(st.pos.lat, zoom) * Math.sin(pitch * Math.PI / 180);
+        // Versatz begrenzen: zu viel davon schiebt den Horizont ins Bild
+        // (oberer Bildteil bliebe leer/schwarz).
+        const pad = Math.min(liftPx, H * (pitch > 50 ? 0.12 : 0.22));
+        main.jumpTo({ center: st.cam.center, zoom, bearing: st.cam.bearing, pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
         altLayer.setProgress(st.pos.idx);
-        curLift = liftPx; curState = { ...st, zoom };
+        curLift = liftPx; curState = { ...st, zoom, cam: { ...st.cam, pitch } };
         return st;
       };
 
@@ -2000,6 +2038,54 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const [result, setResult] = useState(null); // { url, ext, blob }
   const [err, setErr] = useState("");
   const cancelRef = useRef(null);
+  // Gespeichertes Video (Variante "Verweis"): in den Daten liegt nur
+  // storage "video:<flugId>" = { name, size, ext, created }; die Datei selbst
+  // liegt als eigene Datei im Unterordner "videos" des Backup-Ordners
+  // (nur Chrome/Edge am Desktop, siehe Service → Backup-Ordner). Der Verweis
+  // steckt im normalen Backup, das Video bläht es nicht auf.
+  const fsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
+  const refKey = `video:${flight?.id}`;
+  const [saved, setSaved] = useState(null);
+  const [folderMsg, setFolderMsg] = useState("");
+  const [playUrl, setPlayUrl] = useState(null);
+  useEffect(() => { (async () => { try { const r = await window.storage.get(refKey); setSaved(r && r.value ? JSON.parse(r.value) : null); } catch { setSaved(null); } })(); }, [refKey]);
+  useEffect(() => () => { if (playUrl) URL.revokeObjectURL(playUrl); }, [playUrl]);
+  const getVideosDir = async (create, interactive) => {
+    const handle = await window.fsapiHandle.get("backupDir");
+    if (!handle) throw new Error("Kein Backup-Ordner festgelegt (Service → Backup-Ordner).");
+    let perm = await handle.queryPermission({ mode: "readwrite" });
+    if (perm !== "granted") {
+      if (!interactive) throw new Error("NOPERM");
+      perm = await handle.requestPermission({ mode: "readwrite" });
+    }
+    if (perm !== "granted") throw new Error("Zugriff auf den Backup-Ordner nicht erlaubt.");
+    return handle.getDirectoryHandle("videos", { create });
+  };
+  const saveToFolder = async (res, interactive) => {
+    try {
+      const dir = await getVideosDir(true, interactive);
+      const name = `${fileName}_${String(flight.id).slice(-6)}.${res.ext}`;
+      const fh = await dir.getFileHandle(name, { create: true });
+      const w = await fh.createWritable(); await w.write(res.blob); await w.close();
+      const ref = { name, size: res.blob.size, ext: res.ext, created: new Date().toISOString() };
+      await window.storage.set(refKey, JSON.stringify(ref));
+      await window.storage.set("settings:backupDirty", "1");
+      setSaved(ref); setFolderMsg(`✓ Gespeichert im Backup-Ordner: videos/${name}`);
+    } catch (e) { setFolderMsg(e.message === "NOPERM" ? "" : "Ablegen im Backup-Ordner fehlgeschlagen: " + e.message); }
+  };
+  const playSaved = async () => {
+    try {
+      const dir = await getVideosDir(false, true);
+      const file = await (await dir.getFileHandle(saved.name)).getFile();
+      setPlayUrl(URL.createObjectURL(file)); setFolderMsg("");
+    } catch (e) { setFolderMsg("Video nicht gefunden (Backup-Ordner/videos/" + saved.name + "): " + e.message); }
+  };
+  const removeSaved = async () => {
+    if (!window.confirm("Verweis und Videodatei im Backup-Ordner löschen?")) return;
+    try { const dir = await getVideosDir(false, true); await dir.removeEntry(saved.name); } catch {}
+    try { await window.storage.delete(refKey); await window.storage.set("settings:backupDirty", "1"); } catch {}
+    setSaved(null); setPlayUrl(null); setFolderMsg("");
+  };
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
   const highlightCount = useMemo(() => computeVideoHighlights(track).length, [track]);
@@ -2016,6 +2102,17 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
         </div>
         {stage === "options" && (
           <>
+            {saved && (
+              <div style={{border:"1px solid rgba(125,211,252,0.3)",borderRadius:10,padding:12,display:"flex",flexDirection:"column",gap:8}}>
+                <div style={{fontSize:13}}>Gespeichertes Video: <b>{saved.name}</b> · {(saved.size/1048576).toFixed(0)} MB · {new Date(saved.created).toLocaleDateString("de-CH")}</div>
+                {playUrl && <video src={playUrl} controls playsInline autoPlay style={{width:"100%",maxHeight:"50vh",borderRadius:10,background:"#000"}} />}
+                {fsOk && <div style={{display:"flex",gap:8}}>
+                  <button onClick={playSaved} style={btn("#16a34a")}>▶ Abspielen</button>
+                  <button onClick={removeSaved} style={btn("rgba(220,38,38,0.6)")}>Löschen</button>
+                </div>}
+                {folderMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{folderMsg}</div>}
+              </div>
+            )}
             <div style={{fontSize:13,color:"rgba(232,244,253,0.75)",lineHeight:1.5}}>
               Erzeugt ein kurzes Video mit 3D-Satellitenkarte und wechselnden Kameras:
               Start → {highlightCount > 0 ? `${highlightCount} Highlight${highlightCount>1?"s":""} (Thermik, höchster Punkt, schnelle Gleitphase)` : "Flug"} → Landung.
@@ -2044,7 +2141,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} portrait={portrait}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
-              onDone={(blob, ext) => { setResult({ url: URL.createObjectURL(blob), ext, blob }); setStage("done"); }}
+              onDone={(blob, ext) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setFolderMsg(""); if (fsOk) saveToFolder(res, false); }}
               onError={(m) => { setErr(m); setStage("error"); }} />
             <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
             <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
@@ -2057,8 +2154,10 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
               {canShare && <button onClick={()=>{ try { navigator.share({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })], title: "Mein Flug" }); } catch {} }} style={btn("#7c3aed")}>Teilen</button>}
+              {fsOk && <button onClick={()=>saveToFolder(result, true)} style={btn("#0f766e")}>📁 In Backup-Ordner ablegen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
+            {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
           </>
         )}
         {stage === "error" && (
