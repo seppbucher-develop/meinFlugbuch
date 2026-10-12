@@ -1764,7 +1764,18 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
           case "thermal": c = { center: sh.center, bearing: sh.b0 + 170 * u, pitch: 56, zoom: 14.7 }; break;
           case "peak": { const h = videoHeadingAt(track, ft, 10); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) + 80 + 25 * e, pitch: 74, zoom: 13.9 }; break; }
           case "glide": { const h = videoHeadingAt(track, ft, 15); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) - 50, pitch: 64, zoom: 14 }; break; }
-          case "land": { const h = videoHeadingAt(track, ft, 10); c = { center: [pos.lon, pos.lat], bearing: (h == null ? 0 : h) + 25 + 60 * e, pitch: 72 - 14 * e, zoom: 14.4 + 1.4 * e }; break; }
+          case "land": {
+            // Ruhige Landekamera: Blick auf die Strecke Anflugbeginn → Landeplatz
+            // (feste Richtung, nur langsam drehend) und Kamerazentrum, das
+            // sanft vom Piloten zum Landeplatz gleitet. Folgt die Kamera dem
+            // Piloten direkt, macht sie beim Hineinzoomen jede Kurve des
+            // Landeanflugs mit und wirkt verwackelt.
+            const a0 = videoPosAt(track, sh.f0), a1 = videoPosAt(track, sh.f1);
+            const far = (haversineDistKm(a0, a1) || 0) > 0.04;
+            const brg = far ? bearingDeg(a0, a1) : (sh.b0 || 0);
+            c = { center: [lerp(a0.lon, a1.lon, e), lerp(a0.lat, a1.lat, e)], bearing: brg + 20 + 50 * e, pitch: 68 - 10 * e, zoom: 14.3 + 1.4 * e };
+            break;
+          }
           default: {
             const a = cameraFor(sh.prev, 1, pos);
             const ov = { center: [overview.center.lng ?? overview.center[0], overview.center.lat ?? overview.center[1]], zoom: overview.zoom - 0.15, bearing: 0, pitch: 35 };
@@ -1790,12 +1801,18 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       };
       const mercPerPx = (lat, zoom) => 40075016.686 * Math.cos(lat * Math.PI / 180) / (512 * Math.pow(2, zoom));
 
-      let curLift = 0, curState = null, snap = null;
+      let curLift = 0, curState = null, snap = null, smoothH = null, smoothT = 0;
       const applyState = (t, force) => {
         const st = stateAt(t);
         const ground = main.queryTerrainElevation ? main.queryTerrainElevation([st.pos.lon, st.pos.lat]) : null;
         if (ground != null && isFinite(ground)) lastGround = ground;
-        const h = Math.max(0, st.pos.gpsAlt - lastGround);
+        // Höhe über Grund geglättet (≈0.8 s): GPS-Höhe und Geländeabfrage
+        // rauschen von Bild zu Bild, und Zoom/Versatz hängen daran.
+        const hRaw = Math.max(0, st.pos.gpsAlt - lastGround);
+        const dtS = Math.abs(t - smoothT);
+        smoothH = (smoothH == null || dtS > 1.5) ? hRaw : smoothH + (hRaw - smoothH) * Math.min(1, dtS / 0.8);
+        smoothT = t;
+        const h = smoothH;
         const zoom = st.sh.kind === "outro" ? st.cam.zoom : st.cam.zoom - clamp(Math.log2(1 + h / 450), 0, 1.2);
         const liftPx = st.sh.kind === "outro" ? 0 : h / mercPerPx(st.pos.lat, zoom) * Math.sin(st.cam.pitch * Math.PI / 180);
         const pad = Math.min(liftPx, H * 0.3);
