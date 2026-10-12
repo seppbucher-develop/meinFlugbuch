@@ -1528,7 +1528,7 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
   };
 }
 
-// ── Flug-Video (30–60 s) ─────────────────────────────────────────────────
+// ── Flug-Video (30 s bis 1:30 min) ─────────────────────────────────────────────────
 // Per Knopf (🎬 in der Kartenleiste von FlightMap) erzeugt die App ein
 // kurzes Video des Flugs: 3D-Satellitenkarte mit wechselnden Kameras
 // (Start → Highlights → Landung) und – in einer Ecke – eine Geländekarte
@@ -1821,7 +1821,7 @@ function buildVideoScript(track, highlights, D, flight) {
   const t0 = track[0].timeSec, t1 = track[track.length-1].timeSec, total = t1 - t0;
   const startLen = Math.min(70, total * 0.08), landLen = Math.min(80, total * 0.1);
   const hl = highlights.filter(h => h.f0 > t0 + startLen + 10 && h.f1 < t1 - landLen - 10);
-  const dStart = D * 0.16, dLand = D * 0.16, dOutro = Math.max(3, D * 0.07);
+  const dStart = D * 0.16, dLand = D * 0.16 * 0.7, dOutro = Math.max(3, D * 0.07);
   const avail = D - dStart - dLand - dOutro;
   const wts = hl.map(h => 0.7 + 0.6 * Math.max(0, Math.min(1, (h.score - 2) / 5)));
   const wSum = wts.reduce((a, b) => a + b, 0) || 1;
@@ -1906,7 +1906,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       let dem = null;
       try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); }
       if (cancelled) return;
-      const maxPicks = D >= 60 ? 4 : D >= 45 ? 3 : 2;
+      const maxPicks = D >= 90 ? 5 : D >= 60 ? 4 : D >= 45 ? 3 : 2;
       const events = computeVideoHighlights(track, dem && dem.elev, maxPicks);
       const shots = buildVideoScript(track, events, D, flight);
       console.info("Flug-Video: Gelände " + (dem ? `${dem.tiles} Kacheln (z${dem.z})` : "nicht verfügbar") + " · Szenen:", events.map(e => e.label));
@@ -2055,7 +2055,8 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         if (ground != null && isFinite(ground)) lastGround = ground;
         // Höhe über Grund geglättet (≈0.8 s): GPS-Höhe und Geländeabfrage
         // rauschen von Bild zu Bild, und Zoom/Versatz hängen daran.
-        const hRaw = Math.max(0, st.pos.gpsAlt - lastGround);
+        // Fehlt die Geländehöhe (Kachel noch nicht geladen), den bisherigen Wert halten
+        const hRaw = (ground == null || !isFinite(ground)) && smoothH != null ? smoothH : Math.max(0, st.pos.gpsAlt - lastGround);
         const dtS = Math.abs(t - smoothT);
         smoothH = (smoothH == null || dtS > 1.5) ? hRaw : smoothH + (hRaw - smoothH) * Math.min(1, dtS / 0.8);
         smoothT = t;
@@ -2167,8 +2168,19 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       // Karten warten muss (das war die Ursache für das Ruckeln).
       const frameCopy = document.createElement("canvas"); frameCopy.width = W; frameCopy.height = H;
       const fctx = frameCopy.getContext("2d");
+      // Leere (schwarze) Kartenbilder – z.B. unmittelbar nach einem Szenenwechsel,
+      // wenn Kacheln noch fehlen – nicht übernehmen, sondern das letzte gute
+      // Bild stehen lassen (die gewollte Überblendung wird erst danach gezeichnet).
+      const tmpC = document.createElement("canvas"); tmpC.width = W; tmpC.height = H;
+      const tctx = tmpC.getContext("2d", { willReadFrequently: true });
+      const PROBES = [[.1,.1],[.5,.1],[.9,.1],[.1,.5],[.5,.5],[.9,.5],[.1,.9],[.5,.9],[.9,.9]];
       main.on("render", () => {
-        try { fctx.drawImage(main.getCanvas(), 0, 0, W, H); } catch {}
+        try {
+          tctx.drawImage(main.getCanvas(), 0, 0, W, H);
+          let dark = 0;
+          for (const [fx, fy] of PROBES) { const d = tctx.getImageData(Math.floor(fx * (W - 1)), Math.floor(fy * (H - 1)), 1, 1).data; if (d[3] === 0 || d[0] + d[1] + d[2] < 12) dark++; }
+          if (dark < 8) fctx.drawImage(tmpC, 0, 0);
+        } catch {}
         if (!curState) return;
         const g = main.project([curState.pos.lon, curState.pos.lat]);
         snap = { st: curState, lift: curLift, gx: g.x, gy: g.y };
@@ -2189,7 +2201,10 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
           const p = stateAt(t).pos;
           if ((haversineDistKm(lastP, p) || 0) >= 0.7 || t - lastT >= 0.8) { warmTimes.push(t); lastP = p; lastT = t; }
         }
-        warmTimes.push(D - 0.01); }
+        warmTimes.push(D - 0.01);
+        // zusätzlich dicht an jedem Szenenwechsel (Kamera springt dort)
+        shots.forEach(s => { for (const dt of [0.02, 0.4, 0.9]) if (s.t0 + dt < D) warmTimes.push(s.t0 + dt); if (s.t1 - 0.05 > 0) warmTimes.push(s.t1 - 0.05); });
+        warmTimes.sort((a, b) => a - b); }
       for (let i = 0; i < warmTimes.length; i++) {
         if (cancelled) return;
         await warm(warmTimes[i]);
@@ -2342,7 +2357,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             </div>
             <div>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Länge</div>
-              <div style={{display:"flex",gap:8}}>{[30,45,60].map(d => <button key={d} onClick={()=>setDuration(d)} style={chip(duration===d)}>{d} s</button>)}</div>
+              <div style={{display:"flex",gap:8}}>{[30,45,60,90].map(d => <button key={d} onClick={()=>setDuration(d)} style={chip(duration===d)}>{d === 90 ? "1:30 min" : d + " s"}</button>)}</div>
             </div>
             <div>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Format</div>
@@ -2352,7 +2367,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
               </div>
             </div>
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
-              Ablauf: Zuerst werden die Karten vorgeladen (ca. 20–60 s), dann wird das Video in Echtzeit aufgenommen ({duration} s).
+              Ablauf: Zuerst werden die Karten vorgeladen (ca. 20–90 s), dann wird das Video in Echtzeit aufgenommen ({duration} s).
               Während dieser Zeit die App im Vordergrund und den Bildschirm eingeschaltet lassen.
             </div>
             <button onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn("#16a34a")}>Video erstellen</button>
@@ -3313,7 +3328,7 @@ function FlightMap({ flight, highlightRange, onPlaybackPositionChange, onPlaybac
           </button>
           {track.length > 30 && mapTilerKey && (
             <button onClick={()=>setShowVideo(true)}
-              title="Kurzes Flug-Video erzeugen (30–60 s)"
+              title="Kurzes Flug-Video erzeugen (30 s bis 1:30 min)"
               style={{flex:"0.85 1 0",minWidth:0,height:34,boxSizing:"border-box",background:"rgba(244,114,182,0.12)",border:"1px solid rgba(244,114,182,0.45)",borderRadius:8,color:"#f472b6",fontSize:14,fontWeight:700,cursor:"pointer"}}>
               🎬
             </button>
