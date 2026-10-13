@@ -590,6 +590,59 @@ function ServiceApp() {
     }
   };
 
+  // Handy (Chrome Android hat keine Ordnerauswahl): Kopien der Backups im
+  // App-eigenen Speicher (OPFS) — nur dort darf die App Dateien auch wieder
+  // löschen. Die Datei im Download-Ordner/Teilen-Ziel bleibt davon unberührt.
+  const opfsSupported = !fsapiSupported && typeof navigator !== "undefined" && !!(navigator.storage && navigator.storage.getDirectory);
+  const [opfsBackups, setOpfsBackups] = React.useState([]);
+  const getOpfsDir = async () => {
+    const root = await navigator.storage.getDirectory();
+    return root.getDirectoryHandle("backups", { create: true });
+  };
+  const refreshOpfsBackups = async () => {
+    if (!opfsSupported) return;
+    try {
+      const dir = await getOpfsDir();
+      const found = [];
+      for await (const [name, entry] of dir.entries()) {
+        if (entry.kind !== "file") continue;
+        if (!/^flugbuch-backup-.*\.(json|json\.gz)$/i.test(name)) continue;
+        try {
+          const file = await entry.getFile();
+          found.push({ name, lastModified: file.lastModified, size: file.size, handle: entry });
+        } catch {}
+      }
+      found.sort((a, b) => b.lastModified - a.lastModified);
+      setOpfsBackups(found);
+    } catch (e) {
+      console.error("App-Speicher lesen fehlgeschlagen:", e);
+      setOpfsBackups([]);
+    }
+  };
+  React.useEffect(() => { refreshOpfsBackups(); }, []);
+  const saveOpfsCopy = async (blob, filename) => {
+    if (!opfsSupported) return;
+    try {
+      const dir = await getOpfsDir();
+      const fh = await dir.getFileHandle(filename, { create: true });
+      const w = await fh.createWritable();
+      await w.write(blob);
+      await w.close();
+      refreshOpfsBackups();
+    } catch (e) { console.error("Kopie im App-Speicher fehlgeschlagen:", e); }
+  };
+  const deleteOpfsBackup = async (name) => {
+    if (!window.confirm(`Backup-Datei „${name}" endgültig löschen?`)) return;
+    try {
+      const dir = await getOpfsDir();
+      await dir.removeEntry(name);
+      setMsg({ type: "ok", text: `✓ Gelöscht: ${name}` });
+    } catch (e) {
+      setMsg({ type: "error", text: "Löschen fehlgeschlagen: " + (e.message || String(e)) });
+    }
+    refreshOpfsBackups();
+  };
+
   const chooseDirectory = async () => {
     if (!fsapiSupported) return;
     try {
@@ -714,6 +767,8 @@ function ServiceApp() {
         try { await window.storage.set("settings:lastBackupAt", iso); } catch {}
         setLastBackupAt(iso);
       };
+
+      await saveOpfsCopy(blob, filename);
 
       // Bevorzugter Weg, falls ein Ordner festgelegt und die Berechtigung
       // erteilt ist: komplett automatisch, ganz ohne jeden Dialog — die
@@ -1131,6 +1186,38 @@ function ServiceApp() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {opfsSupported && (
+          <div style={{ background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14, padding: 18, marginBottom: 14 }}>
+            <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>
+              📱 Backups im App-Speicher ({opfsBackups.length})
+            </div>
+            <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 10, lineHeight: 1.5 }}>
+              Jedes Backup wird zusätzlich hier auf dem Gerät abgelegt und kann von hier wiederhergestellt oder gelöscht werden. Die geteilte/heruntergeladene Datei bleibt unberührt.
+            </div>
+            {opfsBackups.length === 0 && (
+              <div style={{ fontSize: 12, color: "rgba(232,244,253,0.4)" }}>Noch keine Backup-Dateien hier.</div>
+            )}
+            {opfsBackups.map(b => (
+              <div key={b.name} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "8px 10px", background: "rgba(255,255,255,0.03)", borderRadius: 8, marginBottom: 6 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12, color: "#e8f4fd", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name}</div>
+                  <div style={{ fontSize: 10, color: "rgba(232,244,253,0.4)" }}>{new Date(b.lastModified).toLocaleString("de-CH")} · {formatBytes(b.size)}</div>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                  <button onClick={async () => { const file = await b.handle.getFile(); importBackup(file); }} disabled={busy}
+                    style={{ background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 8, padding: "6px 12px", color: "#7dd3fc", fontSize: 11, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
+                    Wiederherstellen
+                  </button>
+                  <button title="Backup-Datei löschen" aria-label="Backup-Datei löschen" disabled={busy} onClick={() => deleteOpfsBackup(b.name)}
+                    style={{ background: "rgba(248,113,113,0.12)", border: "1px solid rgba(248,113,113,0.3)", borderRadius: 8, padding: "6px 9px", color: "#f87171", fontSize: 13, cursor: busy ? "default" : "pointer" }}>
+                    🗑
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
