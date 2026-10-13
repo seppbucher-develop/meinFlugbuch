@@ -1107,10 +1107,26 @@ function ServiceApp() {
                       <div style={{ fontSize: 12, color: "#e8f4fd", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name}</div>
                       <div style={{ fontSize: 10, color: "rgba(232,244,253,0.4)" }}>{new Date(b.lastModified).toLocaleString("de-CH")} · {formatBytes(b.size)}</div>
                     </div>
+                    <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                     <button onClick={async () => { const file = await b.handle.getFile(); importBackup(file); }} disabled={busy}
                       style={{ flexShrink: 0, background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 8, padding: "6px 12px", color: "#7dd3fc", fontSize: 11, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
                       Wiederherstellen
                     </button>
+                    <button title="Backup-Datei löschen" aria-label="Backup-Datei löschen" disabled={busy}
+                      onClick={async () => {
+                        if (!window.confirm(`Backup-Datei „${b.name}" endgültig löschen?`)) return;
+                        try {
+                          await dirHandle.removeEntry(b.name);
+                          setMsg({ type: "ok", text: `✓ Gelöscht: ${b.name}` });
+                        } catch (e) {
+                          setMsg({ type: "error", text: "Löschen fehlgeschlagen: " + (e.message || String(e)) });
+                        }
+                        refreshFolderBackups();
+                      }}
+                      style={{ flexShrink: 0, background: "rgba(248,113,113,0.12)", border: "1px solid rgba(248,113,113,0.3)", borderRadius: 8, padding: "6px 9px", color: "#f87171", fontSize: 13, cursor: busy ? "default" : "pointer" }}>
+                      🗑
+                    </button>
+                    </div>
                   </div>
                 ))}
               </div>
