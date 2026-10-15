@@ -2596,7 +2596,11 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const canShare = result && navigator.canShare && (() => { try { return navigator.canShare({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })] }); } catch { return false; } })();
   return ReactDOM.createPortal(
-    <div style={{position:"fixed",inset:0,zIndex:400,background:"#040e20",overflowY:"auto",color:"#e8f4fd",fontFamily:"inherit"}}>
+    // data-no-swipe + stopPropagation: Der Dialog hängt per Portal am body, React
+    // leitet seine Touch-Ereignisse aber an die Detailseite weiter, deren
+    // Wisch-Geste sonst beim Ziehen des Cursors zum vorigen/nächsten Flug wechselt.
+    <div data-no-swipe="true" onTouchStart={e => e.stopPropagation()} onTouchMove={e => e.stopPropagation()} onTouchEnd={e => e.stopPropagation()}
+      style={{position:"fixed",inset:0,zIndex:400,background:"#040e20",overflowY:"auto",color:"#e8f4fd",fontFamily:"inherit"}}>
       <div style={{maxWidth:820,margin:"0 auto",padding:"18px 16px 40px",display:"flex",flexDirection:"column",gap:14}}>
         <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
           <div style={{fontSize:18,fontWeight:800}}>🎬 Flug-Video</div>
