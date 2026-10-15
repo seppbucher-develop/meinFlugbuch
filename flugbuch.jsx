@@ -1851,6 +1851,104 @@ function buildVideoScript(track, highlights, D, flight) {
   return shots;
 }
 
+// ── Manuelles Video: Abschnitte, automatische Kameraplanung ──────────────
+// Der Nutzer wählt im Höhenprofil beliebig viele Abschnitte (Start/Ende) und
+// je eine Abspielgeschwindigkeit. Für jeden Abschnitt sucht die App die beste
+// Kameraposition selbst: Kompakte Abschnitte (Kreisen/Thermik) werden
+// umkreist, gestreckte Abschnitte mit einer Kamera begleitet, die zur
+// Flugrichtung versetzt steht. Aus je 8 (bzw. 12) Kandidaten gewinnt die
+// Richtung mit der besten Sicht auf den Piloten (Sichtlinie gegen das
+// Gelände) und – als Zugabe – Bergen im Hintergrund.
+function videoPlanCamera(track, elev, f0, f1, speed) {
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const mLat = 111320;
+  const ground = (lat, lon) => { if (!elev) return null; const g = elev(lat, lon); return g != null && isFinite(g) ? g : null; };
+  const S = 10, samples = [];
+  for (let k = 0; k <= S; k++) samples.push(videoPosAt(track, f0 + (f1 - f0) * k / S));
+  let mla = 0, mlo = 0;
+  samples.forEach(p => { mla += p.lat; mlo += p.lon; });
+  mla /= samples.length; mlo /= samples.length;
+  let extent = 0;
+  samples.forEach(p => { extent = Math.max(extent, (haversineDistKm(p, { lat: mla, lon: mlo }) || 0) * 1000); });
+  const compact = extent < 600;
+  // Mehrere volle Kreise = Thermik: umkreisen, auch wenn sie mit dem Wind driftet
+  // (Kamerazentrum wandert dann mit, siehe cameraFor "mseg")
+  const turnTotal = turnSumDegBetween(track, samples[0].idx, samples[S].idx);
+  const circling = turnTotal >= 450 && turnTotal / Math.max(1, f1 - f0) >= 5; // mind. ~1/3 der Zeit im Kreisflug
+  const orbit = compact || circling;
+  const hw = Math.max(12, speed * 1.5);
+  const hdgAt = (t, fallback) => { const h = videoHeadingAt(track, t, hw); return h == null ? fallback : h; };
+  const base = orbit ? { pitch: 55, zoom: 14.7 } : { pitch: 55, zoom: 14.2 };
+  const dist = 3000;
+  const visAndScenery = (pos, viewBearing) => {
+    if (!elev) return 1;
+    const pr = base.pitch * Math.PI / 180, b = viewBearing * Math.PI / 180;
+    const hz = dist * Math.sin(pr), vt = dist * Math.cos(pr);
+    const mLon = mLat * Math.cos(pos.lat * Math.PI / 180);
+    const g0 = ground(pos.lat, pos.lon);
+    if (g0 == null) return 1;
+    const cLat = pos.lat - Math.cos(b) * hz / mLat, cLon = pos.lon - Math.sin(b) * hz / mLon, cAlt = g0 + vt;
+    let clear = 0, tot = 0;
+    for (let s = 1; s <= 8; s++) {
+      const fr = s / 9;
+      const g = ground(cLat + (pos.lat - cLat) * fr, cLon + (pos.lon - cLon) * fr);
+      if (g == null) continue;
+      tot++; if (g <= cAlt + (pos.gpsAlt - cAlt) * fr - 12) clear++;
+    }
+    const vis = tot ? clear / tot : 1;
+    const ga = ground(pos.lat + Math.cos(b) * 1800 / mLat, pos.lon + Math.sin(b) * 1800 / mLon);
+    const scenery = ga == null ? 0 : clamp((ga - g0) / 700, -0.3, 1);
+    return vis + 0.4 * scenery;
+  };
+  if (orbit) {
+    const center = [mlo, mla];
+    const cp = { lat: mla, lon: mlo, gpsAlt: samples.reduce((a, p) => a + p.gpsAlt, 0) / samples.length };
+    let best = { b0: 0, score: -1 };
+    for (let b0 = 0; b0 < 360; b0 += 30) {
+      let sc = 0;
+      for (let k = 0; k < 4; k++) sc += visAndScenery(cp, b0 + 30 * k);
+      sc /= 4;
+      if (sc > best.score) best = { b0, score: sc };
+    }
+    return { mode: "orbit", fixed: compact, center, b0: best.b0, pitch: base.pitch, zoom: base.zoom, score: best.score };
+  }
+  const prefs = { 0: 0.02, 180: 0, 90: 0.1, "-90": 0.1, 135: 0.06, "-135": 0.06, 45: 0.04, "-45": 0.04 };
+  let best = { rel: 90, score: -1 };
+  let hPrev = hdgAt(f0, 0);
+  const hs = samples.map((p, k) => { hPrev = hdgAt(p.timeSec, hPrev); return hPrev; });
+  for (const rel of [0, 180, 90, -90, 135, -135, 45, -45]) {
+    let sc = 0;
+    samples.forEach((p, k) => { sc += visAndScenery(p, hs[k] + rel); });
+    sc = sc / samples.length + prefs[rel];
+    if (sc > best.score) best = { rel, score: sc };
+  }
+  return { mode: "follow", center: [mlo, mla], rel: best.rel, pitch: base.pitch, zoom: base.zoom, score: best.score };
+}
+
+function buildManualScript(track, segs, elev, flight) {
+  const t0 = track[0].timeSec, t1 = track[track.length-1].timeSec;
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const shots = [];
+  let acc = 0;
+  segs.forEach(sg => {
+    const f0 = clamp(sg.f0, t0, t1), f1 = clamp(sg.f1, t0, t1);
+    if (f1 - f0 < 3) return;
+    const speed = Math.max(1, sg.speed || 10);
+    const d = Math.max(2, (f1 - f0) / speed);
+    const plan = videoPlanCamera(track, elev, f0, f1, speed);
+    const mid = videoPosAt(track, (f0 + f1) / 2);
+    const h = videoHeadingAt(track, f0 + 5, 20);
+    shots.push({ kind: "mseg", label: sg.label || null, f0, f1, d, speed, plan, warp: 0, b0: h == null ? 0 : h, pin: [mid.lon, mid.lat], t0: acc, t1: acc + d });
+    acc += d;
+  });
+  shots.forEach((s, k) => {
+    if (k === 0) return;
+    const a = videoPosAt(track, shots[k-1].f1), b = videoPosAt(track, s.f0);
+    s.near = (haversineDistKm(a, b) || 0) < 1.5;
+  });
+  return shots;
+}
+
 function pickVideoMime() {
   if (typeof MediaRecorder === "undefined") return null;
   const c = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
@@ -1859,9 +1957,132 @@ function pickVideoMime() {
 
 // Zeichnet das Video in Echtzeit auf. Läuft komplett in einem Effekt, damit
 // React nur den Fortschritt (Text/Prozent) und am Ende das fertige Blob sieht.
-function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onDone, onError, onCancelRef, setStatus }) {
+// Zeit seit Flugbeginn als h:mm:ss bzw. m:ss
+function fmtVideoRel(sec) {
+  const s = Math.max(0, Math.round(sec)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), ss = s % 60;
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(ss).padStart(2, "0")}` : `${m}:${String(ss).padStart(2, "0")}`;
+}
+const VIDEO_SEG_COLORS = ["#38bdf8", "#f97316", "#a78bfa", "#34d399", "#f472b6", "#facc15"];
+const VIDEO_SPEEDS = [1, 2, 3, 5, 10, 20, 50, 100];
+const videoSegSeconds = (s) => Math.max(2, (s.f1 - s.f0) / Math.max(1, s.speed || 10));
+
+// Höhenprofil mit verschiebbarem Cursor (Finger/Maus ziehen oder Feintasten),
+// Start-/Ende-Markierung und beliebig vielen Abschnitten — dazu eine kleine
+// Draufsicht des Tracks zur Orientierung.
+function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPending, cursor, setCursor, speed, setSpeed }) {
+  const t0 = track[0].timeSec, t1 = track[track.length-1].timeSec, total = Math.max(1, t1 - t0);
+  const svgRef = useRef(null), dragRef = useRef(false);
+  const pts = useMemo(() => { const st = Math.max(1, Math.ceil(track.length / 400)), a = []; for (let i = 0; i < track.length; i += st) a.push(track[i]); a.push(track[track.length-1]); return a; }, [track]);
+  const aMin = useMemo(() => Math.min(...pts.map(p => p.gpsAlt)), [pts]);
+  const aMax = useMemo(() => Math.max(...pts.map(p => p.gpsAlt)), [pts]);
+  const X = (t) => (t - t0) / total * 1000;
+  const Y = (a) => 195 - (a - aMin) / Math.max(1, aMax - aMin) * 175;
+  const line = pts.map(p => `${X(p.timeSec).toFixed(1)},${Y(p.gpsAlt).toFixed(1)}`).join(" ");
+  const moveTo = (e) => { const r = svgRef.current.getBoundingClientRect(); setCursor(t0 + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * total); };
+  // Draufsicht
+  const topView = useMemo(() => {
+    const lats = pts.map(p => p.lat), lons = pts.map(p => p.lon);
+    const la0 = Math.min(...lats), la1 = Math.max(...lats), lo0 = Math.min(...lons), lo1 = Math.max(...lons);
+    const k = Math.cos(((la0 + la1) / 2) * Math.PI / 180);
+    const w = Math.max(1e-6, (lo1 - lo0) * k), h = Math.max(1e-6, la1 - la0), sc = 176 / Math.max(w, h);
+    const ox = (200 - w * sc) / 2, oy = (200 - h * sc) / 2;
+    return { P: (p) => [ox + (p.lon - lo0) * k * sc, oy + (la1 - p.lat) * sc] };
+  }, [pts]);
+  const path = (list) => list.map(p => topView.P(p).map(v => v.toFixed(1)).join(",")).join(" ");
+  const cp = videoPosAt(track, cursor), pa = videoPosAt(track, cursor - 3), pb = videoPosAt(track, cursor + 3);
+  const dtw = Math.max(1, pb.timeSec - pa.timeSec);
+  const kmh = (haversineDistKm(pa, pb) || 0) / (dtw / 3600), vario = (pb.gpsAlt - pa.gpsAlt) / dtw;
+  const cpx = topView.P(cp);
+  const a = pending.a, b = pending.b;
+  const lo = a != null && b != null ? Math.min(a, b) : null, hi = a != null && b != null ? Math.max(a, b) : null;
+  const step = (d) => setCursor(Math.max(t0, Math.min(t1, cursor + d)));
+  const norm = (na, nb) => (na != null && nb != null && na > nb) ? { a: nb, b: na } : { a: na, b: nb };
+  const smallBtn = { height: 38, flex: 1, minWidth: 0, borderRadius: 8, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)", color: "#e8f4fd", fontSize: 13, fontWeight: 700, cursor: "pointer" };
+  const addPending = () => {
+    if (lo == null || hi - lo < 5) return;
+    setSegments(list => [...list, { id: Date.now() + Math.random(), f0: lo, f1: hi, speed, label: "" }].sort((x, y) => x.f0 - y.f0));
+    setPending({ a: null, b: null });
+  };
+  const totalSec = segments.reduce((s, x) => s + videoSegSeconds(x), 0);
+  return (
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      <div style={{fontSize:12,color:"rgba(232,244,253,0.65)",lineHeight:1.5}}>
+        Cursor im Höhenprofil ziehen, mit «Start hier» und «Ende hier» einen Abschnitt markieren und mit «Abschnitt hinzufügen» übernehmen. Beliebig viele Abschnitte sind möglich. Die Kamera wird je Abschnitt automatisch gewählt.
+      </div>
+      <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-start"}}>
+        <div style={{flex:"1 1 340px",minWidth:0}}>
+          <svg ref={svgRef} viewBox="0 0 1000 210" preserveAspectRatio="none"
+            style={{width:"100%",height:150,background:"rgba(255,255,255,0.04)",borderRadius:10,touchAction:"none",cursor:"ew-resize",display:"block"}}
+            onPointerDown={e => { dragRef.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} moveTo(e); }}
+            onPointerMove={e => { if (dragRef.current) moveTo(e); }}
+            onPointerUp={() => { dragRef.current = false; }} onPointerCancel={() => { dragRef.current = false; }}>
+            {segments.map((s, i) => <rect key={s.id} x={X(s.f0)} y="0" width={Math.max(2, X(s.f1) - X(s.f0))} height="210" fill={VIDEO_SEG_COLORS[i % VIDEO_SEG_COLORS.length]} opacity="0.28" />)}
+            {lo != null && <rect x={X(lo)} y="0" width={Math.max(2, X(hi) - X(lo))} height="210" fill="none" stroke="#fff" strokeWidth="3" strokeDasharray="10 7" />}
+            {a != null && <line x1={X(a)} x2={X(a)} y1="0" y2="210" stroke="#4ade80" strokeWidth="4" />}
+            {b != null && <line x1={X(b)} x2={X(b)} y1="0" y2="210" stroke="#f87171" strokeWidth="4" />}
+            <polyline points={line} fill="none" stroke="#7dd3fc" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+            <line x1={X(cursor)} x2={X(cursor)} y1="0" y2="210" stroke="#fff" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+            <circle cx={X(cursor)} cy={Y(cp.gpsAlt)} r="11" fill="#ef4444" stroke="#fff" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+          </svg>
+        </div>
+        <svg viewBox="0 0 200 200" style={{width:150,height:150,background:"rgba(255,255,255,0.04)",borderRadius:10,flex:"0 0 auto"}}>
+          <polyline points={path(pts)} fill="none" stroke="rgba(125,211,252,0.55)" strokeWidth="2" />
+          {segments.map((s, i) => <polyline key={s.id} points={path(pts.filter(p => p.timeSec >= s.f0 && p.timeSec <= s.f1))} fill="none" stroke={VIDEO_SEG_COLORS[i % VIDEO_SEG_COLORS.length]} strokeWidth="4" />)}
+          <circle cx={cpx[0]} cy={cpx[1]} r="6" fill="#ef4444" stroke="#fff" strokeWidth="2" />
+        </svg>
+      </div>
+      <div style={{fontSize:13,display:"flex",gap:14,flexWrap:"wrap"}}>
+        <span>⏱ {fmtVideoRel(cursor - t0)}</span><span>▲ {Math.round(cp.gpsAlt).toLocaleString("de-CH")} m</span><span>{Math.round(kmh)} km/h</span>
+        <span style={{color:vario >= 0.3 ? "#4ade80" : vario <= -2 ? "#f87171" : "#e5e7eb"}}>{vario >= 0 ? "+" : "−"}{Math.abs(vario).toFixed(1)} m/s</span>
+      </div>
+      <div style={{display:"flex",gap:6}}>
+        <button onClick={() => step(-30)} style={smallBtn}>−30 s</button><button onClick={() => step(-5)} style={smallBtn}>−5 s</button>
+        <button onClick={() => step(5)} style={smallBtn}>+5 s</button><button onClick={() => step(30)} style={smallBtn}>+30 s</button>
+      </div>
+      <div style={{display:"flex",gap:6}}>
+        <button onClick={() => setPending(norm(cursor, b))} style={{...smallBtn,borderColor:"#4ade80",color:"#4ade80"}}>▶ Start hier</button>
+        <button onClick={() => setPending(norm(a, cursor))} style={{...smallBtn,borderColor:"#f87171",color:"#f87171"}}>■ Ende hier</button>
+      </div>
+      <div>
+        <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Abspielgeschwindigkeit (für neue Abschnitte)</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+          {VIDEO_SPEEDS.map(sp => <button key={sp} onClick={() => setSpeed(sp)} style={{...smallBtn,flex:"1 0 56px",borderColor:speed===sp?"#7dd3fc":"rgba(255,255,255,0.18)",color:speed===sp?"#7dd3fc":"#e8f4fd",background:speed===sp?"rgba(125,211,252,0.2)":"rgba(255,255,255,0.06)"}}>{sp}×</button>)}
+        </div>
+      </div>
+      <button onClick={addPending} disabled={lo == null || hi - lo < 5}
+        style={{height:44,borderRadius:10,border:"none",background:lo != null && hi - lo >= 5 ? "#1e40af" : "rgba(255,255,255,0.1)",color:"#fff",fontSize:15,fontWeight:700,cursor:lo != null && hi - lo >= 5 ? "pointer" : "default"}}>
+        {lo != null ? `＋ Abschnitt hinzufügen (${fmtVideoRel(lo - t0)} – ${fmtVideoRel(hi - t0)}, ${Math.max(2, Math.round((hi - lo) / speed))} s Video)` : "＋ Abschnitt hinzufügen (erst Start und Ende setzen)"}
+      </button>
+      {segments.length > 0 && (
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {segments.map((s, i) => (
+            <div key={s.id} style={{border:"1px solid rgba(255,255,255,0.14)",borderLeft:`5px solid ${VIDEO_SEG_COLORS[i % VIDEO_SEG_COLORS.length]}`,borderRadius:8,padding:"8px 10px",display:"flex",flexDirection:"column",gap:6}}>
+              <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:13}}>
+                <b>{i + 1}</b><span>{fmtVideoRel(s.f0 - t0)} – {fmtVideoRel(s.f1 - t0)}</span>
+                <select value={s.speed} onChange={e => setSegments(list => list.map(x => x.id === s.id ? { ...x, speed: +e.target.value } : x))}
+                  style={{height:32,borderRadius:6,background:"#14253a",color:"#e8f4fd",border:"1px solid rgba(255,255,255,0.2)",padding:"0 6px"}}>
+                  {VIDEO_SPEEDS.map(sp => <option key={sp} value={sp}>{sp}×</option>)}
+                </select>
+                <span style={{color:"rgba(232,244,253,0.65)"}}>→ {Math.round(videoSegSeconds(s))} s Video</span>
+                <span style={{flex:1}} />
+                <button onClick={() => { setPending({ a: s.f0, b: s.f1 }); setSpeed(s.speed); setCursor(s.f0); setSegments(list => list.filter(x => x.id !== s.id)); }} title="Bearbeiten (zurück ins Profil)" style={{...smallBtn,flex:"0 0 40px"}}>✎</button>
+                <button onClick={() => setSegments(list => list.filter(x => x.id !== s.id))} title="Entfernen" style={{...smallBtn,flex:"0 0 40px"}}>🗑</button>
+              </div>
+              <input value={s.label} placeholder="Titel (optional)" maxLength={40} onChange={e => setSegments(list => list.map(x => x.id === s.id ? { ...x, label: e.target.value } : x))}
+                style={{height:34,borderRadius:6,background:"rgba(255,255,255,0.06)",color:"#e8f4fd",border:"1px solid rgba(255,255,255,0.18)",padding:"0 8px",fontSize:13}} />
+            </div>
+          ))}
+          <div style={{fontSize:13}}>Videolänge: <b>{fmtVideoRel(totalSec)} min</b>{totalSec > 300 && <span style={{color:"#fca5a5"}}> – maximal 5:00 min möglich</span>}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manual, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), miniDivRef = useRef(null), outRef = useRef(null);
-  const W = portrait ? 720 : 1280, H = portrait ? 1280 : 720, M = portrait ? 270 : 330;
+  const portrait = format === "port", square = format === "square", narrow = format !== "land";
+  const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720, M = portrait ? 270 : square ? 300 : 330;
 
   useEffect(() => {
     let cancelled = false;
@@ -1888,7 +2109,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       if (!sdk) throw new Error("MapTiler-SDK nicht geladen");
       const n = track.length;
       const t0 = track[0].timeSec, t1 = track[n-1].timeSec;
-      const D = duration;
+      let D = duration; // im manuellen Modus = Summe der Abschnitte (siehe unten)
       // MapLibre 5: der Zeichenpuffer bleibt nur mit canvasContextAttributes
       // erhalten — das alte Top-Level-"preserveDrawingBuffer" wird ignoriert.
       // Bilder, die ausserhalb des Karten-Renderings abgegriffen wurden,
@@ -1906,10 +2127,19 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       let dem = null;
       try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); }
       if (cancelled) return;
-      const maxPicks = D >= 90 ? 5 : D >= 60 ? 4 : D >= 45 ? 3 : 2;
-      const events = computeVideoHighlights(track, dem && dem.elev, maxPicks);
-      const shots = buildVideoScript(track, events, D, flight);
-      console.info("Flug-Video: Gelände " + (dem ? `${dem.tiles} Kacheln (z${dem.z})` : "nicht verfügbar") + " · Szenen:", events.map(e => e.label));
+      let shots;
+      if (manual) {
+        // Manuell gewählte Abschnitte; Kamera pro Abschnitt automatisch
+        shots = buildManualScript(track, manual, dem && dem.elev, flight);
+        if (!shots.length) throw new Error("Keine gültigen Abschnitte gewählt.");
+        D = shots[shots.length - 1].t1;
+        console.info("Flug-Video: Gelände " + (dem ? `${dem.tiles} Kacheln (z${dem.z})` : "nicht verfügbar") + " · Abschnitte:", shots.map(s => `${Math.round(s.f1 - s.f0)} s @${s.speed}× ${s.plan.mode}${s.plan.mode === "orbit" ? " " + s.plan.b0 + "°" : " rel " + s.plan.rel + "°"}`));
+      } else {
+        const maxPicks = D >= 90 ? 5 : D >= 60 ? 4 : D >= 45 ? 3 : 2;
+        const events = computeVideoHighlights(track, dem && dem.elev, maxPicks);
+        shots = buildVideoScript(track, events, D, flight);
+        console.info("Flug-Video: Gelände " + (dem ? `${dem.tiles} Kacheln (z${dem.z})` : "nicht verfügbar") + " · Szenen:", events.map(e => e.label));
+      }
       const stride = Math.max(1, Math.ceil(n / 700));
       const dec = []; for (let i = 0; i < n; i += stride) dec.push(i);
       if (dec[dec.length-1] !== n-1) dec.push(n-1);
@@ -1958,7 +2188,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
       const altLayer = createAltitudeTrackLayer(track, 4);
       main.addLayer(altLayer);
       altLayer.setProgress(0);
-      const overview = main.cameraForBounds(bounds, { padding: portrait ? 50 : 90, pitch: 0, bearing: 0 }) || { center: main.getCenter(), zoom: 11 };
+      const overview = main.cameraForBounds(bounds, { padding: narrow ? 50 : 90, pitch: 0, bearing: 0 }) || { center: main.getCenter(), zoom: 11 };
 
       // ── Zustand zu einem Videozeitpunkt (rein rechnerisch, ohne Zeitverlauf) ──
       let lastGround = 0;
@@ -1967,6 +2197,19 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         const ft = pos.timeSec;
         let c;
         switch (sh.kind) {
+          case "mseg": {
+            // Manueller Abschnitt: Kamera laut automatischer Planung (videoPlanCamera).
+            // Bei hoher Abspielgeschwindigkeit etwas weiter heraus, damit die Kacheln nachkommen.
+            const pl = sh.plan;
+            const zb = pl.zoom - clamp(0.35 * Math.log2(Math.max(1, sh.speed / 6)), 0, 1.4);
+            if (pl.mode === "orbit") {
+              let ctr = pl.center;
+              if (!pl.fixed) { let la = 0, lo = 0; for (let k = -2; k <= 2; k++) { const q = videoPosAt(track, ft + k * 10); la += q.lat; lo += q.lon; } ctr = [lo / 5, la / 5]; }
+              c = { center: ctr, bearing: pl.b0 + 90 * u, pitch: pl.pitch, zoom: zb + 0.2 };
+            }
+            else { const h = videoHeadingAt(track, ft, Math.max(12, sh.speed * 1.5)); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) + pl.rel + 12 * Math.sin(u * Math.PI), pitch: pl.pitch, zoom: zb }; }
+            break;
+          }
           case "start": c = { center: [pos.lon, pos.lat], bearing: sh.b0 + 160 - 110 * e, pitch: 52 + 8 * e, zoom: 15.3 - 0.7 * e }; break;
           case "transit": { const h = videoHeadingAt(track, ft, 25); c = { center: [pos.lon, pos.lat], bearing: h == null ? sh.b0 || 0 : h, pitch: 58, zoom: 12.6 }; break; }
           case "thermal": c = { center: sh.center, bearing: sh.b0 + 170 * u, pitch: 56, zoom: 14.7 }; break;
@@ -2012,11 +2255,10 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
           cam = { center: [lerp(a.center[0], cam.center[0], ee), lerp(a.center[1], cam.center[1], ee)], zoom: lerp(a.zoom, cam.zoom, ee),
             bearing: a.bearing + wrapDelta(a.bearing, cam.bearing) * ee, pitch: lerp(a.pitch, cam.pitch, ee) };
         }
-        // Überblendung (kurz schwarz) an jedem harten Schnitt – nicht vor dem Rückzug
-        const cuts = [[0, 0.5], [D, 0.5]];
-        shots.forEach((s, k) => { if (k < shots.length - 1 && shots[k+1].kind !== "outro") cuts.push([s.t1, shots[k+1].near ? 0.25 : 0.5]); });
+        // Schwarz nur am Anfang und Ende des Videos; zwischen den Szenen wird
+        // weich übergeblendet (siehe draw: Standbild der vorigen Szene blendet aus)
         let fade = 0;
-        cuts.forEach(([bt, w]) => { fade = Math.max(fade, 1 - Math.abs(t - bt) / w); });
+        [[0, 0.5], [D, 0.5]].forEach(([bt, w]) => { fade = Math.max(fade, 1 - Math.abs(t - bt) / w); });
         return { sh, u, ft, pos, cam, fade: clamp(fade, 0, 1) };
       };
       const mercPerPx = (lat, zoom) => 40075016.686 * Math.cos(lat * Math.PI / 180) / (512 * Math.pow(2, zoom));
@@ -2092,11 +2334,13 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         ctx.fillStyle = color; ctx.fillText(s, x, y);
         ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
       };
+      const snaps = new Map(); // Szenenindex → letztes Bild der Szene
+      const DISSOLVE = 1.0;     // Dauer der Kreuzblende (s)
       const draw = (t) => {
         if (!snap) return;
         const st = snap.st, curLift = snap.lift;
         ctx.drawImage(frameCopy, 0, 0, W, H);
-        const s = portrait ? 0.8 : 1;
+        const s = portrait ? 0.8 : square ? 0.9 : 1;
         // Pilot (in Flughöhe, mit "Lot" zum Boden)
         if (st.sh.kind !== "outro" || st.u < 0.6) {
           const g = { x: snap.gx, y: snap.gy };
@@ -2159,7 +2403,21 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         txt("N ↑", mx + M - 10, my + 22, 16, 800, "#1e3a8a", "right");
         // Quellenhinweis (MapTiler-Lizenz)
         txt("© MapTiler © OpenStreetMap contributors", W - 8, H - 12, 11, 500, "rgba(255,255,255,0.75)", "right");
-        // Überblendung zwischen den Einstellungen
+        // Weiche Szenenübergänge: das letzte Bild der vorigen Szene wird als
+        // Standbild festgehalten und über den Anfang der neuen Szene
+        // ausgeblendet (Kreuzblende). Die Kachel-Ladephase der neuen Szene
+        // bleibt so unsichtbar.
+        const si = shots.indexOf(st.sh);
+        if (st.sh.kind !== "outro" && t > st.sh.t1 - 0.3) {
+          let sc = snaps.get(si); if (!sc) { sc = document.createElement("canvas"); sc.width = W; sc.height = H; snaps.set(si, sc); }
+          sc.getContext("2d").drawImage(out, 0, 0);
+        }
+        for (const k of [...snaps.keys()]) if (k < si - 1) snaps.delete(k);
+        if (si > 0 && st.sh.kind !== "outro" && t - st.sh.t0 < DISSOLVE) {
+          const ps = snaps.get(si - 1);
+          if (ps) { const fr = clamp((t - st.sh.t0) / DISSOLVE, 0, 1); ctx.globalAlpha = 1 - fr * fr * (3 - 2 * fr); ctx.drawImage(ps, 0, 0); ctx.globalAlpha = 1; }
+        }
+        // Schwarz am Anfang/Ende des Videos
         if (st.fade > 0) { ctx.fillStyle = `rgba(0,0,0,${st.fade})`; ctx.fillRect(0, 0, W, H); }
       };
       // Pilot-Position und Kamera werden im Moment des Karten-Renderings
@@ -2263,7 +2521,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
         </>,
         document.body
       )}
-      <canvas ref={outRef} style={{width:"100%",maxWidth:portrait?340:760,maxHeight:"62vh",aspectRatio:`${W}/${H}`,borderRadius:12,background:"#000",display:"block",margin:"0 auto"}} />
+      <canvas ref={outRef} style={{width:"100%",maxWidth:portrait?340:square?480:760,maxHeight:"62vh",aspectRatio:`${W}/${H}`,borderRadius:12,background:"#000",display:"block",margin:"0 auto"}} />
     </>
   );
 }
@@ -2271,7 +2529,14 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, portrait, onD
 function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const [stage, setStage] = useState("options"); // options | render | done | error
   const [duration, setDuration] = useState(45);
-  const [portrait, setPortrait] = useState(false);
+  const [format, setFormat] = useState("land"); // land | port | square
+  const portrait = format === "port";
+  const [mode, setMode] = useState("auto"); // auto | manual
+  const [segs, setSegs] = useState([]);
+  const [pending, setPending] = useState({ a: null, b: null });
+  const [mspeed, setMspeed] = useState(10);
+  const [cursor, setCursor] = useState(track[0].timeSec);
+  const manualSecs = segs.reduce((s, x) => s + videoSegSeconds(x), 0);
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null); // { url, ext, blob }
   const [err, setErr] = useState("");
@@ -2350,32 +2615,43 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
                 {folderMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{folderMsg}</div>}
               </div>
             )}
-            <div style={{fontSize:13,color:"rgba(232,244,253,0.75)",lineHeight:1.5}}>
-              Erzeugt ein kurzes Video mit 3D-Satellitenkarte und wechselnden Kameras:
-              Start → Highlights (starke Thermik, Hang-/Gratflug, Gipfelüberflug, Talquerung …) → Landung.
-              In der Ecke läuft eine Geländekarte von oben mit dem Positionspunkt mit.
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={()=>setMode("auto")} style={chip(mode==="auto")}>Automatisch</button>
+              <button onClick={()=>setMode("manual")} style={chip(mode==="manual")}>Manuell</button>
             </div>
-            <div>
-              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Länge</div>
-              <div style={{display:"flex",gap:8}}>{[30,45,60,90].map(d => <button key={d} onClick={()=>setDuration(d)} style={chip(duration===d)}>{d === 90 ? "1:30 min" : d + " s"}</button>)}</div>
-            </div>
+            {mode === "auto" ? (
+              <>
+                <div style={{fontSize:13,color:"rgba(232,244,253,0.75)",lineHeight:1.5}}>
+                  Erzeugt ein kurzes Video mit 3D-Satellitenkarte und wechselnden Kameras:
+                  Start → Highlights (starke Thermik, Hang-/Gratflug, Gipfelüberflug, Talquerung …) → Landung.
+                  In der Ecke läuft eine Geländekarte von oben mit dem Positionspunkt mit.
+                </div>
+                <div>
+                  <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Länge</div>
+                  <div style={{display:"flex",gap:8}}>{[30,45,60,90].map(d => <button key={d} onClick={()=>setDuration(d)} style={chip(duration===d)}>{d === 90 ? "1:30 min" : d + " s"}</button>)}</div>
+                </div>
+              </>
+            ) : (
+              <FlightVideoRangeEditor track={track} segments={segs} setSegments={setSegs} pending={pending} setPending={setPending} cursor={cursor} setCursor={setCursor} speed={mspeed} setSpeed={setMspeed} />
+            )}
             <div>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Format</div>
               <div style={{display:"flex",gap:8}}>
-                <button onClick={()=>setPortrait(false)} style={chip(!portrait)}>Quer 16:9</button>
-                <button onClick={()=>setPortrait(true)} style={chip(portrait)}>Hoch 9:16</button>
+                <button onClick={()=>setFormat("land")} style={chip(format==="land")}>Quer 16:9</button>
+                <button onClick={()=>setFormat("port")} style={chip(format==="port")}>Hoch 9:16</button>
+                <button onClick={()=>setFormat("square")} style={chip(format==="square")}>Quadrat 1:1</button>
               </div>
             </div>
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
-              Ablauf: Zuerst werden die Karten vorgeladen (ca. 20–90 s), dann wird das Video in Echtzeit aufgenommen ({duration} s).
+              Ablauf: Zuerst werden die Karten vorgeladen (ca. 20–90 s), dann wird das Video in Echtzeit aufgenommen ({mode === "manual" ? Math.round(manualSecs) : duration} s).
               Während dieser Zeit die App im Vordergrund und den Bildschirm eingeschaltet lassen.
             </div>
-            <button onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn("#16a34a")}>Video erstellen</button>
+            <button disabled={mode === "manual" && (!segs.length || manualSecs > 300)} onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={{...btn(mode === "manual" && (!segs.length || manualSecs > 300) ? "rgba(255,255,255,0.12)" : "#16a34a")}}>{mode === "manual" && !segs.length ? "Erst Abschnitte hinzufügen" : "Video erstellen"}</button>
           </>
         )}
         {stage === "render" && (
           <>
-            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} portrait={portrait}
+            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
               onDone={(blob, ext) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setFolderMsg(""); if (fsOk) saveToFolder(res, false); }}
@@ -2387,7 +2663,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
         )}
         {stage === "done" && result && (
           <>
-            <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
+            <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
               {canShare && <button onClick={()=>{ try { navigator.share({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })], title: "Mein Flug" }); } catch {} }} style={btn("#7c3aed")}>Teilen</button>}
