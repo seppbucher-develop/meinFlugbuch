@@ -2059,16 +2059,42 @@ const videoSegSeconds = (s) => Math.max(2, (s.f1 - s.f0) / Math.max(1, s.speed |
 // Höhenprofil mit verschiebbarem Cursor (Finger/Maus ziehen oder Feintasten),
 // Start-/Ende-Markierung und beliebig vielen Abschnitten — dazu eine kleine
 // Draufsicht des Tracks zur Orientierung.
-function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPending, cursor, setCursor, speed, setSpeed, sugg, onLoadSugg, onAddSugg, onAdoptAuto }) {
+function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPending, cursor, setCursor, speed, setSpeed, sugg, onLoadSugg, onAddSugg, onAdoptAuto, editId, setEditId }) {
   const t0 = track[0].timeSec, t1 = track[track.length-1].timeSec, total = Math.max(1, t1 - t0);
   const svgRef = useRef(null), dragRef = useRef(false);
   const pts = useMemo(() => { const st = Math.max(1, Math.ceil(track.length / 400)), a = []; for (let i = 0; i < track.length; i += st) a.push(track[i]); a.push(track[track.length-1]); return a; }, [track]);
-  const aMin = useMemo(() => Math.min(...pts.map(p => p.gpsAlt)), [pts]);
-  const aMax = useMemo(() => Math.max(...pts.map(p => p.gpsAlt)), [pts]);
-  const X = (t) => (t - t0) / total * 1000;
+  // Ansichtsfenster (Zoom): eine Szene von 60 s ist im Profil eines 4-Stunden-Flugs nur wenige Pixel breit
+  const [view, setView] = useState(null);       // null = ganzer Flug
+  const [peek, setPeek] = useState(null);       // angeschauter Vorschlag (noch nicht übernommen)
+  const v0 = view ? view.v0 : t0, v1 = view ? view.v1 : t1, vspan = Math.max(1, v1 - v0);
+  const ptsV = useMemo(() => {
+    let lo = 0, hi = track.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (track[m].timeSec < v0) lo = m + 1; else hi = m; }
+    const i0 = Math.max(0, lo - 1);
+    lo = i0; hi = track.length - 1;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (track[m].timeSec <= v1) lo = m + 1; else hi = m; }
+    const i1 = Math.min(track.length - 1, lo + 1);
+    const st = Math.max(1, Math.ceil((i1 - i0 + 1) / 400)), a = [];
+    for (let i = i0; i <= i1; i += st) a.push(track[i]);
+    a.push(track[i1]);
+    return a;
+  }, [track, v0, v1]);
+  const aMin = useMemo(() => Math.min(...ptsV.map(p => p.gpsAlt)), [ptsV]);
+  const aMax = useMemo(() => Math.max(...ptsV.map(p => p.gpsAlt)), [ptsV]);
+  const X = (t) => (t - v0) / vspan * 1000;
   const Y = (a) => 195 - (a - aMin) / Math.max(1, aMax - aMin) * 175;
-  const line = pts.map(p => `${X(p.timeSec).toFixed(1)},${Y(p.gpsAlt).toFixed(1)}`).join(" ");
-  const moveTo = (e) => { const r = svgRef.current.getBoundingClientRect(); setCursor(t0 + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * total); };
+  const line = ptsV.map(p => `${X(p.timeSec).toFixed(1)},${Y(p.gpsAlt).toFixed(1)}`).join(" ");
+  const moveTo = (e) => { const r = svgRef.current.getBoundingClientRect(); setCursor(v0 + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * vspan); };
+  const zoomTo = (ta, tb) => { const pad = Math.max(20, (tb - ta) * 0.8); setView({ v0: Math.max(t0, ta - pad), v1: Math.min(t1, tb + pad) }); };
+  const zoomBy = (fct) => {
+    const half = Math.max(10, vspan / 2 * fct); let n0 = cursor - half, n1 = cursor + half;
+    if (n0 < t0) { n1 += t0 - n0; n0 = t0; } if (n1 > t1) { n0 -= n1 - t1; n1 = t1; }
+    n0 = Math.max(t0, n0);
+    if (n1 - n0 >= total * 0.999) setView(null); else setView({ v0: n0, v1: n1 });
+  };
+  // Ausgewählter Abschnitt (wird "in place" bearbeitet): Start/Ende-Knöpfe wirken direkt auf ihn
+  const sel = editId != null ? segments.find(s => s.id === editId) || null : null;
+  useEffect(() => { if (sel) { zoomTo(sel.f0, sel.f1); setCursor(sel.f0); setPeek(null); } }, [editId]);
   // Draufsicht
   const topView = useMemo(() => {
     const lats = pts.map(p => p.lat), lons = pts.map(p => p.lon);
@@ -2085,9 +2111,19 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
   const cpx = topView.P(cp);
   const a = pending.a, b = pending.b;
   const lo = a != null && b != null ? Math.min(a, b) : null, hi = a != null && b != null ? Math.max(a, b) : null;
+  // Das im Profil hervorgehobene Zeitfenster: gewählter Abschnitt, angeschauter Vorschlag oder neu gesetzte Markierung
+  const peekC = peek && sugg ? sugg.list.find(cd => cd.id === peek) : null;
+  const win = sel ? { a: sel.f0, b: sel.f1 } : peekC ? { a: peekC.f0, b: peekC.f1 } : (lo != null ? { a: lo, b: hi } : (a != null ? { a, b: null } : (b != null ? { a: null, b } : null)));
   const step = (d) => setCursor(Math.max(t0, Math.min(t1, cursor + d)));
   const norm = (na, nb) => (na != null && nb != null && na > nb) ? { a: nb, b: na } : { a: na, b: nb };
   const smallBtn = { height: 38, flex: 1, minWidth: 0, borderRadius: 8, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)", color: "#e8f4fd", fontSize: 13, fontWeight: 700, cursor: "pointer" };
+  const setEdge = (which) => setSegments(list => list.map(s => {
+    if (s.id !== editId) return s;
+    let f0 = s.f0, f1 = s.f1;
+    if (which === "start") f0 = cursor; else f1 = cursor;
+    if (f0 > f1) [f0, f1] = [f1, f0];
+    return f1 - f0 < 5 ? s : { ...s, f0, f1 };
+  }).sort((x, y) => x.f0 - y.f0));
   const addPending = () => {
     if (lo == null || hi - lo < 5) return;
     setSegments(list => [...list, { id: Date.now() + Math.random(), f0: lo, f1: hi, speed, label: "", ...(pending.meta || {}) }].sort((x, y) => x.f0 - y.f0));
@@ -2106,14 +2142,14 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
             onPointerDown={e => { dragRef.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} moveTo(e); }}
             onPointerMove={e => { if (dragRef.current) moveTo(e); }}
             onPointerUp={() => { dragRef.current = false; }} onPointerCancel={() => { dragRef.current = false; }}>
-            {segments.map((s, i) => <rect key={s.id} x={X(s.f0)} y="0" width={Math.max(2, X(s.f1) - X(s.f0))} height="210" fill={VIDEO_SEG_COLORS[i % VIDEO_SEG_COLORS.length]} opacity="0.28" />)}
+            {segments.map((s, i) => <rect key={s.id} x={X(s.f0)} y="0" width={Math.max(6, X(s.f1) - X(s.f0))} height="210" fill={VIDEO_SEG_COLORS[i % VIDEO_SEG_COLORS.length]} opacity={s.id === editId ? 0.42 : 0.28} />)}
             {sugg && sugg.list.map(cd => <g key={cd.id}>
-              <rect x={X(cd.f0)} y="0" width={Math.max(3, X(cd.f1) - X(cd.f0))} height="16" fill="#facc15" opacity={segments.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1) ? 0.35 : 0.95} />
+              <rect x={X(cd.f0)} y="0" width={Math.max(6, X(cd.f1) - X(cd.f0))} height="16" fill="#facc15" opacity={segments.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1) ? 0.35 : 0.95} />
               <line x1={X(cd.center)} x2={X(cd.center)} y1="16" y2="210" stroke="#facc15" strokeWidth="1.5" strokeDasharray="4 5" opacity="0.7" vectorEffect="non-scaling-stroke" />
             </g>)}
-            {lo != null && <rect x={X(lo)} y="0" width={Math.max(2, X(hi) - X(lo))} height="210" fill="none" stroke="#fff" strokeWidth="3" strokeDasharray="10 7" />}
-            {a != null && <line x1={X(a)} x2={X(a)} y1="0" y2="210" stroke="#4ade80" strokeWidth="4" />}
-            {b != null && <line x1={X(b)} x2={X(b)} y1="0" y2="210" stroke="#f87171" strokeWidth="4" />}
+            {win && win.a != null && win.b != null && <rect x={X(win.a)} y="0" width={Math.max(6, X(win.b) - X(win.a))} height="210" fill="rgba(255,255,255,0.10)" stroke="#fff" strokeWidth="2.5" strokeDasharray="10 7" vectorEffect="non-scaling-stroke" />}
+            {win && win.a != null && <line x1={X(win.a)} x2={X(win.a)} y1="0" y2="210" stroke="#4ade80" strokeWidth="4" vectorEffect="non-scaling-stroke" />}
+            {win && win.b != null && <line x1={X(win.b)} x2={X(win.b)} y1="0" y2="210" stroke="#f87171" strokeWidth="4" vectorEffect="non-scaling-stroke" />}
             <polyline points={line} fill="none" stroke="#7dd3fc" strokeWidth="3" vectorEffect="non-scaling-stroke" />
             <line x1={X(cursor)} x2={X(cursor)} y1="0" y2="210" stroke="#fff" strokeWidth="3" vectorEffect="non-scaling-stroke" />
             <circle cx={X(cursor)} cy={Y(cp.gpsAlt)} r="11" fill="#ef4444" stroke="#fff" strokeWidth="3" vectorEffect="non-scaling-stroke" />
@@ -2125,6 +2161,18 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
           <circle cx={cpx[0]} cy={cpx[1]} r="6" fill="#ef4444" stroke="#fff" strokeWidth="2" />
         </svg>
       </div>
+      <div style={{display:"flex",gap:6}}>
+        <button onClick={() => zoomBy(0.5)} style={smallBtn} title="Hineinzoomen">🔍＋</button>
+        <button onClick={() => zoomBy(2)} style={smallBtn} title="Herauszoomen">🔍－</button>
+        <button onClick={() => win && win.a != null && win.b != null ? zoomTo(win.a, win.b) : null} disabled={!(win && win.a != null && win.b != null)} style={{...smallBtn,opacity:win && win.a != null && win.b != null ? 1 : 0.45}} title="Auf das markierte Zeitfenster zoomen">🔍 Fenster</button>
+        <button onClick={() => setView(null)} disabled={!view} style={{...smallBtn,opacity:view ? 1 : 0.45}}>Alles</button>
+      </div>
+      {sel && (
+        <div style={{display:"flex",alignItems:"center",gap:8,border:"1px solid rgba(255,255,255,0.35)",borderRadius:8,padding:"6px 10px",fontSize:13}}>
+          <span style={{flex:1}}>✎ Abschnitt <b>{segments.findIndex(s => s.id === sel.id) + 1}</b> wird bearbeitet: Cursor setzen, dann «Start hier» bzw. «Ende hier».</span>
+          <button onClick={() => setEditId(null)} style={{...smallBtn,flex:"0 0 80px",borderColor:"#4ade80",color:"#4ade80"}}>Fertig</button>
+        </div>
+      )}
       <div style={{fontSize:13,display:"flex",gap:14,flexWrap:"wrap"}}>
         <span>⏱ {fmtVideoRel(cursor - t0)}</span><span>▲ {Math.round(cp.gpsAlt).toLocaleString("de-CH")} m</span><span>{Math.round(kmh)} km/h</span>
         <span style={{color:vario >= 0.3 ? "#4ade80" : vario <= -2 ? "#f87171" : "#e5e7eb"}}>{vario >= 0 ? "+" : "−"}{Math.abs(vario).toFixed(1)} m/s</span>
@@ -2134,8 +2182,8 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
         <button onClick={() => step(5)} style={smallBtn}>+5 s</button><button onClick={() => step(30)} style={smallBtn}>+30 s</button>
       </div>
       <div style={{display:"flex",gap:6}}>
-        <button onClick={() => setPending({ ...norm(cursor, b), meta: pending.meta })} style={{...smallBtn,borderColor:"#4ade80",color:"#4ade80"}}>▶ Start hier</button>
-        <button onClick={() => setPending({ ...norm(a, cursor), meta: pending.meta })} style={{...smallBtn,borderColor:"#f87171",color:"#f87171"}}>■ Ende hier</button>
+        <button onClick={() => sel ? setEdge("start") : setPending({ ...norm(cursor, b), meta: pending.meta })} style={{...smallBtn,borderColor:"#4ade80",color:"#4ade80"}}>▶ Start hier</button>
+        <button onClick={() => sel ? setEdge("end") : setPending({ ...norm(a, cursor), meta: pending.meta })} style={{...smallBtn,borderColor:"#f87171",color:"#f87171"}}>■ Ende hier</button>
       </div>
       <div>
         <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Abspielgeschwindigkeit (für neue Abschnitte)</div>
@@ -2143,10 +2191,10 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
           {VIDEO_SPEEDS.map(sp => <button key={sp} onClick={() => setSpeed(sp)} style={{...smallBtn,flex:"1 0 56px",borderColor:speed===sp?"#7dd3fc":"rgba(255,255,255,0.18)",color:speed===sp?"#7dd3fc":"#e8f4fd",background:speed===sp?"rgba(125,211,252,0.2)":"rgba(255,255,255,0.06)"}}>{sp}×</button>)}
         </div>
       </div>
-      <button onClick={addPending} disabled={lo == null || hi - lo < 5}
+      {!sel && <button onClick={addPending} disabled={lo == null || hi - lo < 5}
         style={{height:44,borderRadius:10,border:"none",background:lo != null && hi - lo >= 5 ? "#1e40af" : "rgba(255,255,255,0.1)",color:"#fff",fontSize:15,fontWeight:700,cursor:lo != null && hi - lo >= 5 ? "pointer" : "default"}}>
         {lo != null ? `＋ Abschnitt hinzufügen (${fmtVideoRel(lo - t0)} – ${fmtVideoRel(hi - t0)}, ${Math.max(2, Math.round((hi - lo) / speed))} s Video)` : "＋ Abschnitt hinzufügen (erst Start und Ende setzen)"}
-      </button>
+      </button>}
       <div style={{border:"1px solid rgba(250,204,21,0.35)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
         <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
           <button onClick={onLoadSugg} disabled={sugg.state === "loading"} style={{...smallBtn,flex:"1 1 auto",borderColor:"rgba(250,204,21,0.6)",color:"#facc15"}}>
@@ -2160,7 +2208,7 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
           const added = segments.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1);
           return (
             <div key={cd.id} style={{display:"flex",alignItems:"center",gap:8,fontSize:13,borderTop:"1px solid rgba(255,255,255,0.08)",paddingTop:6}}>
-              <div onClick={() => setCursor(cd.center)} style={{flex:1,minWidth:0,cursor:"pointer"}}>
+              <div onClick={() => { const sg = segments.find(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1); if (sg) { setEditId(sg.id); } else { setEditId(null); setPeek(cd.id); setCursor(cd.f0); zoomTo(cd.f0, cd.f1); } }} style={{flex:1,minWidth:0,cursor:"pointer"}}>
                 <div style={{fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{cd.label}</div>
                 <div style={{fontSize:11,color:"rgba(232,244,253,0.6)"}}>{fmtVideoRel(cd.f0 - t0)} – {fmtVideoRel(cd.f1 - t0)} · {Math.round(cd.f1 - cd.f0)} s Flug{cd.score ? " · Wertung " + cd.score.toFixed(1) : ""}</div>
               </div>
@@ -2172,7 +2220,7 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
       {segments.length > 0 && (
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
           {segments.map((s, i) => (
-            <div key={s.id} style={{border:"1px solid rgba(255,255,255,0.14)",borderLeft:`5px solid ${VIDEO_SEG_COLORS[i % VIDEO_SEG_COLORS.length]}`,borderRadius:8,padding:"8px 10px",display:"flex",flexDirection:"column",gap:6}}>
+            <div key={s.id} style={{borderStyle:"solid",borderTopWidth:1,borderRightWidth:1,borderBottomWidth:1,borderLeftWidth:5,borderTopColor:s.id === editId ? "#fff" : "rgba(255,255,255,0.14)",borderRightColor:s.id === editId ? "#fff" : "rgba(255,255,255,0.14)",borderBottomColor:s.id === editId ? "#fff" : "rgba(255,255,255,0.14)",borderLeftColor:VIDEO_SEG_COLORS[i % VIDEO_SEG_COLORS.length],borderRadius:8,padding:"8px 10px",display:"flex",flexDirection:"column",gap:6}}>
               <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",fontSize:13}}>
                 <b>{i + 1}</b><span>{fmtVideoRel(s.f0 - t0)} – {fmtVideoRel(s.f1 - t0)}</span>
                 <select value={s.speed} onChange={e => setSegments(list => list.map(x => x.id === s.id ? { ...x, speed: +e.target.value } : x))}
@@ -2181,8 +2229,8 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
                 </select>
                 <span style={{color:"rgba(232,244,253,0.65)"}}>→ {Math.round(videoSegSeconds(s))} s Video</span>
                 <span style={{flex:1}} />
-                <button onClick={() => { setPending({ a: s.f0, b: s.f1, meta: { kind: s.kind, bSide: s.bSide, heading: s.heading, lat: s.lat, lon: s.lon } }); setSpeed(s.speed); setCursor(s.f0); setSegments(list => list.filter(x => x.id !== s.id)); }} title="Bearbeiten (zurück ins Profil)" style={{...smallBtn,flex:"0 0 40px"}}>✎</button>
-                <button onClick={() => setSegments(list => list.filter(x => x.id !== s.id))} title="Entfernen" style={{...smallBtn,flex:"0 0 40px"}}>🗑</button>
+                <button onClick={() => setEditId(s.id === editId ? null : s.id)} title={s.id === editId ? "Bearbeiten beenden" : "Start/Ende im Höhenprofil anpassen"} style={{...smallBtn,flex:"0 0 40px",background:s.id === editId ? "rgba(255,255,255,0.22)" : smallBtn.background}}>✎</button>
+                <button onClick={() => { if (s.id === editId) setEditId(null); setSegments(list => list.filter(x => x.id !== s.id)); }} title="Entfernen" style={{...smallBtn,flex:"0 0 40px"}}>🗑</button>
               </div>
               <input value={s.label} placeholder="Titel (optional)" maxLength={40} onChange={e => setSegments(list => list.map(x => x.id === s.id ? { ...x, label: e.target.value } : x))}
                 style={{height:34,borderRadius:6,background:"rgba(255,255,255,0.06)",color:"#e8f4fd",border:"1px solid rgba(255,255,255,0.18)",padding:"0 8px",fontSize:13}} />
@@ -2780,6 +2828,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const manualSecs = segs.reduce((s, x) => s + videoSegSeconds(x), 0);
   // Vorschläge (aus der automatischen Szenenauswahl) für den manuellen Modus
   const demRef = useRef(null);
+  const [editId, setEditId] = useState(null);   // gerade im Höhenprofil bearbeiteter Abschnitt
   const [sugg, setSugg] = useState({ state: "idle", list: [], autoIds: [], msg: "" });
   const snapSpeed = (flightSec) => { // Geschwindigkeit so wählen, dass die Szene ~9 s dauert
     const raw = Math.max(1, flightSec / 9); let best = VIDEO_SPEEDS[0];
@@ -2788,7 +2837,13 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   };
   const toSegment = (cd) => ({ id: Date.now() + Math.random(), f0: cd.f0, f1: cd.f1, speed: snapSpeed(cd.f1 - cd.f0), label: cd.label || "",
     kind: cd.kind, bSide: cd.bSide, heading: cd.heading, lat: cd.lat, lon: cd.lon });
-  const addSugg = (cd) => setSegs(list => list.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1) ? list : [...list, toSegment(cd)].sort((x, y) => x.f0 - y.f0));
+  const addSugg = (cd) => {
+    const ex = segs.find(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1);
+    if (ex) { setEditId(ex.id); return; }
+    const sg = toSegment(cd);
+    setSegs(list => [...list, sg].sort((x, y) => x.f0 - y.f0));
+    setEditId(sg.id);   // gleich auswählen: Start/Ende werden im Profil sichtbar und lassen sich anpassen
+  };
   const adoptAuto = () => setSegs(list => {
     const add = sugg.list.filter(cd => sugg.autoIds.includes(cd.id) && !list.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1)).map(toSegment);
     return [...list, ...add].sort((x, y) => x.f0 - y.f0);
@@ -2936,7 +2991,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
               </>
             ) : (
               <FlightVideoRangeEditor track={track} segments={segs} setSegments={setSegs} pending={pending} setPending={setPending} cursor={cursor} setCursor={setCursor} speed={mspeed} setSpeed={setMspeed}
-                sugg={sugg} onLoadSugg={loadSugg} onAddSugg={addSugg} onAdoptAuto={adoptAuto} />
+                sugg={sugg} onLoadSugg={loadSugg} onAddSugg={addSugg} onAdoptAuto={adoptAuto} editId={editId} setEditId={setEditId} />
             )}
             <div>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Format</div>
