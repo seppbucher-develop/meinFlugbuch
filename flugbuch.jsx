@@ -2195,6 +2195,15 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       const cameraFor = (sh, u, pos) => {
         const e = u * u * (3 - 2 * u);
         const ft = pos.timeSec;
+        // Ruhiges Kamerazentrum: über ein Zeitfenster gemittelte Pilotposition
+        // statt des Einzelpunkts (das Fenster wächst mit der Abspielgeschwindigkeit,
+        // entspricht also immer etwa 1 s Videozeit). Kurven und Ruckler des Tracks
+        // übertragen sich so nicht auf die Kamera.
+        const speedEff = clamp((sh.f1 - sh.f0) / Math.max(1, sh.d || 1), 1, 200);
+        const Wc = clamp(0.9 * speedEff, 3, 40);
+        let cla = 0, clo = 0;
+        for (const k of [-1, -0.5, 0, 0.5, 1]) { const q = videoPosAt(track, ft + k * Wc); cla += q.lat; clo += q.lon; }
+        const cpos = [clo / 5, cla / 5];
         let c;
         switch (sh.kind) {
           case "mseg": {
@@ -2204,21 +2213,21 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
             const zb = pl.zoom - clamp(0.35 * Math.log2(Math.max(1, sh.speed / 6)), 0, 1.4);
             if (pl.mode === "orbit") {
               let ctr = pl.center;
-              if (!pl.fixed) { let la = 0, lo = 0; for (let k = -2; k <= 2; k++) { const q = videoPosAt(track, ft + k * 10); la += q.lat; lo += q.lon; } ctr = [lo / 5, la / 5]; }
+              if (!pl.fixed) { let la = 0, lo = 0; for (let k = -3; k <= 3; k++) { const q = videoPosAt(track, ft + k * 15); la += q.lat; lo += q.lon; } ctr = [lo / 7, la / 7]; }
               c = { center: ctr, bearing: pl.b0 + 90 * u, pitch: pl.pitch, zoom: zb + 0.2 };
             }
-            else { const h = videoHeadingAt(track, ft, Math.max(12, sh.speed * 1.5)); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) + pl.rel + 12 * Math.sin(u * Math.PI), pitch: pl.pitch, zoom: zb }; }
+            else { const h = videoHeadingAt(track, ft, Math.max(12, sh.speed * 1.5)); c = { center: cpos, bearing: (h == null ? sh.b0 : h) + pl.rel + 12 * Math.sin(u * Math.PI), pitch: pl.pitch, zoom: zb }; }
             break;
           }
-          case "start": c = { center: [pos.lon, pos.lat], bearing: sh.b0 + 160 - 110 * e, pitch: 52 + 8 * e, zoom: 15.3 - 0.7 * e }; break;
-          case "transit": { const h = videoHeadingAt(track, ft, 25); c = { center: [pos.lon, pos.lat], bearing: h == null ? sh.b0 || 0 : h, pitch: 58, zoom: 12.6 }; break; }
+          case "start": c = { center: cpos, bearing: sh.b0 + 160 - 110 * e, pitch: 52 + 8 * e, zoom: 15.3 - 0.7 * e }; break;
+          case "transit": { const h = videoHeadingAt(track, ft, 25); c = { center: cpos, bearing: h == null ? sh.b0 || 0 : h, pitch: 58, zoom: 12.6 }; break; }
           case "thermal": c = { center: sh.center, bearing: sh.b0 + 170 * u, pitch: 56, zoom: 14.7 }; break;
-          case "peak": { const h = videoHeadingAt(track, ft, 10); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) + 80 + 25 * e, pitch: 60, zoom: 13.9 }; break; }
-          case "ridge": c = { center: [pos.lon, pos.lat], bearing: sh.bSide + 12 * Math.sin(u * Math.PI), pitch: 50, zoom: 14.3 }; break;
-          case "summit": c = { center: [pos.lon, pos.lat], bearing: (sh.heading || 0) + 180 - 70 * e, pitch: 60, zoom: 14.6 }; break;
-          case "crossing": c = { center: [pos.lon, pos.lat], bearing: sh.bSide, pitch: 55, zoom: 13.5 }; break;
+          case "peak": { const h = videoHeadingAt(track, ft, 10); c = { center: cpos, bearing: (h == null ? sh.b0 : h) + 80 + 25 * e, pitch: 60, zoom: 13.9 }; break; }
+          case "ridge": c = { center: cpos, bearing: sh.bSide + 12 * Math.sin(u * Math.PI), pitch: 50, zoom: 14.3 }; break;
+          case "summit": c = { center: cpos, bearing: (sh.heading || 0) + 180 - 70 * e, pitch: 60, zoom: 14.6 }; break;
+          case "crossing": c = { center: cpos, bearing: sh.bSide, pitch: 55, zoom: 13.5 }; break;
           case "spiral": case "wingover": c = { center: sh.center, bearing: sh.b0 + 170 * u, pitch: 58, zoom: 14.5 }; break;
-          case "glide": { const h = videoHeadingAt(track, ft, 15); c = { center: [pos.lon, pos.lat], bearing: (h == null ? sh.b0 : h) - 50, pitch: 58, zoom: 14 }; break; }
+          case "glide": { const h = videoHeadingAt(track, ft, 15); c = { center: cpos, bearing: (h == null ? sh.b0 : h) - 50, pitch: 58, zoom: 14 }; break; }
           case "land": {
             // Ruhige Landekamera: Blick auf die Strecke Anflugbeginn → Landeplatz
             // (feste Richtung, nur langsam drehend) und Kamerazentrum, das
@@ -2263,16 +2272,38 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       };
       const mercPerPx = (lat, zoom) => 40075016.686 * Math.cos(lat * Math.PI / 180) / (512 * Math.pow(2, zoom));
 
-      let curLift = 0, curState = null, snap = null, smoothH = null, smoothT = 0;
-      let smoothPitch = null, smoothPitchT = 0, smoothPitchShot = null;
+      let curLift = 0, curState = null, snap = null;
+      // Geländehöhe: bevorzugt aus den selbst geladenen Höhenkacheln (stabil,
+      // schon vor dem Karten-Rendering verfügbar), sonst aus der Karte.
+      const demElev = dem && dem.elev;
+      const groundAt = (lon, lat) => {
+        let g = demElev ? demElev(lat, lon) : null;
+        if (g == null || !isFinite(g)) g = main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null;
+        return g != null && isFinite(g) ? g : null;
+      };
+      // Träge Glättung der Kameraparameter (Zoom, Neigung, Versatz, Höhe): Jeder
+      // Wert, der von Bild zu Bild aus dem Gelände unter dem Piloten berechnet
+      // wird, schwankt beim Kreisen mit und lässt die Kamera "pumpen".
+      const SM = {};
+      const smooth = (name, target, t, sh, tauDown, tauUp) => {
+        const s = SM[name];
+        if (!s || s.sh !== sh || Math.abs(t - s.t) > 1.5) { SM[name] = { v: target, t, sh }; return target; }
+        const tau = target < s.v ? tauDown : tauUp;
+        s.v += (target - s.v) * Math.min(1, Math.abs(t - s.t) / tau); s.t = t;
+        return s.v;
+      };
+      const isOrbit = (sh) => sh.kind === "thermal" || sh.kind === "spiral" || sh.kind === "wingover" || (sh.kind === "mseg" && sh.plan.mode === "orbit");
       // Sichtlinie Kamera → Pilot gegen das Gelände prüfen. Die Kamera sitzt
       // (näherungsweise) hinter dem Zielpunkt in Blickrichtung; schneidet die
       // Linie zum Piloten einen Berg, wird die Kamera schrittweise steiler
-      // (mehr Draufsicht) gestellt, bis der Pilot frei sichtbar ist.
-      const elevAt = (lon, lat) => { const g = main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null; return g != null && isFinite(g) ? g : null; };
+      // (mehr Draufsicht) gestellt, bis der Pilot frei sichtbar ist. Dicht über
+      // dem Boden (Landung) wird das letzte Stück der Linie ignoriert.
       const clearPitch = (cam, zoom, pos) => {
         const dist = 1.5 * H * mercPerPx(pos.lat, zoom); // Kameraabstand zum Zielpunkt (m), vertikales FOV ≈ 36.9°
-        const cg = elevAt(cam.center[0], cam.center[1]) ?? lastGround;
+        const cg = groundAt(cam.center[0], cam.center[1]) ?? lastGround;
+        const pg = groundAt(pos.lon, pos.lat);
+        const nearGround = pg != null && pos.gpsAlt - pg < 150;
+        const maxS = nearGround ? 6 : 9;
         const mLat = 111320, mLon = 111320 * Math.cos(pos.lat * Math.PI / 180);
         let pitch = cam.pitch;
         for (let it = 0; it < 8 && pitch > 20; it++) {
@@ -2281,9 +2312,9 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
           const cLat = cam.center[1] - Math.cos(br) * hz / mLat, cLon = cam.center[0] - Math.sin(br) * hz / mLon;
           const cAlt = cg + dist * Math.cos(pr);
           let ok = true;
-          for (let s = 1; s <= 9 && ok; s++) {
+          for (let s = 1; s <= maxS && ok; s++) {
             const fr = s / 10;
-            const g = elevAt(lerp(cLon, pos.lon, fr), lerp(cLat, pos.lat, fr));
+            const g = groundAt(lerp(cLon, pos.lon, fr), lerp(cLat, pos.lat, fr));
             if (g != null && g > lerp(cAlt, pos.gpsAlt, fr) - 12) ok = false;
           }
           if (ok) break;
@@ -2291,32 +2322,41 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
         }
         return pitch;
       };
-      const applyState = (t, force) => {
-        const st = stateAt(t);
-        const ground = main.queryTerrainElevation ? main.queryTerrainElevation([st.pos.lon, st.pos.lat]) : null;
-        if (ground != null && isFinite(ground)) lastGround = ground;
-        // Höhe über Grund geglättet (≈0.8 s): GPS-Höhe und Geländeabfrage
-        // rauschen von Bild zu Bild, und Zoom/Versatz hängen daran.
-        // Fehlt die Geländehöhe (Kachel noch nicht geladen), den bisherigen Wert halten
-        const hRaw = (ground == null || !isFinite(ground)) && smoothH != null ? smoothH : Math.max(0, st.pos.gpsAlt - lastGround);
-        const dtS = Math.abs(t - smoothT);
-        smoothH = (smoothH == null || dtS > 1.5) ? hRaw : smoothH + (hRaw - smoothH) * Math.min(1, dtS / 0.8);
-        smoothT = t;
-        const h = smoothH;
-        const zoom = st.sh.kind === "outro" ? st.cam.zoom : st.cam.zoom - clamp(Math.log2(1 + h / 450), 0, 1.2);
-        let pitch = st.cam.pitch;
-        if (st.sh.kind !== "outro") {
-          const target = clearPitch(st.cam, zoom, st.pos);
-          const dtP = Math.abs(t - smoothPitchT);
-          if (smoothPitch == null || smoothPitchShot !== st.sh || dtP > 1.5) smoothPitch = target;
-          else smoothPitch += (target - smoothPitch) * Math.min(1, dtP / (target < smoothPitch ? 0.35 : 1.2));
-          smoothPitchT = t; smoothPitchShot = st.sh;
-          pitch = smoothPitch;
+      // Kreisende Szenen: Neigung EINMAL pro Szene bestimmen (strengster Wert
+      // über Anfang/Mitte/Ende), statt sie bei jeder Umdrehung neu zu berechnen.
+      const orbitPitch = (sh) => {
+        if (sh._pitch != null) return sh._pitch;
+        let p = 90;
+        for (const uu of [0, 0.34, 0.67, 1]) {
+          const ps = videoPosAt(track, lerp(sh.f0, sh.f1, uu)), cm = cameraFor(sh, uu, ps);
+          p = Math.min(p, clearPitch(cm, cm.zoom - 0.5, ps));
         }
-        const liftPx = st.sh.kind === "outro" ? 0 : h / mercPerPx(st.pos.lat, zoom) * Math.sin(pitch * Math.PI / 180);
-        // Versatz begrenzen: zu viel davon schiebt den Horizont ins Bild
-        // (oberer Bildteil bliebe leer/schwarz).
-        const pad = Math.min(liftPx, H * (pitch > 50 ? 0.12 : 0.22));
+        return (sh._pitch = Math.max(35, p));
+      };
+      const applyState = (t, force) => {
+        const st = stateAt(t), sh = st.sh;
+        const outro = sh.kind === "outro", land = sh.kind === "land", orbit = isOrbit(sh);
+        const gPilot = groundAt(st.pos.lon, st.pos.lat);
+        if (gPilot != null) lastGround = gPilot;
+        const hRaw = Math.max(0, st.pos.gpsAlt - lastGround); // wahre Höhe über Grund (für den Marker)
+        // Höhe über Grund für die KAMERA: sehr träge; bei kreisenden Szenen auf den
+        // Boden am (festen) Kamerazentrum bezogen.
+        let hCam;
+        if (orbit) { const gc = groundAt(st.cam.center[0], st.cam.center[1]); hCam = smooth("h", Math.max(0, st.pos.gpsAlt - (gc ?? lastGround)), t, sh, 6, 6); }
+        else hCam = smooth("h", hRaw, t, sh, 3, 3);
+        // Zoom: Landung/Rückzug feste Werte der Szene, sonst höhenabhängig und geglättet
+        let zoom = (outro || land) ? st.cam.zoom : st.cam.zoom - clamp(Math.log2(1 + hCam / 450), 0, 1.2);
+        if (!outro) zoom = smooth("zoom", zoom, t, sh, 1.2, 1.2);
+        let pitch = st.cam.pitch;
+        if (!outro && !land) {
+          const target = orbit ? Math.min(st.cam.pitch, orbitPitch(sh)) : clearPitch(st.cam, zoom, st.pos);
+          pitch = smooth("pitch", target, t, sh, 0.8, 3); // schnell steiler (Berg im Weg), langsam wieder flacher
+        }
+        // Marker-Anhebung: wahre Höhe; Bildversatz der Kamera: geglättet und begrenzt
+        const mpp = mercPerPx(st.pos.lat, zoom), sinP = Math.sin(pitch * Math.PI / 180);
+        const liftPx = outro ? 0 : hRaw / mpp * sinP;
+        // (zu viel Versatz schiebt den Horizont ins Bild → oberer Bildteil leer/schwarz)
+        const pad = (outro || land) ? 0 : smooth("pad", Math.min(hCam / mpp * sinP, H * (pitch > 50 ? 0.12 : 0.22)), t, sh, 2, 2);
         main.jumpTo({ center: st.cam.center, zoom, bearing: st.cam.bearing, pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
         altLayer.setProgress(st.pos.idx);
         curLift = liftPx; curState = { ...st, zoom, cam: { ...st.cam, pitch } };
