@@ -511,7 +511,11 @@ function SchirmeApp() {
 // flugbuch.jsx). Gespeichert als kleines PNG (Data-URL) im Feld "symbol".
 // Für bekannte Modelle gibt es ein eingebautes Symbol (Liste identisch in
 // flugbuch.jsx).
-const BUILTIN_GLIDER_SYMBOLS = [{ test: /artik\s*r\s*2/i, url: "icons/glider-artik-r2.png" }];
+const BUILTIN_GLIDER_SYMBOLS = [
+  { test: /artik\s*r\s*2/i, url: "icons/glider-artik-r2.png" },
+  { test: /sigma\s*11\b/i, url: "icons/glider-sigma-11.png" },
+  { test: /sigma\s*12/i, url: "icons/glider-sigma-12-dls.png" },
+];
 function builtinSymbolFor(name, hersteller) {
   const names = [name, ((hersteller || "") + " " + (name || ""))];
   const d = BUILTIN_GLIDER_SYMBOLS.find(x => names.some(n => n && x.test.test(n)));
