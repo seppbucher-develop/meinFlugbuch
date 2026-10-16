@@ -1972,13 +1972,29 @@ function buildManualScript(track, segs, elev, flight) {
     // Kamerastil (Thermik-Orbit, Blick auf den Hang, Gipfel von vorn …), solange
     // die dafür nötigen Angaben vorhanden sind; sonst allgemeine Kameraplanung.
     const k = sg.kind;
-    const hasCenter = sg.lon != null && sg.lat != null;
-    const ok = k && ((k === "thermal" || k === "spiral" || k === "wingover") ? hasCenter
+    // Hat der Nutzer das Zeitfenster eines Vorschlags verändert (verlängert, verschoben), stimmen die
+    // gespeicherten Angaben (Mittelpunkt) nicht mehr. Darum hier aus dem AKTUELLEN Fenster neu bestimmen:
+    // Thermik-/Spiral-Kameras kreisen um einen festen Punkt (nur sinnvoll, wenn der Schirm nah bleibt), die
+    // Landekamera gleitet auf der Linie Anfang → Ende (nur sinnvoll, wenn er ihr folgt). Sonst allgemeine Kamera.
+    const S = 12, smp = [];
+    for (let q = 0; q <= S; q++) smp.push(videoPosAt(track, f0 + (f1 - f0) * q / S));
+    const cLat = smp.reduce((s, p) => s + p.lat, 0) / smp.length, cLon = smp.reduce((s, p) => s + p.lon, 0) / smp.length;
+    const mLatM = 111320, mLonM = 111320 * Math.cos(cLat * Math.PI / 180);
+    const extentM = Math.max(...smp.map(p => Math.hypot((p.lat - cLat) * mLatM, (p.lon - cLon) * mLonM)));
+    const A = smp[0], B = smp[S];
+    const abx = (B.lon - A.lon) * mLonM, aby = (B.lat - A.lat) * mLatM, abl2 = Math.max(1, abx * abx + aby * aby);
+    const lineDevM = Math.max(...smp.map(p => {
+      const px = (p.lon - A.lon) * mLonM, py = (p.lat - A.lat) * mLatM, t = Math.max(0, Math.min(1, (px * abx + py * aby) / abl2));
+      return Math.hypot(px - t * abx, py - t * aby);
+    }));
+    const orbitKind = k === "thermal" || k === "spiral" || k === "wingover";
+    const ok = k && (orbitKind ? extentM < 600
       : (k === "ridge" || k === "crossing") ? sg.bSide != null
-      : ["summit", "peak", "glide", "start", "land"].includes(k));
+      : k === "land" ? lineDevM < 450
+      : ["summit", "peak", "glide", "start"].includes(k));
     if (ok) {
-      shots.push({ kind: k, label: sg.label || null, f0, f1, d, speed, warp: 0, b0, pin: [sg.lon != null ? sg.lon : mid.lon, sg.lat != null ? sg.lat : mid.lat],
-        center: (k === "thermal" || k === "spiral" || k === "wingover") ? [sg.lon, sg.lat] : null, bSide: sg.bSide, heading: sg.heading != null ? sg.heading : b0, t0: acc, t1: acc + d });
+      shots.push({ kind: k, label: sg.label || null, f0, f1, d, speed, warp: 0, b0, pin: [orbitKind ? cLon : mid.lon, orbitKind ? cLat : mid.lat],
+        center: orbitKind ? [cLon, cLat] : null, bSide: sg.bSide, heading: sg.heading != null ? sg.heading : b0, t0: acc, t1: acc + d });
     } else {
       const plan = videoPlanCamera(track, elev, f0, f1, speed);
       shots.push({ kind: "mseg", label: sg.label || null, f0, f1, d, speed, plan, warp: 0, b0, pin: [mid.lon, mid.lat], t0: acc, t1: acc + d });
