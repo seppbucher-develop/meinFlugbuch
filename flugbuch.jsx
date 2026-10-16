@@ -2125,6 +2125,31 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
   );
 }
 
+// ── Schirm-Symbol im Flug-Video ──────────────────────────────────────────
+// Statt des roten Pfeils zeigt das Video den Schirm als Symbol (Draufsicht,
+// Nase oben). Hinterlegt wird es pro Schirm auf der Schirme-Seite (Feld
+// "symbol" in schirme:list, PNG als Data-URL). Fehlt es, greift – für bekannte
+// Modelle – ein eingebautes Symbol, sonst der rote Pfeil. (Die Liste der
+// eingebauten Symbole steht identisch in schirme.jsx.)
+const BUILTIN_GLIDER_SYMBOLS = [{ test: /artik\s*r\s*2/i, url: "icons/glider-artik-r2.png" }];
+async function loadGliderSymbol(flight) {
+  try {
+    const r = await window.storage.get("schirme:list");
+    const list = r && r.value ? JSON.parse(r.value) : [];
+    const sid = flight?.customFields?.schirmId;
+    const nm = (flight?.glider || "").trim().toLowerCase();
+    const entry = list.find(s => sid && s.id === sid) || list.find(s => (s.name || "").trim().toLowerCase() === nm) || null;
+    let src = entry && entry.symbol ? entry.symbol : null;
+    if (!src) {
+      const names = [entry && entry.name, flight?.glider, entry ? ((entry.hersteller || "") + " " + (entry.name || "")) : null];
+      const d = BUILTIN_GLIDER_SYMBOLS.find(x => names.some(n => n && x.test.test(n)));
+      src = d ? d.url : null;
+    }
+    if (!src) return null;
+    return await new Promise(res => { const im = new Image(); im.onload = () => res(im); im.onerror = () => res(null); im.src = src; });
+  } catch (e) { return null; }
+}
+
 function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manual, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), miniDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square", narrow = format !== "land";
@@ -2172,6 +2197,8 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       setStatus("Gelände wird analysiert …", 0);
       let dem = null;
       try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); }
+      if (cancelled) return;
+      const gliderImg = await loadGliderSymbol(flight); // null → roter Pfeil
       if (cancelled) return;
       let shots;
       if (manual) {
@@ -2449,7 +2476,14 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
             const hd = videoHeadingAt(track, st.ft, 6);
             ctx.save(); ctx.translate(px, py);
             ctx.shadowColor = "rgba(0,0,0,0.6)"; ctx.shadowBlur = 10;
-            if (hd != null) { ctx.rotate((hd - st.cam.bearing) * Math.PI / 180); ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.moveTo(0, -17 * s); ctx.lineTo(11 * s, 11 * s); ctx.lineTo(0, 5 * s); ctx.lineTo(-11 * s, 11 * s); ctx.closePath(); ctx.fill(); ctx.fillStyle = "#ef4444"; ctx.beginPath(); ctx.moveTo(0, -12 * s); ctx.lineTo(7 * s, 8 * s); ctx.lineTo(0, 3 * s); ctx.lineTo(-7 * s, 8 * s); ctx.closePath(); ctx.fill(); }
+            if (gliderImg) {
+              // Schirm-Symbol: in der Bodenebene gedreht, dann entsprechend der Kameraneigung gestaucht
+              const gw = 104 * s, gh = gw * gliderImg.naturalHeight / gliderImg.naturalWidth;
+              ctx.scale(1, 0.55 + 0.45 * Math.cos(st.cam.pitch * Math.PI / 180));
+              if (hd != null) ctx.rotate((hd - st.cam.bearing) * Math.PI / 180);
+              ctx.drawImage(gliderImg, -gw / 2, -gh / 2, gw, gh);
+            }
+            else if (hd != null) { ctx.rotate((hd - st.cam.bearing) * Math.PI / 180); ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.moveTo(0, -17 * s); ctx.lineTo(11 * s, 11 * s); ctx.lineTo(0, 5 * s); ctx.lineTo(-11 * s, 11 * s); ctx.closePath(); ctx.fill(); ctx.fillStyle = "#ef4444"; ctx.beginPath(); ctx.moveTo(0, -12 * s); ctx.lineTo(7 * s, 8 * s); ctx.lineTo(0, 3 * s); ctx.lineTo(-7 * s, 8 * s); ctx.closePath(); ctx.fill(); }
             else { ctx.fillStyle = "#ef4444"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 8 * s, 0, 7); ctx.fill(); ctx.stroke(); }
             ctx.restore();
           }

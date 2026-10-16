@@ -505,6 +505,61 @@ function SchirmeApp() {
   );
 }
 
+// ── Symbol im Flug-Video ─────────────────────────────────────────────────
+// Pro Schirm lässt sich ein Symbol (Draufsicht, Nase oben) hinterlegen, das
+// das Flug-Video statt des roten Pfeils zeigt (siehe loadGliderSymbol in
+// flugbuch.jsx). Gespeichert als kleines PNG (Data-URL) im Feld "symbol".
+// Für bekannte Modelle gibt es ein eingebautes Symbol (Liste identisch in
+// flugbuch.jsx).
+const BUILTIN_GLIDER_SYMBOLS = [{ test: /artik\s*r\s*2/i, url: "icons/glider-artik-r2.png" }];
+function builtinSymbolFor(name, hersteller) {
+  const names = [name, ((hersteller || "") + " " + (name || ""))];
+  const d = BUILTIN_GLIDER_SYMBOLS.find(x => names.some(n => n && x.test.test(n)));
+  return d ? d.url : null;
+}
+function loadSymbolImage(src) {
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+}
+// Bild einlesen, weissen Hintergrund vom Rand her entfernen (Flood-Fill — weisse
+// Flächen im Inneren bleiben), zuschneiden und auf max. 200 px verkleinern.
+async function symbolFromFile(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await loadSymbolImage(url);
+    const sc = Math.min(1, 700 / Math.max(img.naturalWidth, img.naturalHeight));
+    const w = Math.max(1, Math.round(img.naturalWidth * sc)), h = Math.max(1, Math.round(img.naturalHeight * sc));
+    const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+    const cx = cv.getContext("2d", { willReadFrequently: true }); cx.drawImage(img, 0, 0, w, h);
+    const id = cx.getImageData(0, 0, w, h), d = id.data;
+    const seen = new Uint8Array(w * h), stack = [];
+    const push = (x, y) => {
+      if (x < 0 || y < 0 || x >= w || y >= h) return;
+      const p = y * w + x; if (seen[p]) return;
+      const i = p * 4;
+      if (d[i + 3] === 0 || (d[i] >= 232 && d[i + 1] >= 232 && d[i + 2] >= 232)) { seen[p] = 1; stack.push(p); }
+    };
+    for (let x = 0; x < w; x++) { push(x, 0); push(x, h - 1); }
+    for (let y = 0; y < h; y++) { push(0, y); push(w - 1, y); }
+    while (stack.length) { const p = stack.pop(), x = p % w, y = (p - x) / w; d[p * 4 + 3] = 0; push(x + 1, y); push(x - 1, y); push(x, y + 1); push(x, y - 1); }
+    cx.putImageData(id, 0, 0);
+    let x0 = w, y0 = h, x1 = -1, y1 = -1;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (d[(y * w + x) * 4 + 3] > 0) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+    if (x1 < 0) throw new Error("leer");
+    const cw = x1 - x0 + 1, ch = y1 - y0 + 1, k = Math.min(1, 200 / Math.max(cw, ch));
+    const out = document.createElement("canvas"); out.width = Math.max(1, Math.round(cw * k)); out.height = Math.max(1, Math.round(ch * k));
+    out.getContext("2d").drawImage(cv, x0, y0, cw, ch, 0, 0, out.width, out.height);
+    return out.toDataURL("image/png");
+  } finally { URL.revokeObjectURL(url); }
+}
+// Symbol um 90° drehen (dir = 1 rechts, -1 links)
+async function rotateSymbol(src, dir) {
+  const img = await loadSymbolImage(src);
+  const cv = document.createElement("canvas"); cv.width = img.naturalHeight; cv.height = img.naturalWidth;
+  const cx = cv.getContext("2d"); cx.translate(cv.width / 2, cv.height / 2); cx.rotate(dir * Math.PI / 2);
+  cx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+  return cv.toDataURL("image/png");
+}
+
 function SchirmEditor({ entry, materialList, unlinkedMaterial, suggestTyp, onLinkMaterial, onUnlinkMaterial, onSave, onCancel, onDelete }) {
   const [data, setData] = React.useState({ ...entry, typ: entry.typ || suggestTyp(entry.name) });
   const [linkChoice, setLinkChoice] = React.useState("");
@@ -545,6 +600,43 @@ function SchirmEditor({ entry, materialList, unlinkedMaterial, suggestTyp, onLin
           <input value={data.letzterCheck || ""} onChange={e => set("letzterCheck", e.target.value)}
             placeholder="tt.mm.jjjj"
             style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 14 }} />
+        </div>
+
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>Symbol im Flug-Video</div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <div style={{ width: 130, height: 70, borderRadius: 10, background: "#3d5a32", display: "flex", alignItems: "center", justifyContent: "center", flex: "0 0 auto", overflow: "hidden" }}>
+              {(data.symbol || builtinSymbolFor(data.name, data.hersteller))
+                ? <img src={data.symbol || builtinSymbolFor(data.name, data.hersteller)} alt="" style={{ maxWidth: 120, maxHeight: 60, objectFit: "contain" }} />
+                : <span style={{ color: "#ef4444", fontSize: 30 }}>▲</span>}
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
+              <label style={{ background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.35)", borderRadius: 8, padding: "7px 10px", color: "#7dd3fc", fontSize: 12, fontWeight: 700, cursor: "pointer", textAlign: "center" }}>
+                Bild wählen
+                <input type="file" accept="image/*" style={{ display: "none" }}
+                  onChange={async e => {
+                    const f = e.target.files && e.target.files[0]; e.target.value = "";
+                    if (!f) return;
+                    try { set("symbol", await symbolFromFile(f)); } catch { alert("Das Bild konnte nicht gelesen werden."); }
+                  }} />
+              </label>
+              {data.symbol && (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <button onClick={async () => set("symbol", await rotateSymbol(data.symbol, -1))} title="90° nach links drehen"
+                    style={{ flex: 1, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px", color: "#e8f4fd", fontSize: 14, cursor: "pointer" }}>↺</button>
+                  <button onClick={async () => set("symbol", await rotateSymbol(data.symbol, 1))} title="90° nach rechts drehen"
+                    style={{ flex: 1, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px", color: "#e8f4fd", fontSize: 14, cursor: "pointer" }}>↻</button>
+                  <button onClick={() => set("symbol", "")} title="Symbol entfernen"
+                    style={{ flex: 1, background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.25)", borderRadius: 8, padding: "6px", color: "#f87171", fontSize: 12, cursor: "pointer" }}>✕</button>
+                </div>
+              )}
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginTop: 6, lineHeight: 1.4 }}>
+            Draufsicht des Schirms, Nase nach oben (mit ↺/↻ drehen). Weisser Hintergrund wird entfernt — das Bild am besten eng zuschneiden.
+            {!data.symbol && builtinSymbolFor(data.name, data.hersteller) ? " Es wird das eingebaute Standardsymbol verwendet." : ""}
+            {!data.symbol && !builtinSymbolFor(data.name, data.hersteller) ? " Ohne Symbol zeigt das Video den roten Pfeil." : ""}
+          </div>
         </div>
 
         {!isNew && (
