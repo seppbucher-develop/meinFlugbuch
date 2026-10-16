@@ -1435,10 +1435,12 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
 // Linie wegen der Float32-Genauigkeit der Mercator-Koordinaten (0..1).
 // Farbe wie die Kartenlinie: Steig-/Sinkrate (rot=Sinken … grün=Steigen).
 function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
-  const stride = Math.max(1, Math.ceil(pts.length / 3000));
-  const P = [];
-  for (let i = 0; i < pts.length; i += stride) P.push(i);
-  if (P[P.length-1] !== pts.length-1) P.push(pts.length-1);
+  // Stützpunkte: höchstens ~12000 (längere Tracks gleichmässig ausdünnen). Früher
+  // waren es 3000 — ein Thermikkreis bestand dann nur noch aus wenigen Eckpunkten.
+  const stride = Math.max(1, Math.ceil(pts.length / 12000));
+  const base = [];
+  for (let i = 0; i < pts.length; i += stride) base.push(i);
+  if (base[base.length-1] !== pts.length-1) base.push(pts.length-1);
   const merc = (p) => {
     const lat = p.lat * Math.PI/180;
     const x = (p.lon + 180) / 360;
@@ -1451,16 +1453,39 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
     const f = n => l - a * Math.max(-1, Math.min(k(n)-3, Math.min(9-k(n), 1)));
     return [f(0), f(8), f(4)];
   };
-  const xyz = P.map(i => merc(pts[i]));
-  const cx = xyz.reduce((a, v) => a + v[0], 0) / xyz.length;
-  const cy = xyz.reduce((a, v) => a + v[1], 0) / xyz.length;
-  const cz = 0;
-  const colors = P.map((i, k) => {
+  const bxyz = base.map(i => merc(pts[i]));
+  const bcol = base.map((i, k) => {
     if (k === 0) return hslToRgb(70, 0.9, 0.5);
-    const a = pts[P[k-1]], b = pts[i], dt = b.timeSec - a.timeSec;
+    const a = pts[base[k-1]], b = pts[i], dt = b.timeSec - a.timeSec;
     const rate = dt > 0 ? (b.gpsAlt - a.gpsAlt) / dt : 0;
     return hslToRgb((Math.max(-4, Math.min(4, rate)) + 4) / 8 * 140, 0.9, 0.5);
   });
+  // Glättung: Die Linie wird aus Rechtecken je Segment ohne Verbindungsstücke
+  // gezeichnet — an jedem Knick bleibt aussen eine Lücke, innen überlappt es
+  // (in Thermikkreisen sah die Spur dadurch wie ein Zahnrad aus). Darum werden
+  // die Segmente mit einem Catmull-Rom-Spline unterteilt (je stärker der Knick,
+  // desto mehr Teilstücke); die Restknicke sind dann so klein, dass keine Lücke
+  // mehr sichtbar ist. P[v] = Trackindex, bis zu dem der Vertex "gehört" (für setProgress).
+  const P = [base[0]], xyz = [bxyz[0]], colors = [bcol[0]];
+  const turnDeg = (u, v) => {
+    const lu = Math.hypot(u[0], u[1]), lv = Math.hypot(v[0], v[1]);
+    if (lu < 1e-12 || lv < 1e-12) return 0;
+    return Math.acos(Math.max(-1, Math.min(1, (u[0]*v[0] + u[1]*v[1]) / (lu * lv)))) * 180 / Math.PI;
+  };
+  for (let k = 0; k < base.length - 1; k++) {
+    const p0 = bxyz[Math.max(k-1, 0)], p1 = bxyz[k], p2 = bxyz[k+1], p3 = bxyz[Math.min(k+2, base.length-1)];
+    const d01 = [p1[0]-p0[0], p1[1]-p0[1]], d12 = [p2[0]-p1[0], p2[1]-p1[1]], d23 = [p3[0]-p2[0], p3[1]-p2[1]];
+    const ang = Math.max(turnDeg(d01, d12), turnDeg(d12, d23));
+    const m = Math.max(1, Math.min(8, Math.ceil(ang / 6)));
+    for (let s = 1; s <= m; s++) {
+      const t = s / m, t2 = t*t, t3 = t2*t;
+      const q = [0, 1, 2].map(j => 0.5 * ((2*p1[j]) + (-p0[j] + p2[j]) * t + (2*p0[j] - 5*p1[j] + 4*p2[j] - p3[j]) * t2 + (-p0[j] + 3*p1[j] - 3*p2[j] + p3[j]) * t3));
+      xyz.push(s === m ? p2 : q); P.push(s === m ? base[k+1] : base[k]); colors.push(bcol[k+1]);
+    }
+  }
+  const cx = xyz.reduce((a, v) => a + v[0], 0) / xyz.length;
+  const cy = xyz.reduce((a, v) => a + v[1], 0) / xyz.length;
+  const cz = 0;
   // 6 Vertices je Segment: a(3) b(3) t(1) side(1) rgb(3) = 11 Floats
   const data = [];
   for (let k = 0; k < P.length-1; k++) {
@@ -1469,7 +1494,7 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
     for (const [t, sd] of [[0,-1],[0,1],[1,-1],[1,-1],[0,1],[1,1]]) data.push(...A, ...B, t, sd, ...c);
   }
   const vertCount = (P.length-1) * 6;
-  let prog = null, buf = null;
+  let prog = null, buf = null, mapRef = null;
   let drawSegs = P.length - 1;
   return {
     // Zeigt nur den Teil des Tracks bis Trackindex idx (Flug-Video: Linie wächst mit).
@@ -1494,6 +1519,7 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
       const fs = sh(gl.FRAGMENT_SHADER, `precision mediump float; varying vec3 v_c; void main(){ gl_FragColor = vec4(v_c, 1.0); }`);
       prog = gl.createProgram();
       gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+      mapRef = map;
       buf = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
@@ -1508,7 +1534,11 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
       gl.useProgram(prog);
       gl.uniformMatrix4fv(gl.getUniformLocation(prog, "u_m"), false, m);
       gl.uniform2f(gl.getUniformLocation(prog, "u_res"), gl.drawingBufferWidth, gl.drawingBufferHeight);
-      gl.uniform1f(gl.getUniformLocation(prog, "u_w"), lineWidthPx * (window.devicePixelRatio || 1));
+      // Linienbreite in Zeichenpuffer-Pixeln: CSS-Breite × (Puffer / CSS-Pixel). Mit
+      // window.devicePixelRatio wurde die Spur im Video (pixelRatio 1) auf Handys
+      // ~3× zu dick.
+      const ratio = mapRef ? gl.drawingBufferWidth / Math.max(1, mapRef.getContainer().clientWidth) : (window.devicePixelRatio || 1);
+      gl.uniform1f(gl.getUniformLocation(prog, "u_w"), lineWidthPx * ratio);
       gl.bindBuffer(gl.ARRAY_BUFFER, buf);
       const F = 4, stride = 11*F;
       [["a_a",3,0],["a_b",3,3],["a_t",1,6],["a_s",1,7],["a_c",3,8]].forEach(([n, size, off]) => {
@@ -2131,7 +2161,11 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
 // "symbol" in schirme:list, PNG als Data-URL). Fehlt es, greift – für bekannte
 // Modelle – ein eingebautes Symbol, sonst der rote Pfeil. (Die Liste der
 // eingebauten Symbole steht identisch in schirme.jsx.)
-const BUILTIN_GLIDER_SYMBOLS = [{ test: /artik\s*r\s*2/i, url: "icons/glider-artik-r2.png" }];
+const BUILTIN_GLIDER_SYMBOLS = [
+  { test: /artik\s*r\s*2/i, url: "icons/glider-artik-r2.png" },
+  { test: /sigma\s*11\b/i, url: "icons/glider-sigma-11.png" },
+  { test: /sigma\s*12/i, url: "icons/glider-sigma-12-dls.png" },
+];
 async function loadGliderSymbol(flight) {
   try {
     const r = await window.storage.get("schirme:list");
@@ -2258,7 +2292,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       await waitLoad(main);
       if (cancelled) return;
 
-      const altLayer = createAltitudeTrackLayer(track, 4);
+      const altLayer = createAltitudeTrackLayer(track, 2.4);
       main.addLayer(altLayer);
       altLayer.setProgress(0);
       const overview = main.cameraForBounds(bounds, { padding: narrow ? 50 : 90, pitch: 0, bearing: 0 }) || { center: main.getCenter(), zoom: 11 };
