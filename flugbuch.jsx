@@ -2328,7 +2328,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
         shots = buildManualScript(track, manual, dem && dem.elev, flight);
         if (!shots.length) throw new Error("Keine gültigen Abschnitte gewählt.");
         D = shots[shots.length - 1].t1;
-        console.info("Flug-Video: Gelände " + (dem ? `${dem.tiles} Kacheln (z${dem.z})` : "nicht verfügbar") + " · Abschnitte:", shots.map(s => `${Math.round(s.f1 - s.f0)} s @${s.speed}× ${s.plan.mode}${s.plan.mode === "orbit" ? " " + s.plan.b0 + "°" : " rel " + s.plan.rel + "°"}`));
+        console.info("Flug-Video: Gelände " + (dem ? `${dem.tiles} Kacheln (z${dem.z})` : "nicht verfügbar") + " · Abschnitte:", shots.map(s => `${Math.round(s.f1 - s.f0)} s @${s.speed}× ${s.plan ? s.plan.mode + (s.plan.mode === "orbit" ? " " + s.plan.b0 + "°" : " rel " + s.plan.rel + "°") : s.kind}`));
       } else {
         const maxPicks = D >= 90 ? 5 : D >= 60 ? 4 : D >= 45 ? 3 : 2;
         const events = computeVideoHighlights(track, dem && dem.elev, maxPicks);
@@ -2501,7 +2501,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
         s.v = ((s.v + d) % 360 + 360) % 360; s.t = t;
         return s.v;
       };
-      const isOrbit = (sh) => sh.kind === "thermal" || sh.kind === "spiral" || sh.kind === "wingover" || (sh.kind === "mseg" && sh.plan.mode === "orbit");
+      const isOrbit = (sh) => sh.kind === "thermal" || sh.kind === "spiral" || sh.kind === "wingover" || (sh.kind === "mseg" && !!sh.plan && sh.plan.mode === "orbit");
       // Sichtlinie Kamera → Pilot gegen das Gelände prüfen. Die Kamera sitzt
       // (näherungsweise) hinter dem Zielpunkt in Blickrichtung; schneidet die
       // Linie zum Piloten einen Berg, wird die Kamera schrittweise steiler
