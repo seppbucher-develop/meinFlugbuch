@@ -1639,7 +1639,7 @@ async function loadVideoDem(track, apiKey) {
 // Gipfelüberflug, Talquerung; danach Höchster Punkt und schnelle Gleitphase
 // als Füller. Spiralen/Wingover nur, wenn sonst nichts Interessantes da ist.
 // elev (optional) = Höhenfunktion aus loadVideoDem.
-function computeVideoHighlights(track, elev, maxPicks = 3) {
+function computeVideoHighlights(track, elev, maxPicks = 3, strict = true) {
   const n = track.length;
   if (n < 30) return [];
   const t0 = track[0].timeSec, t1 = track[n-1].timeSec, total = t1 - t0;
@@ -1821,7 +1821,7 @@ function computeVideoHighlights(track, elev, maxPicks = 3) {
   // Schwelle liegende Thermik einen Platz, der besser frei bleibt).
   const topScore = Math.max(0, ...cands.filter(c => c.primary).map(c => c.score));
   const take = (list, strict) => { for (const c of list.sort((a, b) => b.score - a.score)) { if (picks.length >= maxPicks) return; if (strict && picks.length >= 2 && c.score < 0.7 * topScore) continue; if (okCenter(c) && kindCount(c.kind) < 2) picks.push(c); } };
-  take(cands.filter(c => c.primary), true);
+  take(cands.filter(c => c.primary), strict);
   if (!picks.some(p => p.kind !== "peak")) take(maneuvers);
   take(cands.filter(c => c.kind === "glide"));
   return picks.sort((a, b) => a.center - b.center);
@@ -1965,10 +1965,24 @@ function buildManualScript(track, segs, elev, flight) {
     if (f1 - f0 < 3) return;
     const speed = Math.max(1, sg.speed || 10);
     const d = Math.max(2, (f1 - f0) / speed);
-    const plan = videoPlanCamera(track, elev, f0, f1, speed);
     const mid = videoPosAt(track, (f0 + f1) / 2);
     const h = videoHeadingAt(track, f0 + 5, 20);
-    shots.push({ kind: "mseg", label: sg.label || null, f0, f1, d, speed, plan, warp: 0, b0: h == null ? 0 : h, pin: [mid.lon, mid.lat], t0: acc, t1: acc + d });
+    const b0 = h == null ? 0 : h;
+    // Aus einem Vorschlag übernommene Abschnitte behalten den ereignisspezifischen
+    // Kamerastil (Thermik-Orbit, Blick auf den Hang, Gipfel von vorn …), solange
+    // die dafür nötigen Angaben vorhanden sind; sonst allgemeine Kameraplanung.
+    const k = sg.kind;
+    const hasCenter = sg.lon != null && sg.lat != null;
+    const ok = k && ((k === "thermal" || k === "spiral" || k === "wingover") ? hasCenter
+      : (k === "ridge" || k === "crossing") ? sg.bSide != null
+      : ["summit", "peak", "glide", "start", "land"].includes(k));
+    if (ok) {
+      shots.push({ kind: k, label: sg.label || null, f0, f1, d, speed, warp: 0, b0, pin: [sg.lon != null ? sg.lon : mid.lon, sg.lat != null ? sg.lat : mid.lat],
+        center: (k === "thermal" || k === "spiral" || k === "wingover") ? [sg.lon, sg.lat] : null, bSide: sg.bSide, heading: sg.heading != null ? sg.heading : b0, t0: acc, t1: acc + d });
+    } else {
+      const plan = videoPlanCamera(track, elev, f0, f1, speed);
+      shots.push({ kind: "mseg", label: sg.label || null, f0, f1, d, speed, plan, warp: 0, b0, pin: [mid.lon, mid.lat], t0: acc, t1: acc + d });
+    }
     acc += d;
   });
   shots.forEach((s, k) => {
@@ -2045,7 +2059,7 @@ const videoSegSeconds = (s) => Math.max(2, (s.f1 - s.f0) / Math.max(1, s.speed |
 // Höhenprofil mit verschiebbarem Cursor (Finger/Maus ziehen oder Feintasten),
 // Start-/Ende-Markierung und beliebig vielen Abschnitten — dazu eine kleine
 // Draufsicht des Tracks zur Orientierung.
-function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPending, cursor, setCursor, speed, setSpeed }) {
+function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPending, cursor, setCursor, speed, setSpeed, sugg, onLoadSugg, onAddSugg, onAdoptAuto }) {
   const t0 = track[0].timeSec, t1 = track[track.length-1].timeSec, total = Math.max(1, t1 - t0);
   const svgRef = useRef(null), dragRef = useRef(false);
   const pts = useMemo(() => { const st = Math.max(1, Math.ceil(track.length / 400)), a = []; for (let i = 0; i < track.length; i += st) a.push(track[i]); a.push(track[track.length-1]); return a; }, [track]);
@@ -2076,7 +2090,7 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
   const smallBtn = { height: 38, flex: 1, minWidth: 0, borderRadius: 8, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)", color: "#e8f4fd", fontSize: 13, fontWeight: 700, cursor: "pointer" };
   const addPending = () => {
     if (lo == null || hi - lo < 5) return;
-    setSegments(list => [...list, { id: Date.now() + Math.random(), f0: lo, f1: hi, speed, label: "" }].sort((x, y) => x.f0 - y.f0));
+    setSegments(list => [...list, { id: Date.now() + Math.random(), f0: lo, f1: hi, speed, label: "", ...(pending.meta || {}) }].sort((x, y) => x.f0 - y.f0));
     setPending({ a: null, b: null });
   };
   const totalSec = segments.reduce((s, x) => s + videoSegSeconds(x), 0);
@@ -2093,6 +2107,10 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
             onPointerMove={e => { if (dragRef.current) moveTo(e); }}
             onPointerUp={() => { dragRef.current = false; }} onPointerCancel={() => { dragRef.current = false; }}>
             {segments.map((s, i) => <rect key={s.id} x={X(s.f0)} y="0" width={Math.max(2, X(s.f1) - X(s.f0))} height="210" fill={VIDEO_SEG_COLORS[i % VIDEO_SEG_COLORS.length]} opacity="0.28" />)}
+            {sugg && sugg.list.map(cd => <g key={cd.id}>
+              <rect x={X(cd.f0)} y="0" width={Math.max(3, X(cd.f1) - X(cd.f0))} height="16" fill="#facc15" opacity={segments.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1) ? 0.35 : 0.95} />
+              <line x1={X(cd.center)} x2={X(cd.center)} y1="16" y2="210" stroke="#facc15" strokeWidth="1.5" strokeDasharray="4 5" opacity="0.7" vectorEffect="non-scaling-stroke" />
+            </g>)}
             {lo != null && <rect x={X(lo)} y="0" width={Math.max(2, X(hi) - X(lo))} height="210" fill="none" stroke="#fff" strokeWidth="3" strokeDasharray="10 7" />}
             {a != null && <line x1={X(a)} x2={X(a)} y1="0" y2="210" stroke="#4ade80" strokeWidth="4" />}
             {b != null && <line x1={X(b)} x2={X(b)} y1="0" y2="210" stroke="#f87171" strokeWidth="4" />}
@@ -2116,8 +2134,8 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
         <button onClick={() => step(5)} style={smallBtn}>+5 s</button><button onClick={() => step(30)} style={smallBtn}>+30 s</button>
       </div>
       <div style={{display:"flex",gap:6}}>
-        <button onClick={() => setPending(norm(cursor, b))} style={{...smallBtn,borderColor:"#4ade80",color:"#4ade80"}}>▶ Start hier</button>
-        <button onClick={() => setPending(norm(a, cursor))} style={{...smallBtn,borderColor:"#f87171",color:"#f87171"}}>■ Ende hier</button>
+        <button onClick={() => setPending({ ...norm(cursor, b), meta: pending.meta })} style={{...smallBtn,borderColor:"#4ade80",color:"#4ade80"}}>▶ Start hier</button>
+        <button onClick={() => setPending({ ...norm(a, cursor), meta: pending.meta })} style={{...smallBtn,borderColor:"#f87171",color:"#f87171"}}>■ Ende hier</button>
       </div>
       <div>
         <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Abspielgeschwindigkeit (für neue Abschnitte)</div>
@@ -2129,6 +2147,28 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
         style={{height:44,borderRadius:10,border:"none",background:lo != null && hi - lo >= 5 ? "#1e40af" : "rgba(255,255,255,0.1)",color:"#fff",fontSize:15,fontWeight:700,cursor:lo != null && hi - lo >= 5 ? "pointer" : "default"}}>
         {lo != null ? `＋ Abschnitt hinzufügen (${fmtVideoRel(lo - t0)} – ${fmtVideoRel(hi - t0)}, ${Math.max(2, Math.round((hi - lo) / speed))} s Video)` : "＋ Abschnitt hinzufügen (erst Start und Ende setzen)"}
       </button>
+      <div style={{border:"1px solid rgba(250,204,21,0.35)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+        <div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}>
+          <button onClick={onLoadSugg} disabled={sugg.state === "loading"} style={{...smallBtn,flex:"1 1 auto",borderColor:"rgba(250,204,21,0.6)",color:"#facc15"}}>
+            {sugg.state === "loading" ? "Vorschläge werden berechnet …" : sugg.state === "done" ? "💡 Vorschläge neu laden" : "💡 Vorschläge laden"}
+          </button>
+          {sugg.state === "done" && <button onClick={onAdoptAuto} style={{...smallBtn,flex:"1 1 auto",borderColor:"rgba(74,222,128,0.6)",color:"#4ade80"}}>Auto-Auswahl übernehmen</button>}
+        </div>
+        {sugg.msg && <div style={{fontSize:12,color:sugg.state === "error" ? "#fca5a5" : "rgba(232,244,253,0.6)"}}>{sugg.msg}</div>}
+        {sugg.state !== "done" && <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.4}}>Berechnet aus dem Flug die sehenswertesten Szenen (Thermik, Hang-/Gratflug, Gipfel, höchster Punkt …) als Ausgangspunkt. Sie erscheinen gelb im Höhenprofil und lassen sich einzeln oder gesamt als Abschnitte übernehmen.</div>}
+        {sugg.state === "done" && sugg.list.map(cd => {
+          const added = segments.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1);
+          return (
+            <div key={cd.id} style={{display:"flex",alignItems:"center",gap:8,fontSize:13,borderTop:"1px solid rgba(255,255,255,0.08)",paddingTop:6}}>
+              <div onClick={() => setCursor(cd.center)} style={{flex:1,minWidth:0,cursor:"pointer"}}>
+                <div style={{fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{cd.label}</div>
+                <div style={{fontSize:11,color:"rgba(232,244,253,0.6)"}}>{fmtVideoRel(cd.f0 - t0)} – {fmtVideoRel(cd.f1 - t0)} · {Math.round(cd.f1 - cd.f0)} s Flug{cd.score ? " · Wertung " + cd.score.toFixed(1) : ""}</div>
+              </div>
+              <button onClick={() => onAddSugg(cd)} disabled={added} style={{...smallBtn,flex:"0 0 44px",opacity:added ? 0.45 : 1}}>{added ? "✓" : "＋"}</button>
+            </div>
+          );
+        })}
+      </div>
       {segments.length > 0 && (
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
           {segments.map((s, i) => (
@@ -2141,7 +2181,7 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
                 </select>
                 <span style={{color:"rgba(232,244,253,0.65)"}}>→ {Math.round(videoSegSeconds(s))} s Video</span>
                 <span style={{flex:1}} />
-                <button onClick={() => { setPending({ a: s.f0, b: s.f1 }); setSpeed(s.speed); setCursor(s.f0); setSegments(list => list.filter(x => x.id !== s.id)); }} title="Bearbeiten (zurück ins Profil)" style={{...smallBtn,flex:"0 0 40px"}}>✎</button>
+                <button onClick={() => { setPending({ a: s.f0, b: s.f1, meta: { kind: s.kind, bSide: s.bSide, heading: s.heading, lat: s.lat, lon: s.lon } }); setSpeed(s.speed); setCursor(s.f0); setSegments(list => list.filter(x => x.id !== s.id)); }} title="Bearbeiten (zurück ins Profil)" style={{...smallBtn,flex:"0 0 40px"}}>✎</button>
                 <button onClick={() => setSegments(list => list.filter(x => x.id !== s.id))} title="Entfernen" style={{...smallBtn,flex:"0 0 40px"}}>🗑</button>
               </div>
               <input value={s.label} placeholder="Titel (optional)" maxLength={40} onChange={e => setSegments(list => list.map(x => x.id === s.id ? { ...x, label: e.target.value } : x))}
@@ -2184,7 +2224,7 @@ async function loadGliderSymbol(flight) {
   } catch (e) { return null; }
 }
 
-function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manual, onDone, onError, onCancelRef, setStatus }) {
+function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manual, demCache, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), miniDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square", narrow = format !== "land";
   const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720, M = portrait ? 270 : square ? 300 : 330;
@@ -2229,8 +2269,8 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       const bounds = [[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]];
 
       setStatus("Gelände wird analysiert …", 0);
-      let dem = null;
-      try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); }
+      let dem = demCache && demCache.current ? demCache.current : null;   // schon für die Vorschläge geladen?
+      if (!dem) { try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); } }
       if (cancelled) return;
       const gliderImg = await loadGliderSymbol(flight); // null → roter Pfeil
       if (cancelled) return;
@@ -2354,6 +2394,8 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
               bearing: a.bearing + wrapDelta(a.bearing, ov.bearing) * e, pitch: lerp(a.pitch, ov.pitch, e) };
           }
         }
+        // Manuelle Abschnitte mit Ereignis-Kamera: bei hoher Abspielgeschwindigkeit weiter heraus (Kacheln)
+        if (sh.speed && sh.kind !== "mseg") c = { ...c, zoom: c.zoom - clamp(0.35 * Math.log2(Math.max(1, sh.speed / 6)), 0, 1.4) };
         return c;
       };
       const stateAt = (t) => {
@@ -2736,6 +2778,43 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const [mspeed, setMspeed] = useState(10);
   const [cursor, setCursor] = useState(track[0].timeSec);
   const manualSecs = segs.reduce((s, x) => s + videoSegSeconds(x), 0);
+  // Vorschläge (aus der automatischen Szenenauswahl) für den manuellen Modus
+  const demRef = useRef(null);
+  const [sugg, setSugg] = useState({ state: "idle", list: [], autoIds: [], msg: "" });
+  const snapSpeed = (flightSec) => { // Geschwindigkeit so wählen, dass die Szene ~9 s dauert
+    const raw = Math.max(1, flightSec / 9); let best = VIDEO_SPEEDS[0];
+    for (const sp of VIDEO_SPEEDS) if (Math.abs(Math.log(sp / raw)) < Math.abs(Math.log(best / raw))) best = sp;
+    return best;
+  };
+  const toSegment = (cd) => ({ id: Date.now() + Math.random(), f0: cd.f0, f1: cd.f1, speed: snapSpeed(cd.f1 - cd.f0), label: cd.label || "",
+    kind: cd.kind, bSide: cd.bSide, heading: cd.heading, lat: cd.lat, lon: cd.lon });
+  const addSugg = (cd) => setSegs(list => list.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1) ? list : [...list, toSegment(cd)].sort((x, y) => x.f0 - y.f0));
+  const adoptAuto = () => setSegs(list => {
+    const add = sugg.list.filter(cd => sugg.autoIds.includes(cd.id) && !list.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1)).map(toSegment);
+    return [...list, ...add].sort((x, y) => x.f0 - y.f0);
+  });
+  const loadSugg = async () => {
+    setSugg(s => ({ ...s, state: "loading", msg: "" }));
+    try {
+      if (!demRef.current) {
+        let dem = null;
+        try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); }
+        demRef.current = dem || { elev: null, tiles: 0, z: 0 };
+      }
+      await new Promise(r => setTimeout(r, 30)); // UI kurz aktualisieren lassen
+      const elev = demRef.current.elev;
+      const cands = computeVideoHighlights(track, elev, 8, false);
+      const auto = computeVideoHighlights(track, elev, 3, true);
+      const n = track.length, t0 = track[0].timeSec, t1 = track[n-1].timeSec, total = t1 - t0;
+      const sL = Math.min(70, total * 0.08), lL = Math.min(80, total * 0.1);
+      const mk = (cd) => ({ ...cd, id: cd.kind + "_" + Math.round(cd.f0) });
+      const startC = mk({ kind: "start", label: "START" + (flight?.site ? " · " + flight.site : ""), f0: t0, f1: t0 + sL, center: t0 + sL / 2, score: 0 });
+      const landC = mk({ kind: "land", label: "LANDUNG", f0: t1 - lL, f1: t1, center: t1 - lL / 2, score: 0 });
+      const list = [startC, ...cands.map(mk), landC].sort((x, y) => x.center - y.center);
+      setSugg({ state: "done", list, autoIds: [startC.id, ...auto.map(a => mk(a).id), landC.id],
+        msg: elev ? "" : "Ohne Geländedaten werden Thermik am Berg, Hangflug und Gipfelüberflug nur eingeschränkt erkannt." });
+    } catch (e) { console.error("Flug-Video: Vorschläge", e); setSugg(s => ({ ...s, state: "error", msg: "Vorschläge konnten nicht berechnet werden: " + (e.message || e) })); }
+  };
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null); // { url, ext, blob }
   const [err, setErr] = useState("");
@@ -2856,7 +2935,8 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
                 </div>
               </>
             ) : (
-              <FlightVideoRangeEditor track={track} segments={segs} setSegments={setSegs} pending={pending} setPending={setPending} cursor={cursor} setCursor={setCursor} speed={mspeed} setSpeed={setMspeed} />
+              <FlightVideoRangeEditor track={track} segments={segs} setSegments={setSegs} pending={pending} setPending={setPending} cursor={cursor} setCursor={setCursor} speed={mspeed} setSpeed={setMspeed}
+                sugg={sugg} onLoadSugg={loadSugg} onAddSugg={addSugg} onAdoptAuto={adoptAuto} />
             )}
             <div>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Format</div>
@@ -2875,7 +2955,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
         )}
         {stage === "render" && (
           <>
-            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
+            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} demCache={demRef} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
               onDone={(blob, ext) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setFolderMsg(""); if (fsOk) saveToFolder(res, false); }}
