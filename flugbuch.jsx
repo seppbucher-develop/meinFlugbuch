@@ -1876,7 +1876,7 @@ function videoPlanCamera(track, elev, f0, f1, speed) {
   const turnTotal = turnSumDegBetween(track, samples[0].idx, samples[S].idx);
   const circling = turnTotal >= 450 && turnTotal / Math.max(1, f1 - f0) >= 5; // mind. ~1/3 der Zeit im Kreisflug
   const orbit = compact || circling;
-  const hw = Math.max(12, speed * 1.5);
+  const hw = Math.max(20, speed * 3);
   const hdgAt = (t, fallback) => { const h = videoHeadingAt(track, t, hw); return h == null ? fallback : h; };
   const base = orbit ? { pitch: 55, zoom: 14.7 } : { pitch: 55, zoom: 14.2 };
   const dist = 3000;
@@ -1949,6 +1949,52 @@ function buildManualScript(track, segs, elev, flight) {
   return shots;
 }
 
+// ── Aufnahme mit festen 30 fps (WebCodecs) ───────────────────────────────
+// MediaRecorder nimmt in Echtzeit auf: Ist das Gerät langsamer als 30 Bilder
+// pro Sekunde (bei 1280×720 mit 3D-Gelände oft ~20 fps), wird das Video
+// ruckelig. Hier wird dagegen Bild für Bild gerendert und von einem
+// VideoEncoder zu H.264/MP4 kodiert — mit exakt gleichmässigem Takt, egal wie
+// lange das Gerät pro Bild braucht. Braucht WebCodecs und die Bibliothek
+// mp4-muxer (im <head> geladen); sonst fällt die App auf MediaRecorder zurück.
+async function pickWebCodecsConfig(W, H, fps, bitrate) {
+  if (typeof VideoEncoder === "undefined" || typeof VideoFrame === "undefined" || !window.Mp4Muxer) return null;
+  const cands = [
+    { codec: "avc1.640028", muxer: "avc" }, { codec: "avc1.4d0028", muxer: "avc" }, { codec: "avc1.420028", muxer: "avc" },
+    { codec: "vp09.00.40.08", muxer: "vp9" },
+  ];
+  for (const c of cands) {
+    try {
+      const r = await VideoEncoder.isConfigSupported({ codec: c.codec, width: W, height: H, bitrate, framerate: fps });
+      if (r && r.supported) return c;
+    } catch (e) { /* nächster Kandidat */ }
+  }
+  return null;
+}
+// renderFrame(k) bereitet in `canvas` das k-te Bild vor (async); gibt am Ende den MP4-Blob zurück.
+async function encodeVideoWebCodecs({ canvas, W, H, fps, frames, bitrate, cfg, renderFrame, onProgress, isCancelled }) {
+  const { Muxer, ArrayBufferTarget } = window.Mp4Muxer;
+  const target = new ArrayBufferTarget();
+  const muxer = new Muxer({ target, video: { codec: cfg.muxer, width: W, height: H, frameRate: fps }, fastStart: "in-memory" });
+  let encError = null;
+  const encoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: (e) => { encError = e; } });
+  encoder.configure({ codec: cfg.codec, width: W, height: H, bitrate, framerate: fps });
+  for (let k = 0; k < frames; k++) {
+    if (isCancelled()) { try { encoder.close(); } catch (e) {} return null; }
+    if (encError) throw encError;
+    await renderFrame(k);
+    const vf = new VideoFrame(canvas, { timestamp: Math.round(k * 1e6 / fps), duration: Math.round(1e6 / fps) });
+    encoder.encode(vf, { keyFrame: k % (fps * 2) === 0 });
+    vf.close();
+    while (encoder.encodeQueueSize > 8) await new Promise(r => setTimeout(r, 4));
+    if (onProgress) onProgress(k + 1, frames);
+  }
+  await encoder.flush();
+  if (encError) throw encError;
+  muxer.finalize();
+  try { encoder.close(); } catch (e) {}
+  return new Blob([target.buffer], { type: "video/mp4" });
+}
+
 function pickVideoMime() {
   if (typeof MediaRecorder === "undefined") return null;
   const c = ["video/mp4;codecs=avc1", "video/mp4", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
@@ -2010,7 +2056,7 @@ function FlightVideoRangeEditor({ track, segments, setSegments, pending, setPend
         Cursor im Höhenprofil ziehen, mit «Start hier» und «Ende hier» einen Abschnitt markieren und mit «Abschnitt hinzufügen» übernehmen. Beliebig viele Abschnitte sind möglich. Die Kamera wird je Abschnitt automatisch gewählt.
       </div>
       <div style={{display:"flex",gap:10,flexWrap:"wrap",alignItems:"flex-start"}}>
-        <div style={{flex:"1 1 340px",minWidth:0}}>
+        <div style={{flex:"1 1 340px",minWidth:0,padding:"0 24px"}}>
           <svg ref={svgRef} viewBox="0 0 1000 210" preserveAspectRatio="none"
             style={{width:"100%",height:150,background:"rgba(255,255,255,0.04)",borderRadius:10,touchAction:"none",cursor:"ew-resize",display:"block"}}
             onPointerDown={e => { dragRef.current = true; try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} moveTo(e); }}
@@ -2216,7 +2262,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
               if (!pl.fixed) { let la = 0, lo = 0; for (let k = -3; k <= 3; k++) { const q = videoPosAt(track, ft + k * 15); la += q.lat; lo += q.lon; } ctr = [lo / 7, la / 7]; }
               c = { center: ctr, bearing: pl.b0 + 90 * u, pitch: pl.pitch, zoom: zb + 0.2 };
             }
-            else { const h = videoHeadingAt(track, ft, Math.max(12, sh.speed * 1.5)); c = { center: cpos, bearing: (h == null ? sh.b0 : h) + pl.rel + 12 * Math.sin(u * Math.PI), pitch: pl.pitch, zoom: zb }; }
+            else { const h = videoHeadingAt(track, ft, Math.max(20, sh.speed * 3)); c = { center: cpos, bearing: (h == null ? sh.b0 : h) + pl.rel + 12 * Math.sin(u * Math.PI), pitch: pl.pitch, zoom: zb }; }
             break;
           }
           case "start": c = { center: cpos, bearing: sh.b0 + 160 - 110 * e, pitch: 52 + 8 * e, zoom: 15.3 - 0.7 * e }; break;
@@ -2292,6 +2338,18 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
         s.v += (target - s.v) * Math.min(1, Math.abs(t - s.t) / tau); s.t = t;
         return s.v;
       };
+      // Blickrichtung träge nachführen (Winkel, mit Maximaltempo): Folgt die Kamera
+      // der Flugrichtung, schwenkt sie sonst bei jeder Kurve (Landeanflug mit
+      // S-Kurven) um 90° und mehr — wirkt nervös.
+      const smoothAngle = (name, target, t, sh, tau, maxRate) => {
+        const s = SM[name];
+        if (!s || s.sh !== sh || Math.abs(t - s.t) > 1.5) { SM[name] = { v: target, t, sh }; return target; }
+        const dt = Math.abs(t - s.t);
+        const m = maxRate * dt;
+        const d = clamp(wrapDelta(s.v, target) * Math.min(1, dt / tau), -m, m);
+        s.v = ((s.v + d) % 360 + 360) % 360; s.t = t;
+        return s.v;
+      };
       const isOrbit = (sh) => sh.kind === "thermal" || sh.kind === "spiral" || sh.kind === "wingover" || (sh.kind === "mseg" && sh.plan.mode === "orbit");
       // Sichtlinie Kamera → Pilot gegen das Gelände prüfen. Die Kamera sitzt
       // (näherungsweise) hinter dem Zielpunkt in Blickrichtung; schneidet die
@@ -2357,9 +2415,10 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
         const liftPx = outro ? 0 : hRaw / mpp * sinP;
         // (zu viel Versatz schiebt den Horizont ins Bild → oberer Bildteil leer/schwarz)
         const pad = (outro || land) ? 0 : smooth("pad", Math.min(hCam / mpp * sinP, H * (pitch > 50 ? 0.12 : 0.22)), t, sh, 2, 2);
-        main.jumpTo({ center: st.cam.center, zoom, bearing: st.cam.bearing, pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
+        const bearing = (orbit || land || outro) ? st.cam.bearing : smoothAngle("bearing", st.cam.bearing, t, sh, 2.5, 15);
+        main.jumpTo({ center: st.cam.center, zoom, bearing, pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
         altLayer.setProgress(st.pos.idx);
-        curLift = liftPx; curState = { ...st, zoom, cam: { ...st.cam, pitch } };
+        curLift = liftPx; curState = { ...st, t, zoom, cam: { ...st.cam, bearing, pitch } };
         return st;
       };
 
@@ -2472,12 +2531,18 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       const tmpC = document.createElement("canvas"); tmpC.width = W; tmpC.height = H;
       const tctx = tmpC.getContext("2d", { willReadFrequently: true });
       const PROBES = [[.1,.1],[.5,.1],[.9,.1],[.1,.5],[.5,.5],[.9,.5],[.1,.9],[.5,.9],[.9,.9]];
+      let renderN = 0;
       main.on("render", () => {
         try {
-          tctx.drawImage(main.getCanvas(), 0, 0, W, H);
-          let dark = 0;
-          for (const [fx, fy] of PROBES) { const d = tctx.getImageData(Math.floor(fx * (W - 1)), Math.floor(fy * (H - 1)), 1, 1).data; if (d[3] === 0 || d[0] + d[1] + d[2] < 12) dark++; }
-          if (dark < 8) fctx.drawImage(tmpC, 0, 0);
+          // Das Rücklesen der Pixel (GPU → CPU) bremst; deshalb nur kurz nach einem
+          // Szenenwechsel (wenn Kacheln fehlen können) und sonst gelegentlich prüfen.
+          const probe = !curState || (curState.t - curState.sh.t0 < 1.5) || (++renderN % 15 === 0);
+          if (probe) {
+            tctx.drawImage(main.getCanvas(), 0, 0, W, H);
+            let dark = 0;
+            for (const [fx, fy] of PROBES) { const d = tctx.getImageData(Math.floor(fx * (W - 1)), Math.floor(fy * (H - 1)), 1, 1).data; if (d[3] === 0 || d[0] + d[1] + d[2] < 12) dark++; }
+            if (dark < 8) fctx.drawImage(tmpC, 0, 0);
+          } else fctx.drawImage(main.getCanvas(), 0, 0, W, H);
         } catch {}
         if (!curState) return;
         const g = main.project([curState.pos.lon, curState.pos.lat]);
@@ -2509,10 +2574,34 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
         setStatus("Karten werden vorgeladen …", Math.round(i / (warmTimes.length - 1) * 100));
       }
 
-      // ── 2) Aufnahme in Echtzeit ──
+      // ── 2) Aufnahme ──
+      try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch {}
+      const FPS = 30, BITRATE = 10000000;
+      const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
+      if (wcCfg) {
+        // Bild für Bild mit festen 30 fps (siehe encodeVideoWebCodecs): wartet pro
+        // Bild, bis Karte und Kacheln fertig sind → kein Ruckeln, keine Lücken.
+        console.info("Flug-Video: WebCodecs " + wcCfg.codec + ", " + FPS + " fps");
+        let timeouts = 0;
+        const renderSettled = () => new Promise(res => {
+          let done = false;
+          const fin = () => { if (done) return; done = true; clearTimeout(to); main.off("render", onr); res(); };
+          const onr = () => { if (main.areTilesLoaded()) { timeouts = 0; fin(); } };
+          const to = setTimeout(() => { timeouts++; fin(); }, timeouts > 3 ? 200 : 2500);
+          main.on("render", onr); main.triggerRepaint();
+        });
+        const frames = Math.round(D * FPS);
+        let lastPct = -1;
+        const blob = await encodeVideoWebCodecs({ canvas: out, W, H, fps: FPS, frames, bitrate: BITRATE, cfg: wcCfg, isCancelled: () => cancelled,
+          renderFrame: async (k) => { const t = Math.min(D - 0.001, k / FPS); applyState(t, false); await renderSettled(); draw(t); },
+          onProgress: (k, n) => { const p = Math.round(k / n * 100); if (p !== lastPct) { lastPct = p; setStatus("Video wird Bild für Bild berechnet (feste 30 fps) – App bitte geöffnet lassen …", p); } } });
+        if (cancelled || !blob) return;
+        onDone(blob, "mp4");
+        return;
+      }
+      console.info("Flug-Video: WebCodecs nicht verfügbar – Aufnahme in Echtzeit (MediaRecorder)");
       const mime = pickVideoMime();
       if (!mime) throw new Error("Dieser Browser kann keine Videos aufnehmen (MediaRecorder fehlt).");
-      try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch {}
       const stream = out.captureStream(30);
       rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8000000 });
       const chunks = [];
@@ -2521,13 +2610,15 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       await warm(0);
       rec.start(1000);
       const startMs = performance.now();
+      let lastRtPct = -1;
       for (;;) {
         if (cancelled) { try { rec.stop(); } catch {} return; }
         const t = (performance.now() - startMs) / 1000;
         if (t >= D) break;
         applyState(t, false);
         draw(t);
-        setStatus("Video wird aufgenommen – Bildschirm bitte eingeschaltet lassen …", Math.round(t / D * 100));
+        const pctNow = Math.round(t / D * 100);
+        if (pctNow !== lastRtPct) { lastRtPct = pctNow; setStatus("Video wird aufgenommen – Bildschirm bitte eingeschaltet lassen …", pctNow); }
         await nextFrame();
       }
       applyState(D - 0.01, true);
@@ -2629,6 +2720,27 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
     try { await window.storage.delete(refKey); await window.storage.set("settings:backupDirty", "1"); } catch {}
     setSaved(null); setPlayUrl(null); setFolderMsg("");
   };
+  // Zurück-Geste (Android: Wischen vom Bildschirmrand) schliesst nur diesen Dialog
+  // — und fragt vorher nach, wenn schon Abschnitte erfasst wurden — statt die
+  // Seite zu verlassen.
+  const segsRef = useRef(segs); segsRef.current = segs;
+  const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
+  useEffect(() => {
+    try { history.pushState({ fvDialog: true }, ""); } catch (e) {}
+    const onPop = () => {
+      if (segsRef.current.length && !window.confirm("Video-Dialog schliessen? Die erfassten Abschnitte gehen verloren.")) {
+        try { history.pushState({ fvDialog: true }, ""); } catch (e) {}
+        return;
+      }
+      if (cancelRef.current) cancelRef.current();
+      onCloseRef.current();
+    };
+    window.addEventListener("popstate", onPop);
+    return () => {
+      window.removeEventListener("popstate", onPop);
+      try { if (history.state && history.state.fvDialog) history.back(); } catch (e) {}
+    };
+  }, []);
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
     const fileName = `Flug_${(flight?.date || "").replace(/[^0-9A-Za-z]+/g, "-")}_${(flight?.site || "").replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_")}`;
