@@ -2992,6 +2992,50 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
     a.play().catch(() => {});
     setTimeout(() => { if (prevRef.current === a) stopPreview(); }, 10000);
   };
+  // Musikordner durchsuchen (File System Access API; Ordner wird einmal gewählt und gemerkt)
+  const musicFsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
+  const [lib, setLib] = useState(null); // null = nicht gesucht | { items:[{name,path,handle}], folder, busy, msg }
+  const [libQ, setLibQ] = useState("");
+  const scanMusic = async (forcePick) => {
+    try {
+      let handle = forcePick ? null : await window.fsapiHandle.get("musicDir");
+      if (!handle) { handle = await window.showDirectoryPicker({ mode: "read" }); await window.fsapiHandle.set("musicDir", handle); }
+      let perm = await handle.queryPermission({ mode: "read" });
+      if (perm !== "granted") perm = await handle.requestPermission({ mode: "read" });
+      if (perm !== "granted") { setLib({ items: [], folder: handle.name, busy: false, msg: "Zugriff auf den Ordner wurde nicht erlaubt." }); return; }
+      setLib({ items: [], folder: handle.name, busy: true, msg: "Suche läuft …" });
+      const items = [];
+      const walk = async (dir, path, depth) => {
+        for await (const [name, h] of dir.entries()) {
+          if (items.length >= 5000) return;
+          if (h.kind === "directory") { if (depth < 5 && !name.startsWith(".")) await walk(h, path + name + "/", depth + 1); }
+          else if (/\.(mp3|m4a|aac|wav|ogg|opus|flac)$/i.test(name)) items.push({ name: name.replace(/\.[^.]+$/, ""), path, handle: h });
+        }
+      };
+      await walk(handle, "", 0);
+      items.sort((a, b) => a.name.localeCompare(b.name, "de"));
+      setLib({ items, folder: handle.name, busy: false, msg: items.length ? "" : "Keine Audiodateien im Ordner gefunden." });
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      setLib({ items: [], folder: "", busy: false, msg: "Ordner konnte nicht gelesen werden" + (e && e.message ? " (" + e.message + ")" : "") + ". Alternativ „Audiodatei wählen“ verwenden." });
+    }
+  };
+  const chooseLibItem = async (it) => {
+    try { pickMusic(await it.handle.getFile()); setLib(null); setLibQ(""); }
+    catch (e) { setLib({ ...lib, msg: "Datei konnte nicht geöffnet werden." }); }
+  };
+  // Stichwörter, die zum Fliegen passen → solche Titel werden oben gezeigt
+  const MUSIC_HINTS = ["wolken","über den","up up","campari","fly","flying","flug","fliegen","sky","himmel","wings","flügel","high","wind","freedom","freiheit","free","cloud","clouds","horizon","soar","sun","sonne","blue","above","air","birds","eagle","adler","heaven","horizont","berge","mountain","alps","alpen","summer","sommer","wonderful","feel","dream","traum"];
+  const libShown = (() => {
+    if (!lib) return [];
+    const q = libQ.trim().toLowerCase();
+    const sc = (it) => { const n = (it.name + " " + it.path).toLowerCase(); return MUSIC_HINTS.reduce((a, k) => a + (n.includes(k) ? 1 : 0), 0); };
+    let list = lib.items.map(it => ({ it, sc: sc(it) }));
+    if (q) list = list.filter(x => (x.it.name + " " + x.it.path).toLowerCase().includes(q));
+    else list = list.filter(x => x.sc > 0).concat(list.filter(x => x.sc === 0));
+    if (!q) list.sort((a, b) => b.sc - a.sc);
+    return list.slice(0, 60);
+  })();
   const fmtMs = (t) => Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
   // Gespeichertes Video (Variante "Verweis"): in den Daten liegt nur
   // storage "video:<flugId>" = { name, size, ext, created }; die Datei selbst
@@ -3123,10 +3167,38 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             <div>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Musik (optional)</div>
               {!music ? (
-                <label style={{...btn("rgba(255,255,255,0.12)"),display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
-                  🎵 Audiodatei wählen …
-                  <input type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
-                </label>
+                <div data-no-swipe="1" style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{display:"flex",gap:8}}>
+                    <label style={{...btn("rgba(255,255,255,0.12)"),flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
+                      🎵 Datei wählen
+                      <input type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+                    </label>
+                    {musicFsOk && <button onClick={()=>scanMusic(false)} style={{...btn("rgba(255,255,255,0.12)"),flex:1,fontSize:14}}>🔍 Musikordner durchsuchen</button>}
+                  </div>
+                  {lib && (
+                    <div style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <div style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>{lib.busy ? "Suche läuft …" : `${lib.items.length} Titel${lib.folder ? " in „" + lib.folder + "“" : ""}`}</div>
+                        <button onClick={()=>scanMusic(true)} style={{...btn("rgba(255,255,255,0.12)"),height:30,fontSize:12,padding:"0 10px"}}>Anderer Ordner</button>
+                        <button onClick={()=>{ setLib(null); setLibQ(""); }} style={{...btn("rgba(255,255,255,0.12)"),height:30,fontSize:12,padding:"0 10px"}}>✕</button>
+                      </div>
+                      {lib.msg && !lib.busy && <div style={{fontSize:12,color:"#fca5a5"}}>{lib.msg}</div>}
+                      {lib.items.length > 0 && <>
+                        <input value={libQ} onChange={e=>setLibQ(e.target.value)} placeholder="Suchen (Titel, Interpret, Ordner) …" style={{height:36,borderRadius:8,border:"1px solid rgba(255,255,255,0.2)",background:"rgba(0,0,0,0.25)",color:"#e8f4fd",padding:"0 10px",fontSize:14}} />
+                        {!libQ.trim() && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>Zuerst Titel mit Flug-Stichwörtern (Wolken, Himmel, fly, up …), danach alphabetisch.</div>}
+                        <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                          {libShown.map(({ it, sc }, i) => (
+                            <button key={i} onClick={()=>chooseLibItem(it)} style={{textAlign:"left",border:"none",borderRadius:8,background:sc>0&&!libQ.trim()?"rgba(125,211,252,0.15)":"rgba(255,255,255,0.06)",color:"#e8f4fd",padding:"7px 10px",fontSize:13,cursor:"pointer"}}>
+                              <div style={{fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
+                              {it.path && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.path}</div>}
+                            </button>
+                          ))}
+                          {!libShown.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.5)"}}>Keine Treffer.</div>}
+                        </div>
+                      </>}
+                    </div>
+                  )}
+                </div>
               ) : (
                 <div data-no-swipe="1" style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
                   <div style={{display:"flex",alignItems:"center",gap:8}}>
