@@ -2030,11 +2030,73 @@ async function pickWebCodecsConfig(W, H, fps, bitrate) {
   }
   return null;
 }
+// ── Musik ─────────────────────────────────────────────────────────────────
+// Die gewählte Audiodatei wird dekodiert, ab `startSec` auf die Videolänge D
+// zugeschnitten (bei Bedarf wiederholt), am Anfang ein- und am Ende ausgeblendet
+// und als 48-kHz-Stereo-Puffer geliefert.
+const VIDEO_AUDIO_RATE = 48000;
+async function prepareVideoAudio(file, startSec, D) {
+  const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!AC) throw new Error("Dieser Browser kann keine Audiodateien verarbeiten.");
+  const n = Math.ceil(D * VIDEO_AUDIO_RATE);
+  const ctx = new AC(2, n, VIDEO_AUDIO_RATE);
+  let buf;
+  try {
+    const data = await file.arrayBuffer();
+    buf = await new Promise((res, rej) => { const p = ctx.decodeAudioData(data, res, rej); if (p && p.catch) p.catch(rej); });
+  } catch (e) { throw new Error("Die Musikdatei konnte nicht gelesen werden (Format nicht unterstützt?)."); }
+  const st = Math.max(0, Math.min(startSec || 0, Math.max(0, buf.duration - 1)));
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  if (buf.duration - st < D) { src.loop = true; src.loopStart = st; src.loopEnd = buf.duration; }
+  const g = ctx.createGain();
+  const fin = Math.min(1.5, D / 4), fout = Math.min(3, D / 3);
+  g.gain.setValueAtTime(0, 0);
+  g.gain.linearRampToValueAtTime(0.9, fin);
+  g.gain.setValueAtTime(0.9, Math.max(fin, D - fout));
+  g.gain.linearRampToValueAtTime(0, D);
+  src.connect(g); g.connect(ctx.destination);
+  src.start(0, st);
+  const out = await ctx.startRendering();
+  return { sampleRate: out.sampleRate, buffer: out, channels: [out.getChannelData(0), out.getChannelData(1)] };
+}
+async function pickAudioConfig() {
+  if (typeof AudioEncoder === "undefined" || typeof AudioData === "undefined") return null;
+  for (const c of [{ codec: "mp4a.40.2", muxer: "aac" }, { codec: "opus", muxer: "opus" }]) {
+    try {
+      const r = await AudioEncoder.isConfigSupported({ codec: c.codec, sampleRate: VIDEO_AUDIO_RATE, numberOfChannels: 2, bitrate: 160000 });
+      if (r && r.supported) return c;
+    } catch (e) { /* nächster Kandidat */ }
+  }
+  return null;
+}
+async function encodeAudioInto(muxer, mix, cfg) {
+  let err = null;
+  const enc = new AudioEncoder({ output: (chunk, meta) => muxer.addAudioChunk(chunk, meta), error: (e) => { err = e; } });
+  enc.configure({ codec: cfg.codec, sampleRate: mix.sampleRate, numberOfChannels: 2, bitrate: 160000 });
+  const total = mix.channels[0].length, STEP = 4800;
+  for (let i = 0; i < total; i += STEP) {
+    const n = Math.min(STEP, total - i);
+    const d = new Float32Array(n * 2);
+    d.set(mix.channels[0].subarray(i, i + n), 0);
+    d.set(mix.channels[1].subarray(i, i + n), n);
+    const ad = new AudioData({ format: "f32-planar", sampleRate: mix.sampleRate, numberOfFrames: n, numberOfChannels: 2, timestamp: Math.round(i * 1e6 / mix.sampleRate), data: d });
+    enc.encode(ad); ad.close();
+    if (err) throw err;
+    while (enc.encodeQueueSize > 16) await new Promise(r => setTimeout(r, 2));
+  }
+  await enc.flush();
+  try { enc.close(); } catch (e) {}
+  if (err) throw err;
+}
+
 // renderFrame(k) bereitet in `canvas` das k-te Bild vor (async); gibt am Ende den MP4-Blob zurück.
-async function encodeVideoWebCodecs({ canvas, W, H, fps, frames, bitrate, cfg, renderFrame, onProgress, isCancelled }) {
+async function encodeVideoWebCodecs({ canvas, W, H, fps, frames, bitrate, cfg, renderFrame, onProgress, isCancelled, audio }) {
   const { Muxer, ArrayBufferTarget } = window.Mp4Muxer;
   const target = new ArrayBufferTarget();
-  const muxer = new Muxer({ target, video: { codec: cfg.muxer, width: W, height: H, frameRate: fps }, fastStart: "in-memory" });
+  const muxer = new Muxer({ target, video: { codec: cfg.muxer, width: W, height: H, frameRate: fps },
+    ...(audio ? { audio: { codec: audio.cfg.muxer, numberOfChannels: 2, sampleRate: audio.mix.sampleRate } } : {}), fastStart: "in-memory" });
+  if (audio) await encodeAudioInto(muxer, audio.mix, audio.cfg);
   let encError = null;
   const encoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: (e) => { encError = e; } });
   encoder.configure({ codec: cfg.codec, width: W, height: H, bitrate, framerate: fps });
@@ -2288,7 +2350,7 @@ async function loadGliderSymbol(flight) {
   } catch (e) { return null; }
 }
 
-function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manual, demCache, onDone, onError, onCancelRef, setStatus }) {
+function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manual, music, demCache, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), miniDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square", narrow = format !== "land";
   const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720, M = portrait ? 270 : square ? 300 : 330;
@@ -2752,6 +2814,14 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch {}
       const FPS = 30, BITRATE = 10000000;
       const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
+      let mix = null, audioNote = "";
+      if (music && music.file) {
+        setStatus("Musik wird vorbereitet …", 0);
+        mix = await prepareVideoAudio(music.file, music.start, D);
+        if (cancelled) return;
+      }
+      const audioCfg = mix && wcCfg ? await pickAudioConfig() : null;
+      if (mix && wcCfg && !audioCfg) { audioNote = "Dieser Browser kann den Ton nicht in die Videodatei kodieren – das Video wurde ohne Musik erstellt."; mix = null; }
       if (wcCfg) {
         // Bild für Bild mit festen 30 fps (siehe encodeVideoWebCodecs): wartet pro
         // Bild, bis Karte und Kacheln fertig sind → kein Ruckeln, keine Lücken.
@@ -2766,27 +2836,38 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
         });
         const frames = Math.round(D * FPS);
         let lastPct = -1;
-        const blob = await encodeVideoWebCodecs({ canvas: out, W, H, fps: FPS, frames, bitrate: BITRATE, cfg: wcCfg, isCancelled: () => cancelled,
+        const blob = await encodeVideoWebCodecs({ canvas: out, W, H, fps: FPS, frames, bitrate: BITRATE, cfg: wcCfg, isCancelled: () => cancelled, audio: mix && audioCfg ? { mix, cfg: audioCfg } : null,
           renderFrame: async (k) => { const t = Math.min(D - 0.001, k / FPS); applyState(t, false); await renderSettled(); draw(t); },
           onProgress: (k, n) => { const p = Math.round(k / n * 100); if (p !== lastPct) { lastPct = p; setStatus("Video wird Bild für Bild berechnet (feste 30 fps) – App bitte geöffnet lassen …", p); } } });
         if (cancelled || !blob) return;
-        onDone(blob, "mp4");
+        onDone(blob, "mp4", audioNote);
         return;
       }
       console.info("Flug-Video: WebCodecs nicht verfügbar – Aufnahme in Echtzeit (MediaRecorder)");
       const mime = pickVideoMime();
       if (!mime) throw new Error("Dieser Browser kann keine Videos aufnehmen (MediaRecorder fehlt).");
       const stream = out.captureStream(30);
+      let actx = null, asrc = null;
+      if (mix) {
+        try {
+          actx = new (window.AudioContext || window.webkitAudioContext)();
+          if (actx.state === "suspended") await actx.resume();
+          const dest = actx.createMediaStreamDestination();
+          asrc = actx.createBufferSource(); asrc.buffer = mix.buffer; asrc.connect(dest);
+          dest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+        } catch (e) { console.warn("Flug-Video: Musik im Echtzeit-Modus nicht möglich", e); actx = asrc = null; audioNote = "Die Musik konnte in diesem Browser nicht eingebunden werden."; }
+      }
       rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8000000 });
       const chunks = [];
       rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       const stopped = new Promise(r => { rec.onstop = r; });
       await warm(0);
       rec.start(1000);
+      if (asrc) asrc.start();
       const startMs = performance.now();
       let lastRtPct = -1;
       for (;;) {
-        if (cancelled) { try { rec.stop(); } catch {} return; }
+        if (cancelled) { try { rec.stop(); } catch {} try { if (actx) actx.close(); } catch {} return; }
         const t = (performance.now() - startMs) / 1000;
         if (t >= D) break;
         applyState(t, false);
@@ -2800,9 +2881,10 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
       draw(D - 0.01);
       rec.stop();
       await stopped;
+      try { if (actx) actx.close(); } catch {}
       if (cancelled) return;
       const blob = new Blob(chunks, { type: mime.split(";")[0] });
-      onDone(blob, mime.startsWith("video/mp4") ? "mp4" : "webm");
+      onDone(blob, mime.startsWith("video/mp4") ? "mp4" : "webm", audioNote);
     };
 
     run().catch(e => { if (!cancelled) { console.error("Flug-Video:", e); onError(e && e.message ? e.message : String(e)); } });
@@ -2890,6 +2972,71 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const [result, setResult] = useState(null); // { url, ext, blob }
   const [err, setErr] = useState("");
   const cancelRef = useRef(null);
+  // Musik (optional): eigene Audiodatei, wird beim Erstellen in das Video gemischt
+  const [music, setMusic] = useState(null); // { file, name, dur, start }
+  const prevRef = useRef(null);
+  const stopPreview = () => { try { if (prevRef.current) { prevRef.current.pause(); URL.revokeObjectURL(prevRef.current.src); } } catch {} prevRef.current = null; };
+  useEffect(() => stopPreview, []);
+  const pickMusic = (file) => {
+    stopPreview();
+    if (!file) return;
+    const url = URL.createObjectURL(file), a = new Audio(url);
+    a.onloadedmetadata = () => { setMusic({ file, name: file.name.replace(/\.[^.]+$/, ""), dur: isFinite(a.duration) ? a.duration : 0, start: 0 }); URL.revokeObjectURL(url); };
+    a.onerror = () => { URL.revokeObjectURL(url); setMusic({ file, name: file.name.replace(/\.[^.]+$/, ""), dur: 0, start: 0 }); };
+  };
+  const previewMusic = () => {
+    if (prevRef.current) { stopPreview(); return; }
+    if (!music) return;
+    const url = URL.createObjectURL(music.file), a = new Audio(url);
+    a.currentTime = music.start; prevRef.current = a;
+    a.play().catch(() => {});
+    setTimeout(() => { if (prevRef.current === a) stopPreview(); }, 10000);
+  };
+  // Musikordner durchsuchen (File System Access API; Ordner wird einmal gewählt und gemerkt)
+  const musicFsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
+  const [lib, setLib] = useState(null); // null = nicht gesucht | { items:[{name,path,handle}], folder, busy, msg }
+  const [libQ, setLibQ] = useState("");
+  const scanMusic = async (forcePick) => {
+    try {
+      let handle = forcePick ? null : await window.fsapiHandle.get("musicDir");
+      if (!handle) { handle = await window.showDirectoryPicker({ mode: "read" }); await window.fsapiHandle.set("musicDir", handle); }
+      let perm = await handle.queryPermission({ mode: "read" });
+      if (perm !== "granted") perm = await handle.requestPermission({ mode: "read" });
+      if (perm !== "granted") { setLib({ items: [], folder: handle.name, busy: false, msg: "Zugriff auf den Ordner wurde nicht erlaubt." }); return; }
+      setLib({ items: [], folder: handle.name, busy: true, msg: "Suche läuft …" });
+      const items = [];
+      const walk = async (dir, path, depth) => {
+        for await (const [name, h] of dir.entries()) {
+          if (items.length >= 5000) return;
+          if (h.kind === "directory") { if (depth < 5 && !name.startsWith(".")) await walk(h, path + name + "/", depth + 1); }
+          else if (/\.(mp3|m4a|aac|wav|ogg|opus|flac)$/i.test(name)) items.push({ name: name.replace(/\.[^.]+$/, ""), path, handle: h });
+        }
+      };
+      await walk(handle, "", 0);
+      items.sort((a, b) => a.name.localeCompare(b.name, "de"));
+      setLib({ items, folder: handle.name, busy: false, msg: items.length ? "" : "Keine Audiodateien im Ordner gefunden." });
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+      setLib({ items: [], folder: "", busy: false, msg: "Ordner konnte nicht gelesen werden" + (e && e.message ? " (" + e.message + ")" : "") + ". Alternativ „Audiodatei wählen“ verwenden." });
+    }
+  };
+  const chooseLibItem = async (it) => {
+    try { pickMusic(await it.handle.getFile()); setLib(null); setLibQ(""); }
+    catch (e) { setLib({ ...lib, msg: "Datei konnte nicht geöffnet werden." }); }
+  };
+  // Stichwörter, die zum Fliegen passen → solche Titel werden oben gezeigt
+  const MUSIC_HINTS = ["wolken","über den","up up","campari","fly","flying","flug","fliegen","sky","himmel","wings","flügel","high","wind","freedom","freiheit","free","cloud","clouds","horizon","soar","sun","sonne","blue","above","air","birds","eagle","adler","heaven","horizont","berge","mountain","alps","alpen","summer","sommer","wonderful","feel","dream","traum"];
+  const libShown = (() => {
+    if (!lib) return [];
+    const q = libQ.trim().toLowerCase();
+    const sc = (it) => { const n = (it.name + " " + it.path).toLowerCase(); return MUSIC_HINTS.reduce((a, k) => a + (n.includes(k) ? 1 : 0), 0); };
+    let list = lib.items.map(it => ({ it, sc: sc(it) }));
+    if (q) list = list.filter(x => (x.it.name + " " + x.it.path).toLowerCase().includes(q));
+    else list = list.filter(x => x.sc > 0).concat(list.filter(x => x.sc === 0));
+    if (!q) list.sort((a, b) => b.sc - a.sc);
+    return list.slice(0, 60);
+  })();
+  const fmtMs = (t) => Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
   // Gespeichertes Video (Variante "Verweis"): in den Daten liegt nur
   // storage "video:<flugId>" = { name, size, ext, created }; die Datei selbst
   // liegt als eigene Datei im Unterordner "videos" des Backup-Ordners
@@ -3017,23 +3164,75 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
                 <button onClick={()=>setFormat("square")} style={chip(format==="square")}>Quadrat 1:1</button>
               </div>
             </div>
+            <div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Musik (optional)</div>
+              {!music ? (
+                <div data-no-swipe="1" style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{display:"flex",gap:8}}>
+                    <label style={{...btn("rgba(255,255,255,0.12)"),flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
+                      🎵 Datei wählen
+                      <input type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+                    </label>
+                    {musicFsOk && <button onClick={()=>scanMusic(false)} style={{...btn("rgba(255,255,255,0.12)"),flex:1,fontSize:14}}>🔍 Musikordner durchsuchen</button>}
+                  </div>
+                  {lib && (
+                    <div style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <div style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>{lib.busy ? "Suche läuft …" : `${lib.items.length} Titel${lib.folder ? " in „" + lib.folder + "“" : ""}`}</div>
+                        <button onClick={()=>scanMusic(true)} style={{...btn("rgba(255,255,255,0.12)"),height:30,fontSize:12,padding:"0 10px"}}>Anderer Ordner</button>
+                        <button onClick={()=>{ setLib(null); setLibQ(""); }} style={{...btn("rgba(255,255,255,0.12)"),height:30,fontSize:12,padding:"0 10px"}}>✕</button>
+                      </div>
+                      {lib.msg && !lib.busy && <div style={{fontSize:12,color:"#fca5a5"}}>{lib.msg}</div>}
+                      {lib.items.length > 0 && <>
+                        <input value={libQ} onChange={e=>setLibQ(e.target.value)} placeholder="Suchen (Titel, Interpret, Ordner) …" style={{height:36,borderRadius:8,border:"1px solid rgba(255,255,255,0.2)",background:"rgba(0,0,0,0.25)",color:"#e8f4fd",padding:"0 10px",fontSize:14}} />
+                        {!libQ.trim() && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>Zuerst Titel mit Flug-Stichwörtern (Wolken, Himmel, fly, up …), danach alphabetisch.</div>}
+                        <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                          {libShown.map(({ it, sc }, i) => (
+                            <button key={i} onClick={()=>chooseLibItem(it)} style={{textAlign:"left",border:"none",borderRadius:8,background:sc>0&&!libQ.trim()?"rgba(125,211,252,0.15)":"rgba(255,255,255,0.06)",color:"#e8f4fd",padding:"7px 10px",fontSize:13,cursor:"pointer"}}>
+                              <div style={{fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
+                              {it.path && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.path}</div>}
+                            </button>
+                          ))}
+                          {!libShown.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.5)"}}>Keine Treffer.</div>}
+                        </div>
+                      </>}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div data-no-swipe="1" style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{flex:1,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>🎵 {music.name}</div>
+                    <button onClick={previewMusic} style={{...btn("rgba(255,255,255,0.12)"),height:34,fontSize:13}}>▶ Vorhören</button>
+                    <button onClick={()=>{ stopPreview(); setMusic(null); }} style={{...btn("rgba(255,255,255,0.12)"),height:34,fontSize:13}}>✕</button>
+                  </div>
+                  {music.dur > 8 && (
+                    <div>
+                      <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Start im Song: {fmtMs(music.start)} von {fmtMs(music.dur)}</div>
+                      <input type="range" min={0} max={Math.floor(music.dur - 5)} step={1} value={music.start} onChange={e=>{ stopPreview(); setMusic({ ...music, start: +e.target.value }); }} style={{width:"100%"}} />
+                    </div>
+                  )}
+                  <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>Wird auf die Videolänge zugeschnitten, am Anfang eingeblendet und am Ende ausgeblendet. Die Datei bleibt auf deinem Gerät.</div>
+                </div>
+              )}
+            </div>
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
               Ablauf: Zuerst werden die Karten vorgeladen (ca. 20–90 s), dann wird das Video in Echtzeit aufgenommen ({mode === "manual" ? Math.round(manualSecs) : duration} s).
               Während dieser Zeit die App im Vordergrund und den Bildschirm eingeschaltet lassen.
             </div>
-            <button disabled={mode === "manual" && (!segs.length || manualSecs > 300)} onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={{...btn(mode === "manual" && (!segs.length || manualSecs > 300) ? "rgba(255,255,255,0.12)" : "#16a34a")}}>{mode === "manual" && !segs.length ? "Erst Abschnitte hinzufügen" : "Video erstellen"}</button>
+            <button disabled={mode === "manual" && (!segs.length || manualSecs > 300)} onClick={()=>{ stopPreview(); setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={{...btn(mode === "manual" && (!segs.length || manualSecs > 300) ? "rgba(255,255,255,0.12)" : "#16a34a")}}>{mode === "manual" && !segs.length ? "Erst Abschnitte hinzufügen" : "Video erstellen"}</button>
           </>
         )}
         {stage === "render" && (
           <>
-            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} demCache={demRef} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
+            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} music={music} demCache={demRef} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
-              onDone={(blob, ext) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setFolderMsg(""); if (fsOk) saveToFolder(res, false); }}
+              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setFolderMsg(note ? "⚠ " + note : ""); if (fsOk) saveToFolder(res, false); }}
               onError={(m) => { setErr(m); setStage("error"); }} />
             <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
             <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
-            <button onClick={()=>{ if (cancelRef.current) cancelRef.current(); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Abbrechen</button>
+            <button onClick={()=>{ stopPreview(); if (cancelRef.current) cancelRef.current(); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Abbrechen</button>
           </>
         )}
         {stage === "done" && result && (
