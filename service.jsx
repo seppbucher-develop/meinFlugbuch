@@ -713,6 +713,19 @@ function ServiceApp() {
 
   React.useEffect(() => { loadStats(); }, [loadStats]);
 
+  // Optionen für "Backup sichern": ohne Video / ohne IGC ergibt eine kleine
+  // Datei (z.B. zum Hochladen in Claude). Wird pro Browser gemerkt.
+  const [backupWithVideo, setBackupWithVideo] = React.useState(() => {
+    try { return localStorage.getItem("backupWithVideo") !== "0"; } catch { return true; }
+  });
+  const [backupWithIgc, setBackupWithIgc] = React.useState(() => {
+    try { return localStorage.getItem("backupWithIgc") !== "0"; } catch { return true; }
+  });
+  const toggleBackupOpt = (name, val, setter) => {
+    setter(val);
+    try { localStorage.setItem(name, val ? "1" : "0"); } catch {}
+  };
+
   const exportBackup = async () => {
     setBusy(true); setMsg(null);
     // Berechtigung für den gewählten Ordner ganz am Anfang anfragen (falls
@@ -728,7 +741,13 @@ function ServiceApp() {
       // künftig noch dazukommt — ohne dass diese Liste je gepflegt werden
       // müsste.
       const all = await window.storage.list("");
-      const keys = all?.keys || [];
+      // Ohne Video: Video-Verweise (video:*) weglassen — die Videodateien
+      // selbst liegen ohnehin nie im Backup. Ohne IGC: Original-IGC-Dateien
+      // (igcfile:*) weglassen und den Track aus den Flügen entfernen
+      // (analysierte Werte wie Höhe/Dauer bleiben erhalten).
+      const keys = (all?.keys || []).filter(k =>
+        (backupWithVideo || !k.startsWith("video:")) &&
+        (backupWithIgc || !k.startsWith("igcfile:")));
       // Parallel statt sequentiell auslesen: bei tausenden Schlüsseln
       // (Flüge, Material, …) dauert ein Eintrag-für-Eintrag-Auslesen
       // spürbar lange — genug, dass der Browser die kurzzeitige
@@ -740,6 +759,15 @@ function ServiceApp() {
       const results = await Promise.all(keys.map(k => window.storage.get(k).catch(() => null)));
       const entries = {};
       keys.forEach((k, i) => { if (results[i]) entries[k] = results[i].value; });
+      if (!backupWithIgc) {
+        for (const k of Object.keys(entries)) {
+          if (!k.startsWith("flight:")) continue;
+          try {
+            const fl = JSON.parse(entries[k]);
+            if (fl && fl.track) { fl.track = []; entries[k] = JSON.stringify(fl); }
+          } catch {}
+        }
+      }
       const payload = { exportedAt: new Date().toISOString(), entries };
       const json = JSON.stringify(payload);
       const dateStamp = new Date().toISOString().slice(0, 10);
@@ -747,18 +775,19 @@ function ServiceApp() {
       // scripts/update-version.sh) — im Dateinamen sofort erkennbar, mit
       // welcher App-Version ein Backup erstellt wurde.
       const versionTag = (window.APP_VERSION || "unbekannt").replace(/[\\/:*?"<>|]/g, "_");
+      const optTag = (backupWithVideo ? "" : "-ohneVideo") + (backupWithIgc ? "" : "-ohneIGC");
 
       let blob, filename;
       try {
         if (typeof CompressionStream !== "undefined") {
           const gzStream = new Blob([json]).stream().pipeThrough(new CompressionStream("gzip"));
           blob = await new Response(gzStream).blob();
-          filename = `flugbuch-backup-${versionTag}-${dateStamp}.json.gz`;
+          filename = `flugbuch-backup-${versionTag}${optTag}-${dateStamp}.json.gz`;
         }
       } catch (e) { console.error("Backup: gzip compression failed, falling back to plain JSON:", e); }
       if (!blob) {
         blob = new Blob([json], { type: "application/json" });
-        filename = `flugbuch-backup-${versionTag}-${dateStamp}.json`;
+        filename = `flugbuch-backup-${versionTag}${optTag}-${dateStamp}.json`;
       }
 
       const markBackedUp = async () => {
@@ -1233,6 +1262,14 @@ function ServiceApp() {
           )}
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 160px" }}>
+              <div style={{ display: "flex", gap: 14, justifyContent: "center", marginBottom: 8, fontSize: 12, color: "rgba(232,244,253,0.7)" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input type="checkbox" checked={backupWithVideo} onChange={e => toggleBackupOpt("backupWithVideo", e.target.checked, setBackupWithVideo)} /> Video
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
+                  <input type="checkbox" checked={backupWithIgc} onChange={e => toggleBackupOpt("backupWithIgc", e.target.checked, setBackupWithIgc)} /> IGC
+                </label>
+              </div>
               <button onClick={exportBackup} disabled={busy}
                 style={{ width: "100%", boxSizing: "border-box", background: "rgba(74,222,128,0.15)", border: "1px solid rgba(74,222,128,0.3)", borderRadius: 10, padding: "12px", color: "#4ade80", fontSize: 13, fontWeight: 700, cursor: busy ? "default" : "pointer" }}>
                 {busy ? "⏳ …" : "☁️ Backup sichern"}
