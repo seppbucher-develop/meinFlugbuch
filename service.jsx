@@ -713,11 +713,8 @@ function ServiceApp() {
 
   React.useEffect(() => { loadStats(); }, [loadStats]);
 
-  // Optionen für "Backup sichern": ohne Video / ohne IGC ergibt eine kleine
+  // Option für "Backup sichern": ohne IGC ergibt eine kleine
   // Datei (z.B. zum Hochladen in Claude). Wird pro Browser gemerkt.
-  const [backupWithVideo, setBackupWithVideo] = React.useState(() => {
-    try { return localStorage.getItem("backupWithVideo") !== "0"; } catch { return true; }
-  });
   const [backupWithIgc, setBackupWithIgc] = React.useState(() => {
     try { return localStorage.getItem("backupWithIgc") !== "0"; } catch { return true; }
   });
@@ -741,13 +738,10 @@ function ServiceApp() {
       // künftig noch dazukommt — ohne dass diese Liste je gepflegt werden
       // müsste.
       const all = await window.storage.list("");
-      // Ohne Video: Video-Verweise (video:*) weglassen — die Videodateien
-      // selbst liegen ohnehin nie im Backup. Ohne IGC: Original-IGC-Dateien
-      // (igcfile:*) weglassen und den Track aus den Flügen entfernen
-      // (analysierte Werte wie Höhe/Dauer bleiben erhalten).
-      const keys = (all?.keys || []).filter(k =>
-        (backupWithVideo || !k.startsWith("video:")) &&
-        (backupWithIgc || !k.startsWith("igcfile:")));
+      // Ohne IGC: Original-IGC-Dateien (igcfile:*) weglassen und den Track
+      // aus den Flügen entfernen (analysierte Werte wie Höhe/Dauer bleiben
+      // erhalten).
+      const keys = (all?.keys || []).filter(k => backupWithIgc || !k.startsWith("igcfile:"));
       // Parallel statt sequentiell auslesen: bei tausenden Schlüsseln
       // (Flüge, Material, …) dauert ein Eintrag-für-Eintrag-Auslesen
       // spürbar lange — genug, dass der Browser die kurzzeitige
@@ -775,7 +769,7 @@ function ServiceApp() {
       // scripts/update-version.sh) — im Dateinamen sofort erkennbar, mit
       // welcher App-Version ein Backup erstellt wurde.
       const versionTag = (window.APP_VERSION || "unbekannt").replace(/[\\/:*?"<>|]/g, "_");
-      const optTag = (backupWithVideo ? "" : "-ohneVideo") + (backupWithIgc ? "" : "-ohneIGC");
+      const optTag = backupWithIgc ? "" : "-ohneIGC";
 
       let blob, filename;
       try {
@@ -1263,9 +1257,6 @@ function ServiceApp() {
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 160px" }}>
               <div style={{ display: "flex", gap: 14, justifyContent: "center", marginBottom: 8, fontSize: 12, color: "rgba(232,244,253,0.7)" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
-                  <input type="checkbox" checked={backupWithVideo} onChange={e => toggleBackupOpt("backupWithVideo", e.target.checked, setBackupWithVideo)} /> Video
-                </label>
                 <label style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer" }}>
                   <input type="checkbox" checked={backupWithIgc} onChange={e => toggleBackupOpt("backupWithIgc", e.target.checked, setBackupWithIgc)} /> IGC
                 </label>
