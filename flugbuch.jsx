@@ -2913,67 +2913,839 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
   );
 }
 
-function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
-  const [stage, setStage] = useState("options"); // options | render | done | error
-  const [duration, setDuration] = useState(45);
-  const [format, setFormat] = useState("land"); // land | port | square
-  const portrait = format === "port";
-  const [mode, setMode] = useState("auto"); // auto | manual
-  const [segs, setSegs] = useState([]);
-  const [pending, setPending] = useState({ a: null, b: null });
-  const [mspeed, setMspeed] = useState(10);
-  const [cursor, setCursor] = useState(track[0].timeSec);
-  const manualSecs = segs.reduce((s, x) => s + videoSegSeconds(x), 0);
-  // Vorschläge (aus der automatischen Szenenauswahl) für den manuellen Modus
-  const demRef = useRef(null);
-  const [editId, setEditId] = useState(null);   // gerade im Höhenprofil bearbeiteter Abschnitt
-  const [sugg, setSugg] = useState({ state: "idle", list: [], autoIds: [], msg: "" });
-  const snapSpeed = (flightSec) => { // Geschwindigkeit so wählen, dass die Szene ~9 s dauert
-    const raw = Math.max(1, flightSec / 9); let best = VIDEO_SPEEDS[0];
-    for (const sp of VIDEO_SPEEDS) if (Math.abs(Math.log(sp / raw)) < Math.abs(Math.log(best / raw))) best = sp;
-    return best;
+// ══════════════════════════════════════════════════════════════════════════
+// ── Saison-Rückblick: Video über alle Flüge eines Zeitraums ───────────────
+// Kurzfilm mit Weltkugel, Heimatregion, Ländern, Highlight-Flügen, stärkster
+// Thermik und Gesamtbilanz (Vorbild: der "Saison-Rückblick" gängiger Vario-Apps).
+// - Zeitraum frei wählbar (Von/Bis, mit Vorlagen für Saison/Jahr/12 Monate).
+// - Musik vom Gerät (VideoMusicPicker, wie beim Flug-Video).
+// - Länge = Richtwert: mit Musik endet das Video auf einem Taktanfang in der
+//   Nähe der Wunschlänge (analyzeBeats/pickSeasonEnd), und die Szenenwechsel
+//   rasten auf Taktschlägen ein (buildSeasonScript).
+// Gerendert wird wie beim Flug-Video Bild für Bild (WebCodecs, feste 30 fps),
+// aber mit einer Karte, die je Szene gewechselt wird (Weltkugel ↔ Gelände).
+// Beschriftungen, Pins und Linien zeichnet das Ausgabe-Canvas selbst über
+// map.project(); nur die 3D-Thermikspur ist eine Ebene der Karte.
+
+const SEASON_MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
+const SEASON_ACCENT = "#a3e635";
+const seasonDay = (ts) => { const d = new Date(ts); return d.getDate() + ". " + SEASON_MONTHS[d.getMonth()]; };
+const seasonDMY = (ts) => { const d = new Date(ts); return d.getDate() + "." + (d.getMonth() + 1) + "." + d.getFullYear(); };
+const seasonLong = (ts) => { const d = new Date(ts); return d.getDate() + ". " + SEASON_MONTHS[d.getMonth()] + " " + d.getFullYear(); };
+const seasonHM = (sec) => { const m = Math.round(sec / 60); return Math.floor(m / 60) + " h " + String(m % 60).padStart(2, "0") + " min"; };
+const seasonInt = (n) => Math.round(n).toLocaleString("de-CH");
+const seasonMMSS = (sec) => Math.floor(sec / 60) + ":" + String(Math.floor(sec % 60)).padStart(2, "0");
+
+// Track ohne Ausreisser (GPS-Sprünge), mindestens 30 Punkte — sonst null.
+function seasonCleanTrack(track) {
+  if (!track || track.length < 30) return null;
+  const med = (a) => { const s = a.slice().sort((x, y) => x - y); return s[s.length >> 1]; };
+  const mLat = med(track.map(p => p.lat)), mLon = med(track.map(p => p.lon));
+  const tr = track.filter(p => p && isFinite(p.lat) && isFinite(p.lon) && Math.abs(p.lat - mLat) <= 0.5 && Math.abs(p.lon - mLon) <= 0.5);
+  return tr.length >= 30 ? tr : null;
+}
+
+// Stärkster Höhengewinn innerhalb von maxWin Sekunden (mit mindestens 0.8 m/s im Schnitt).
+function seasonBestClimb(tr, maxWin = 420) {
+  const n = tr.length; let best = null;
+  for (let i = 0; i < n - 5; i += 3) {
+    const t0 = tr[i].timeSec, a0 = tr[i].gpsAlt;
+    for (let k = i + 5; k < n; k++) {
+      const dt = tr[k].timeSec - t0;
+      if (dt < 0 || dt > maxWin) break;
+      if (dt < 60) continue;
+      const g = tr[k].gpsAlt - a0;
+      if (g > 0 && g / dt >= 0.8 && (!best || g > best.gain)) best = { i0: i, i1: k, gain: g, secs: dt };
+    }
+  }
+  return best && { ...best, avg: best.gain / best.secs };
+}
+
+// Zahlen und Listen für den Zeitraum [fromTs, toTs] (toTs inklusive).
+function buildSeasonStats(flights, fromTs, toTs) {
+  const before = new Set(), rows = [];
+  for (const f of flights) {
+    const ts = parseDateToTs(f.date || f.rawDate);
+    if (!ts) continue;
+    const site = (f.site || "").trim();
+    if (ts < fromTs) { if (site) before.add(site.toLowerCase()); continue; }
+    if (ts > toTs) continue;
+    const tr = f.track && f.track.length ? f.track : null;
+    const p0 = f.startPt || (tr && tr[0]) || null;
+    rows.push({ f, ts, site, country: ((f.customFields || {}).land || "").trim(),
+      sec: f.durationSec || parseDurToSec(f.durationStr) || 0,
+      dist: f.scoreDistanceKm || f.totalDist || 0, alt: f.maxAlt || 0,
+      pt: p0 && isFinite(p0.lat) && isFinite(p0.lon) ? { lat: p0.lat, lon: p0.lon } : null });
+  }
+  const topSites = (rs) => {
+    const m = new Map();
+    for (const r of rs) { if (!r.site) continue; const k = r.site.toLowerCase(); const g = m.get(k) || { name: r.site, n: 0 }; g.n++; m.set(k, g); }
+    return [...m.values()].sort((a, b) => b.n - a.n || a.name.localeCompare(b.name, "de")).slice(0, 3);
   };
-  const toSegment = (cd) => ({ id: Date.now() + Math.random(), f0: cd.f0, f1: cd.f1, speed: snapSpeed(cd.f1 - cd.f0), label: cd.label || "",
-    kind: cd.kind, bSide: cd.bSide, heading: cd.heading, lat: cd.lat, lon: cd.lon });
-  const addSugg = (cd) => {
-    const ex = segs.find(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1);
-    if (ex) { setEditId(ex.id); return; }
-    const sg = toSegment(cd);
-    setSegs(list => [...list, sg].sort((x, y) => x.f0 - y.f0));
-    setEditId(sg.id);   // gleich auswählen: Start/Ende werden im Profil sichtbar und lassen sich anpassen
+  // ein Pin je Startplatz (Mittel der Startpunkte)
+  const pinsOf = (rs) => {
+    const m = new Map();
+    for (const r of rs) {
+      if (!r.pt) continue;
+      const k = r.site ? r.site.toLowerCase() : r.pt.lat.toFixed(2) + "," + r.pt.lon.toFixed(2);
+      const g = m.get(k) || { lat: 0, lon: 0, n: 0 }; g.lat += r.pt.lat; g.lon += r.pt.lon; g.n++; m.set(k, g);
+    }
+    return [...m.values()].map(g => ({ lat: g.lat / g.n, lon: g.lon / g.n, n: g.n }));
   };
-  const adoptAuto = () => setSegs(list => {
-    const add = sugg.list.filter(cd => sugg.autoIds.includes(cd.id) && !list.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1)).map(toSegment);
-    return [...list, ...add].sort((x, y) => x.f0 - y.f0);
+  const cm = new Map();
+  for (const r of rows) {
+    if (!r.country) continue;
+    const k = r.country.toLowerCase(); const g = cm.get(k) || { name: r.country, n: 0, sec: 0 };
+    g.n++; g.sec += r.sec; cm.set(k, g);
+  }
+  const countries = [...cm.values()].sort((a, b) => b.n - a.n).map(g => {
+    const rs = rows.filter(r => r.country.toLowerCase() === g.name.toLowerCase());
+    return { ...g, sites: topSites(rs), pins: pinsOf(rs) };
   });
-  const loadSugg = async () => {
-    setSugg(s => ({ ...s, state: "loading", msg: "" }));
-    try {
-      if (!demRef.current) {
-        let dem = null;
-        try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); }
-        demRef.current = dem || { elev: null, tiles: 0, z: 0 };
-      }
-      await new Promise(r => setTimeout(r, 30)); // UI kurz aktualisieren lassen
-      const elev = demRef.current.elev;
-      const cands = computeVideoHighlights(track, elev, 8, false);
-      const auto = computeVideoHighlights(track, elev, 3, true);
-      const n = track.length, t0 = track[0].timeSec, t1 = track[n-1].timeSec, total = t1 - t0;
-      const sL = Math.min(70, total * 0.08), lL = Math.min(80, total * 0.1);
-      const mk = (cd) => ({ ...cd, id: cd.kind + "_" + Math.round(cd.f0) });
-      const startC = mk({ kind: "start", label: "START" + (flight?.site ? " · " + flight.site : ""), f0: t0, f1: t0 + sL, center: t0 + sL / 2, score: 0 });
-      const landC = mk({ kind: "land", label: "LANDUNG", f0: t1 - lL, f1: t1, center: t1 - lL / 2, score: 0 });
-      const list = [startC, ...cands.map(mk), landC].sort((x, y) => x.center - y.center);
-      setSugg({ state: "done", list, autoIds: [startC.id, ...auto.map(a => mk(a).id), landC.id],
-        msg: elev ? "" : "Ohne Geländedaten werden Thermik am Berg, Hangflug und Gipfelüberflug nur eingeschränkt erkannt." });
-    } catch (e) { console.error("Flug-Video: Vorschläge", e); setSugg(s => ({ ...s, state: "error", msg: "Vorschläge konnten nicht berechnet werden: " + (e.message || e) })); }
+  const siteSet = new Set(rows.filter(r => r.site).map(r => r.site.toLowerCase()));
+
+  // Highlight-Flüge (brauchen einen Track): weitester, erstmals besuchter Ort, höchster, längster
+  const withTrack = rows.map(r => ({ r, track: seasonCleanTrack(r.f.track) })).filter(x => x.track);
+  const used = new Set(), hl = [];
+  const best = (arr, key) => arr.filter(x => !used.has(x.r.f.id)).reduce((b, x) => (!b || key(x) > key(b)) ? x : b, null);
+  const take = (x, label) => { if (!x || used.has(x.r.f.id)) return; used.add(x.r.f.id); hl.push({ ...x, label }); };
+  take(best(withTrack.filter(x => x.r.dist >= 3), x => x.r.dist), "WEITESTER FLUG");
+  const firsts = before.size ? withTrack.filter(x => x.r.site && !before.has(x.r.site.toLowerCase()))
+    .sort((a, b) => (b.r.dist || b.r.sec / 3600) - (a.r.dist || a.r.sec / 3600)) : [];
+  const free = () => firsts.filter(x => !used.has(x.r.f.id));
+  const first1 = free()[0];
+  take(first1, "ZUM ERSTEN MAL HIER");
+  take(best(withTrack, x => x.r.alt), "HÖCHSTER PUNKT");
+  take(best(withTrack, x => x.r.sec), "LÄNGSTER FLUG");
+  take(free().find(x => !first1 || x.r.site.toLowerCase() !== first1.r.site.toLowerCase()), "ZUM ERSTEN MAL HIER");
+
+  // stärkste Thermik: nur die Flüge mit dem grössten Höhengewinn durchsuchen
+  let thermal = null;
+  for (const x of withTrack.slice().sort((a, b) => (b.r.f.totalGain || 0) - (a.r.f.totalGain || 0)).slice(0, 15)) {
+    const c = seasonBestClimb(x.track);
+    if (c && (!thermal || c.gain > thermal.gain)) thermal = { ...c, r: x.r, track: x.track };
+  }
+  if (thermal && thermal.gain < 150) thermal = null;
+
+  return { rows, count: rows.length, sec: rows.reduce((a, r) => a + r.sec, 0),
+    days: new Set(rows.map(r => r.f.date || r.f.rawDate)).size, sites: siteSet.size,
+    countries, home: countries[0] || null, pins: pinsOf(rows), topSites: topSites(rows),
+    highlights: hl, thermal, bestDist: Math.max(0, ...rows.map(r => r.dist)), maxAlt: Math.max(0, ...rows.map(r => r.alt)) };
+}
+
+// ── Musik: Takt erkennen und ein passendes Ende wählen ──────────────────
+// Eingabe: Kanäle des dekodierten Songs. Die Onset-Stärke (Energiesprünge in
+// 10-ms-Bildern) wird mit Taktrastern von 85–175 BPM abgeglichen; das beste
+// Raster (leichte Vorliebe für ~120 BPM) liefert Schlagabstand und Phase, der
+// Taktanfang ("Eins") ist der Schlag der vier möglichen mit den stärksten
+// Einsätzen. Alle Zeiten sind relativ zum gewählten Startpunkt im Song.
+function analyzeBeats(chs, sr, startSec, maxSec) {
+  const a = chs[0], b = chs[1] || null;
+  const hop = Math.round(sr * 0.01), i0 = Math.max(0, Math.floor(startSec * sr));
+  const nF = Math.floor((Math.min(a.length, i0 + Math.floor(maxSec * sr)) - i0) / hop);
+  if (nF < 600) return null;
+  const rms = new Float32Array(nF), hp = new Float32Array(nF);
+  for (let f = 0; f < nF; f++) {
+    let s = 0, d2 = 0, p = 0;
+    for (let k = 0; k < hop; k++) {
+      const i = i0 + f * hop + k, x = b ? (a[i] + b[i]) * 0.5 : a[i];
+      s += x * x; const d = x - p; d2 += d * d; p = x;
+    }
+    rms[f] = Math.sqrt(s / hop); hp[f] = Math.sqrt(d2 / hop);
+  }
+  // Onset = positiver Sprung gegenüber dem Mittel der letzten 8 Bilder (beide Bänder)
+  const onset = (e) => {
+    const o = new Float32Array(nF); let mx = 1e-9, acc = 0;
+    for (let f = 0; f < nF; f++) {
+      const m = f >= 8 ? acc / 8 : e[f];
+      o[f] = Math.max(0, e[f] - m); mx = Math.max(mx, o[f]);
+      acc += e[f]; if (f >= 8) acc -= e[f - 8];
+    }
+    for (let f = 0; f < nF; f++) o[f] /= mx;
+    return o;
   };
+  const o1 = onset(rms), o2 = onset(hp), o = new Float32Array(nF);
+  for (let f = 0; f < nF; f++) o[f] = o1[f] + 0.6 * o2[f];
+  let bestC = { score: -1 };
+  for (let bpm = 85; bpm <= 175; bpm += 0.5) {
+    const P = 6000 / bpm, prior = Math.exp(-0.5 * Math.pow(Math.log2(bpm / 120) / 0.5, 2));
+    for (let ph = 0; ph < P; ph += 1) {
+      let s = 0, c = 0;
+      for (let t = ph; t < nF - 1; t += P) { const i = Math.round(t); s += Math.max(o[i], 0.7 * (i > 0 ? o[i - 1] : 0), 0.7 * o[i + 1]); c++; }
+      const sc = (s / Math.max(1, c)) * prior;
+      if (sc > bestC.score) bestC = { score: sc, bpm, P, ph };
+    }
+  }
+  if (bestC.score <= 0) return null;
+  const beatSec = bestC.P * 0.01, firstBeat = bestC.ph * 0.01;
+  const strength = [0, 0, 0, 0];
+  for (let k = 0, t = bestC.ph; t < nF - 1; k++, t += bestC.P) strength[k % 4] += o1[Math.round(t)]; // Taktanfang: meist der kräftigste (Bass-)Einsatz
+  let down = 0; for (let d = 1; d < 4; d++) if (strength[d] > strength[down]) down = d;
+  return { bpm: bestC.bpm, beatSec, firstBeat, downOffset: down };
+}
+// Schlagzeiten (relativ zum Songstart) bis `end`.
+function seasonBeatTimes(an, end) {
+  const out = [];
+  for (let t = an.firstBeat; t < end - 0.05; t += an.beatSec) out.push(t);
+  return out;
+}
+// Ende wählen: ein Taktanfang nahe der Wunschlänge (±20/25 %); 8er- und 4er-Takt-
+// Gruppen (Phrasen) werden bevorzugt, ein natürliches Songende im Fenster noch mehr.
+// remaining = Sekunden Song ab dem Startpunkt.
+function pickSeasonEnd(an, target, remaining) {
+  const lo = target * 0.8, hi = target * 1.25;
+  if (!an) return { end: Math.min(target, remaining), bars: 0, natural: remaining <= target + 0.5, short: remaining < lo };
+  const barSec = an.beatSec * 4, t0 = an.firstBeat + an.downOffset * an.beatSec;
+  let best = null;
+  const lim = Math.min(hi, remaining - 0.2);
+  for (let m = 1; ; m++) {
+    const e = t0 + m * barSec;
+    if (e > lim) break;
+    if (e < lo) continue;
+    let sc = -4 * Math.abs(e - target) / target;
+    if (m % 8 === 0) sc += 0.5; else if (m % 4 === 0) sc += 0.25;
+    if (!best || sc > best.sc) best = { end: e, bars: m, sc, natural: false, short: false };
+  }
+  if (remaining >= lo && remaining <= hi) {
+    const sc = -4 * Math.abs(remaining - target) / target + 1.2;
+    if (!best || sc > best.sc) best = { end: remaining, bars: 0, sc, natural: true, short: false };
+  }
+  if (best) return best;
+  if (remaining < lo) { // Song zu kurz: letzter vollständiger Takt
+    const m = Math.floor((remaining - 0.2 - t0) / barSec);
+    return m >= 1 ? { end: t0 + m * barSec, bars: m, natural: false, short: true } : { end: remaining, bars: 0, natural: true, short: true };
+  }
+  return { end: target, bars: 0, natural: false, short: false };
+}
+
+async function decodeMusicFile(file) {
+  const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  if (!AC) throw new Error("Dieser Browser kann keine Audiodateien verarbeiten.");
+  const ctx = new AC(2, 1, VIDEO_AUDIO_RATE);
+  const data = await file.arrayBuffer();
+  try { return await new Promise((res, rej) => { const p = ctx.decodeAudioData(data, res, rej); if (p && p.catch) p.catch(rej); }); }
+  catch (e) { throw new Error("Die Musikdatei konnte nicht gelesen werden (Format nicht unterstützt?)."); }
+}
+// Ab startSec auf D Sekunden zugeschnitten; kurzes Einblenden, am Ende ausblenden.
+async function prepareSeasonAudio(buf, startSec, D, fadeOut) {
+  const AC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const ctx = new AC(2, Math.ceil(D * VIDEO_AUDIO_RATE), VIDEO_AUDIO_RATE);
+  const src = ctx.createBufferSource(); src.buffer = buf;
+  const g = ctx.createGain();
+  g.gain.setValueAtTime(0, 0); g.gain.linearRampToValueAtTime(0.9, Math.min(1.2, D / 5));
+  g.gain.setValueAtTime(0.9, Math.max(1.3, D - fadeOut)); g.gain.linearRampToValueAtTime(0, D);
+  src.connect(g); g.connect(ctx.destination); src.start(0, startSec);
+  const out = await ctx.startRendering();
+  return { sampleRate: out.sampleRate, buffer: out, channels: [out.getChannelData(0), out.getChannelData(1)] };
+}
+
+// ── Drehbuch ───────────────────────────────────────────────────────────
+// Wählt anhand der Länge, wie viele Länder-/Highlight-Szenen Platz haben
+// (ca. 5 s je Einheit), und verteilt die Zeit. Schnitte rasten auf `beats` ein.
+function buildSeasonScript(st, D, beats) {
+  const UNIT = 5.2, W = { c: 1, h: 1.5, t: 1.5 };
+  const cs = st.countries.filter(c => c !== st.home).slice(0, 8), hs = st.highlights.slice(0, 5);
+  const seq = [];
+  if (cs.length) seq.push("c"); if (hs.length) seq.push("h"); if (st.thermal) seq.push("t");
+  for (let r = 1; r < Math.max(cs.length, hs.length); r++) { if (r < cs.length) seq.push("c"); if (r < hs.length) seq.push("h"); }
+  let budget = D / UNIT - 4.4, nc = 0, nh = 0, th = false;
+  for (const k of seq) {
+    if (budget < W[k] - 0.01) continue;
+    budget -= W[k];
+    if (k === "c") nc++; else if (k === "h") nh++; else th = true;
+  }
+  const sc = [{ kind: "intro", map: "globe", w: 1 }];
+  sc.push({ kind: "region", map: "terrain", w: 1, home: true, name: st.home ? st.home.name : "",
+    kicker: st.home ? "DEINE HEIMATREGION" : "DEINE FLÜGE", n: st.home ? st.home.n : st.count,
+    sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins });
+  cs.slice(0, nc).forEach(c => sc.push({ kind: "region", map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
+    n: c.n, sec: c.sec, sites: c.sites, pins: c.pins }));
+  hs.slice(0, nh).forEach(h => {
+    const f = h.r.f, tr = h.track, step = Math.max(1, Math.ceil(tr.length / 600));
+    const dec = tr.filter((_, i) => i % step === 0 || i === tr.length - 1);
+    const km = h.r.dist, parts = [h.r.country, seasonDay(h.r.ts), km >= 5 ? Math.round(km) + " km" : (h.r.sec / 3600).toFixed(1) + " h"].filter(Boolean);
+    const sm = String(f.startTime || "").match(/(\d{1,2}):(\d{2})/);
+    sc.push({ kind: "flight", map: "terrain", w: 1.5, kicker: h.label, title: h.r.site || "Flug", sub: parts.join(" · "),
+      track: tr, dec, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 : null });
+  });
+  if (th && st.thermal) {
+    const T = st.thermal, a = Math.max(0, T.i0 - 20), z = Math.min(T.track.length, T.i1 + 21), slice = T.track.slice(a, z);
+    sc.push({ kind: "thermal", map: "terrain", w: 1.5, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
+      place: [T.r.site, seasonDay(T.r.ts)].filter(Boolean).join(" · ") });
+  }
+  sc.push({ kind: "totals", map: "terrain", w: 1.2, pins: st.pins });
+  sc.push({ kind: "outro", map: "globe", w: 1.2 });
+  // Zeiten verteilen und auf Schläge einrasten
+  const sum = sc.reduce((a, s) => a + s.w, 0), cuts = [0];
+  let acc = 0;
+  for (let i = 0; i < sc.length - 1; i++) { acc += sc[i].w / sum * D; cuts.push(acc); }
+  cuts.push(D);
+  if (beats && beats.length) for (let i = 1; i < cuts.length - 1; i++) cuts[i] = beats.reduce((b, t) => Math.abs(t - cuts[i]) < Math.abs(b - cuts[i]) ? t : b, beats[0]);
+  const MIN = Math.min(2.4, D / sc.length * 0.7);
+  for (let i = 1; i < cuts.length - 1; i++) if (cuts[i] < cuts[i - 1] + MIN) cuts[i] = cuts[i - 1] + MIN;
+  for (let i = cuts.length - 2; i >= 1; i--) if (cuts[i] > cuts[i + 1] - MIN) cuts[i] = cuts[i + 1] - MIN;
+  sc.forEach((s, i) => { s.t0 = cuts[i]; s.t1 = cuts[i + 1]; });
+  return sc;
+}
+
+const seasonMapStyle = (sdk) => {
+  const M = sdk.MapStyle || {};
+  return (M.OUTDOOR && (M.OUTDOOR.DARK || M.OUTDOOR)) || (M.BACKDROP && (M.BACKDROP.DARK || M.BACKDROP)) || M.OUTDOOR;
+};
+const seasonWaitLoad = (map) => new Promise((res, rej) => {
+  if (map.loaded()) { res(); return; }
+  const to = setTimeout(() => rej(new Error("Karte konnte nicht geladen werden (Netzwerk/MapTiler-Schlüssel?)")), 25000);
+  map.once("load", () => { clearTimeout(to); res(); });
+});
+const seasonWaitIdle = (map, ms) => new Promise(res => {
+  let done = false;
+  const fin = () => { if (done) return; done = true; clearTimeout(to); map.off("idle", fin); res(); };
+  const to = setTimeout(fin, ms);
+  map.on("idle", fin); map.triggerRepaint();
+});
+
+function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D, onDone, onError, onCancelRef, setStatus }) {
+  const mainDivRef = useRef(null), outRef = useRef(null);
+  const portrait = format === "port", square = format === "square";
+  const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720;
+  const s = portrait ? 1 : square ? 0.9 : 0.8;
+
+  useEffect(() => {
+    let cancelled = false, main = null, wake = null;
+    onCancelRef.current = () => { cancelled = true; };
+    const sdk = window.maptilersdk;
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, f) => a + (b - a) * f;
+    const ease = (u) => u * u * (3 - 2 * u);
+    const easeOut = (u) => 1 - Math.pow(1 - u, 3);
+
+    const run = async () => {
+      if (!sdk) throw new Error("MapTiler-SDK nicht geladen");
+      if (!mapTilerKey) throw new Error("Kein MapTiler-Schlüssel hinterlegt (Service → API-Zugangsdaten).");
+      const FPS = 30, BITRATE = 10000000, scenes = script;
+      const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
+      if (!wcCfg) throw new Error("Dieser Browser kann keine MP4-Videos kodieren (WebCodecs/H.264). Bitte Chrome, Edge oder einen aktuellen Safari verwenden.");
+
+      const out = outRef.current; out.width = W; out.height = H;
+      const ctx = out.getContext("2d");
+      const frameCopy = document.createElement("canvas"); frameCopy.width = W; frameCopy.height = H;
+      const fctx = frameCopy.getContext("2d");
+      const prevSnap = document.createElement("canvas"); prevSnap.width = W; prevSnap.height = H;
+      const pctx = prevSnap.getContext("2d");
+
+      const allPins = stats.pins.length ? stats.pins : [{ lat: 46.8, lon: 8.2, n: 1 }];
+      const centroid = (pins) => { let la = 0, lo = 0, w = 0; pins.forEach(p => { la += p.lat * p.n; lo += p.lon * p.n; w += p.n; }); return { lat: la / w, lon: lo / w }; };
+      const focus = centroid(stats.home && stats.home.pins.length ? stats.home.pins : allPins);
+      const gdia = Math.min(W, H * 0.78), zg = Math.log2(gdia * Math.PI / 512);
+
+      // ── Karte: Weltkugel oder Gelände, je nach Szene ──
+      let mapKind = null, isGlobe = false, altLayer = null, layerScene = null;
+      const removeLayer = () => { try { if (main && main.getLayer("track-altitude")) main.removeLayer("track-altitude"); } catch {} altLayer = null; layerScene = null; };
+      const ensureMap = async (kind) => {
+        if (main && mapKind === kind) return;
+        if (main) { try { main.remove(); } catch {} main = null; altLayer = null; layerScene = null; }
+        setStatus(kind === "globe" ? "Weltkugel wird geladen …" : "Geländekarte wird geladen …", 0);
+        const o = { apiKey: mapTilerKey, language: "de", interactive: false, pixelRatio: 1, preserveDrawingBuffer: true,
+          canvasContextAttributes: { preserveDrawingBuffer: true }, fadeDuration: 0, attributionControl: false, navigationControl: false,
+          geolocateControl: false, scaleControl: false, fullscreenControl: false, terrainControl: false,
+          container: mainDivRef.current, style: seasonMapStyle(sdk), center: [focus.lon, focus.lat], zoom: kind === "globe" ? zg : 6, pitch: 0 };
+        if (kind === "globe") { o.projection = "globe"; o.terrain = false; }
+        else { o.terrain = true; o.maxPitch = 85; o.maxTileCacheSize = 600; }
+        main = new sdk.Map(o);
+        await seasonWaitLoad(main);
+        if (kind === "globe") { try { if (main.enableGlobe && !isGlobeMap(main)) main.enableGlobe(); } catch {} }
+        isGlobe = kind === "globe" && isGlobeMap(main);
+        await seasonWaitIdle(main, 8000);
+        mapKind = kind;
+      };
+      const isGlobeMap = (m) => { try { const p = m.getProjection && m.getProjection(); return !!p && (p === "globe" || p.type === "globe"); } catch { return false; } };
+
+      // Kamera, die ein Punktefeld einpasst (einmal je Szene berechnet; braucht die Geländekarte)
+      const fitFor = (sc, pts, bottomFrac, key) => {
+        key = key || "_fit";
+        if (sc[key]) return sc[key];
+        let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
+        pts.forEach(p => { a = Math.min(a, p.lon); b = Math.min(b, p.lat); c = Math.max(c, p.lon); d = Math.max(d, p.lat); });
+        if (c - a < 0.06) { const m = (a + c) / 2; a = m - 0.03; c = m + 0.03; }
+        if (d - b < 0.04) { const m = (b + d) / 2; b = m - 0.02; d = m + 0.02; }
+        const cam = main.cameraForBounds([[a, b], [c, d]], { padding: { top: H * 0.1, bottom: H * bottomFrac, left: W * 0.12, right: W * 0.12 }, maxZoom: 15 });
+        sc[key] = cam ? { center: [cam.center.lng != null ? cam.center.lng : cam.center[0], cam.center.lat != null ? cam.center.lat : cam.center[1]], zoom: cam.zoom }
+          : { center: [(a + c) / 2, (b + d) / 2], zoom: 8 };
+        return sc[key];
+      };
+      const sceneAt = (t) => {
+        let si = scenes.findIndex(x => t < x.t1); if (si < 0) si = scenes.length - 1;
+        const sc = scenes[si], len = sc.t1 - sc.t0, tl = clamp(t - sc.t0, 0, len);
+        return { si, sc, tl, len, u: len > 0 ? tl / len : 1 };
+      };
+      const applyScene = (st) => {
+        const { sc, u } = st, e = ease(u);
+        if (sc.kind === "thermal") {
+          if (layerScene !== sc) { removeLayer(); altLayer = createAltitudeTrackLayer(sc.slice, 4.2 * s); main.addLayer(altLayer); layerScene = sc; }
+          altLayer.setProgress(Math.round(clamp((st.tl - 0.5) / (st.len * 0.78), 0, 1) * (sc.slice.length - 1)));
+        } else if (layerScene) removeLayer();
+        const pad = { top: 0, bottom: 0, left: 0, right: 0 };
+        switch (sc.kind) {
+          case "intro":
+            main.jumpTo({ center: [lerp(focus.lon - 100, focus.lon, e), lerp(12, focus.lat, e)], zoom: lerp(zg - 0.4, zg + 0.55, e), bearing: 0, pitch: 0, padding: { ...pad, bottom: H * 0.3 } });
+            break;
+          case "outro":
+            main.jumpTo({ center: [lerp(focus.lon + 15, focus.lon - 35, u), lerp(focus.lat, 25, e)], zoom: lerp(zg + 0.1, zg - 0.2, e), bearing: 0, pitch: 0, padding: { ...pad, bottom: H * 0.3 } });
+            break;
+          case "region": case "totals": {
+            const f = fitFor(sc, sc.pins && sc.pins.length ? sc.pins : allPins, 0.5);
+            main.jumpTo({ center: f.center, zoom: f.zoom + 0.35 * e - 0.1, bearing: lerp(0, sc.kind === "totals" ? 12 : -8, e), pitch: lerp(0, 28, e) });
+            break;
+          }
+          case "flight": {
+            const f = fitFor(sc, sc.dec, 0.44);
+            main.jumpTo({ center: f.center, zoom: f.zoom - 0.35, bearing: lerp(-14, 16, u), pitch: lerp(38, 52, e) });
+            break;
+          }
+          case "thermal": {
+            const t = sc.slice; let la = 0, lo = 0, mnLa = 90, mxLa = -90, mnLo = 180, mxLo = -180;
+            t.forEach(p => { la += p.lat; lo += p.lon; mnLa = Math.min(mnLa, p.lat); mxLa = Math.max(mxLa, p.lat); mnLo = Math.min(mnLo, p.lon); mxLo = Math.max(mxLo, p.lon); });
+            la /= t.length; lo /= t.length;
+            const hor = Math.max((mxLa - mnLa) * 111320, (mxLo - mnLo) * 111320 * Math.cos(la * Math.PI / 180));
+            const ext = Math.max(hor, sc.gain * 0.9) + 160, mpp = ext / (0.5 * Math.min(W, H));
+            const zoom = Math.log2(40075016 * Math.cos(la * Math.PI / 180) / (512 * mpp));
+            main.jumpTo({ center: [lo, la], zoom, bearing: lerp(10, 130, u), pitch: 62, padding: { ...pad, bottom: H * 0.18 } });
+            break;
+          }
+        }
+      };
+
+      let timeouts = 0;
+      const renderSettled = () => new Promise(res => {
+        let done = false;
+        const grab = () => { try { fctx.drawImage(main.getCanvas(), 0, 0, W, H); } catch {} };
+        const fin = () => { if (done) return; done = true; clearTimeout(to); main.off("render", onr); res(); };
+        const onr = () => { if (main.areTilesLoaded()) { grab(); timeouts = 0; fin(); } };
+        const to = setTimeout(() => { timeouts++; grab(); fin(); }, timeouts > 3 ? 250 : 3000);
+        main.on("render", onr); main.triggerRepaint();
+      });
+
+      // ── Zeichnen ──
+      const FONT = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+      const mg = 44 * s;
+      const T = (txt, x, y, size, weight, color, align, ls) => {
+        ctx.font = `${weight} ${size}px ${FONT}`; ctx.textAlign = align || "left"; ctx.textBaseline = "alphabetic";
+        try { ctx.letterSpacing = (ls || 0) + "px"; } catch {}
+        ctx.shadowColor = "rgba(0,0,0,0.55)"; ctx.shadowBlur = 8 * s; ctx.shadowOffsetY = 1;
+        ctx.fillStyle = color; ctx.fillText(txt, x, y);
+        ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
+        try { ctx.letterSpacing = "0px"; } catch {}
+      };
+      // Schrift verkleinern, bis der Text in die Breite passt
+      const fitSize = (txt, size, weight, maxW) => {
+        ctx.font = `${weight} ${size}px ${FONT}`;
+        const w = ctx.measureText(txt).width;
+        return w > maxW ? size * maxW / w : size;
+      };
+      const grad = (from, a) => {
+        const g = ctx.createLinearGradient(0, H * from, 0, H);
+        g.addColorStop(0, "rgba(4,14,32,0)"); g.addColorStop(1, `rgba(4,14,32,${a})`);
+        ctx.fillStyle = g; ctx.fillRect(0, H * from, W, H * (1 - from));
+      };
+      const tint = (a) => { ctx.fillStyle = `rgba(4,14,32,${a})`; ctx.fillRect(0, 0, W, H); };
+      // Einblenden: liefert 0..1 und setzt Transparenz und leichten Aufstieg
+      const reveal = (tl, delay) => {
+        const r = clamp((tl - delay) / 0.55, 0, 1), e = easeOut(r);
+        ctx.globalAlpha = e; ctx.save(); ctx.translate(0, 16 * s * (1 - e)); return r;
+      };
+      const endReveal = () => { ctx.restore(); ctx.globalAlpha = 1; };
+      const count = (target, tl, delay, dur) => Math.round(target * easeOut(clamp((tl - delay) / (dur || 1.1), 0, 1)));
+      const front = (lon, lat) => {
+        if (!isGlobe) return true;
+        const c = main.getCenter(), r = Math.PI / 180;
+        return Math.sin(lat * r) * Math.sin(c.lat * r) + Math.cos(lat * r) * Math.cos(c.lat * r) * Math.cos((lon - c.lng) * r) > 0.1;
+      };
+      const pin = (x, y, k) => {
+        ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 8 * s; ctx.fillStyle = "#dc2626";
+        ctx.beginPath(); ctx.arc(0, -17 * s, 11 * s, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(-9 * s, -10 * s); ctx.lineTo(0, 0); ctx.lineTo(9 * s, -10 * s); ctx.closePath(); ctx.fill();
+        ctx.shadowBlur = 0; ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(0, -17 * s, 4.5 * s, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      };
+      const dot = (x, y, r, k) => {
+        ctx.save(); ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 16 * s; ctx.fillStyle = SEASON_ACCENT;
+        ctx.beginPath(); ctx.arc(x, y, r * k, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0; ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 2.2 * s; ctx.stroke(); ctx.restore();
+      };
+      const pinsOn = (pins, tl, kind) => {
+        const n = pins.length;
+        pins.forEach((p, i) => {
+          const k = easeOut(clamp((tl - 0.2 - (i / Math.max(1, n)) * 1.6) / 0.45, 0, 1));
+          if (k <= 0 || !front(p.lon, p.lat)) return;
+          const q = main.project([p.lon, p.lat]);
+          if (q.x < -40 || q.x > W + 40 || q.y < -60 || q.y > H + 40) return;
+          if (kind === "pin") pin(q.x, q.y, k * (0.9 + Math.min(0.5, p.n / 40))); else dot(q.x, q.y, 8 * s * (0.9 + Math.min(0.6, p.n / 30)), k);
+        });
+      };
+      const kicker = (txt, y, tl, delay) => { reveal(tl, delay); T(txt, mg, y, 21 * s, 800, SEASON_ACCENT, "left", 3 * s); endReveal(); };
+      const bigNum = (n, suffix, y, size, tl, delay) => {
+        reveal(tl, delay);
+        const num = seasonInt(n); ctx.font = `900 ${size}px ${FONT}`;
+        const w = ctx.measureText(num).width;
+        T(num, mg, y, size, 900, "#fff", "left");
+        T(suffix, mg + w + 14 * s, y, size * 0.36, 800, "#fff", "left");
+        endReveal();
+      };
+
+      const drawScene = (t, st) => {
+        const { sc, tl, len, u } = st, bot = H - 78 * s;
+        ctx.drawImage(frameCopy, 0, 0, W, H);
+        switch (sc.kind) {
+          case "intro": {
+            tint(0.22); grad(0.45, 0.85);
+            pinsOn(allPins, tl, "pin");
+            const stats1 = [stats.count + " Flüge", stats.sites ? stats.sites + " Orte" : "", stats.countries.length ? stats.countries.length + " Länder" : ""].filter(Boolean).join(" · ");
+            const yS = bot, bigSize = fitSize(meta.big, 170 * s, 900, W - 2 * mg), yB = yS - 62 * s, yT = yB - bigSize * 0.74 - 26 * s, yP = yT - 72 * s * 0.8 - 18 * s;
+            reveal(tl, 0.2); T(meta.period.toUpperCase(), mg, yP, 19 * s, 700, "rgba(232,244,253,0.85)", "left", 2.5 * s); endReveal();
+            reveal(tl, 0.45); T(meta.title, mg, yT, fitSize(meta.title, 72 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
+            reveal(tl, 0.75); T(meta.big, mg, yB, bigSize, 900, SEASON_ACCENT); endReveal();
+            reveal(tl, 1.1); T(stats1, mg, yS, 26 * s, 700, "rgba(232,244,253,0.92)"); endReveal();
+            break;
+          }
+          case "region": {
+            tint(0.3); grad(0.3, 0.9);
+            pinsOn(sc.pins, tl, "dot");
+            const rows = sc.sites.slice(0, 3), rowH = 54 * s, yRows = bot - (rows.length - 1) * rowH;
+            const yTime = yRows - (rows.length ? 56 * s : 0) , yBig = yTime - 56 * s, yK = yBig - 150 * s * 0.74 - 20 * s;
+            kicker(sc.kicker, yK, tl, 0.15);
+            bigNum(count(sc.n, tl, 0.3), "Flüge", yBig, 150 * s, tl, 0.3);
+            reveal(tl, 0.7); T(seasonHM(sc.sec * easeOut(clamp((tl - 0.7) / 1.1, 0, 1))) + " in der Luft", mg, yTime, 28 * s, 700, SEASON_ACCENT); endReveal();
+            rows.forEach((r, i) => {
+              reveal(tl, 1.0 + i * 0.25);
+              const y = yRows + i * rowH;
+              ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.beginPath(); ctx.arc(mg + 8 * s, y - 11 * s, 4 * s, 0, Math.PI * 2); ctx.fill();
+              T(r.name, mg + 30 * s, y, fitSize(r.name, 36 * s, 700, W - 2 * mg - 190 * s), 700, "#fff");
+              T(r.n + (r.n === 1 ? " Start" : " Starts"), W - mg, y, 24 * s, 600, "rgba(232,244,253,0.65)", "right");
+              endReveal();
+            });
+            break;
+          }
+          case "flight": {
+            grad(0.45, 0.9);
+            const track = sc.track, t0 = track[0].timeSec, t1 = track[track.length - 1].timeSec;
+            const p = clamp((tl - 0.4) / Math.max(0.5, len - 1.3), 0, 1), tc = t0 + (t1 - t0) * p;
+            const pts = [];
+            for (const q of sc.dec) { if (q.timeSec > tc) break; pts.push(main.project([q.lon, q.lat])); }
+            const cur = videoPosAt(track, tc), cp = main.project([cur.lon, cur.lat]);
+            pts.push(cp);
+            ctx.save(); ctx.lineJoin = "round"; ctx.lineCap = "round";
+            ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+            ctx.strokeStyle = "rgba(4,14,32,0.55)"; ctx.lineWidth = 8 * s; ctx.stroke();
+            ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 12 * s; ctx.strokeStyle = "#d9f99d"; ctx.lineWidth = 4 * s; ctx.stroke();
+            ctx.restore();
+            dot(cp.x, cp.y, 9 * s, 1);
+            const yS = bot, yL = yS - 56 * s * 0.9 - 12 * s, ySub = yL - 36 * s, yT = ySub - 40 * s - 8 * s * 0, yK = yT - 84 * s * 0.72 - 14 * s;
+            kicker(sc.kicker, yK, tl, 0.2);
+            reveal(tl, 0.4); T(sc.title, mg, yT + 4 * s, fitSize(sc.title, 84 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
+            reveal(tl, 0.6); T(sc.sub, mg, ySub + 6 * s, 25 * s, 600, "rgba(232,244,253,0.8)"); endReveal();
+            reveal(tl, 0.8);
+            T("HÖHE", mg, yL, 17 * s, 700, "rgba(232,244,253,0.55)", "left", 2.5 * s);
+            T(seasonInt(cur.gpsAlt) + " m", mg, yS, 56 * s, 800, "#fff");
+            if (sc.clock0 != null) {
+              const c = Math.floor(sc.clock0 + (tc - t0)) , hh = Math.floor(c / 3600) % 24, mm = Math.floor(c % 3600 / 60);
+              const x2 = mg + 300 * s;
+              T("UHRZEIT", x2, yL, 17 * s, 700, "rgba(232,244,253,0.55)", "left", 2.5 * s);
+              T(String(hh).padStart(2, "0") + ":" + String(mm).padStart(2, "0"), x2, yS, 56 * s, 800, "#fff");
+            }
+            endReveal();
+            break;
+          }
+          case "thermal": {
+            grad(0.45, 0.88);
+            const p = easeOut(clamp((tl - 0.5) / (len * 0.78), 0, 1));
+            const yS = bot, ySub = yS - 6 * s, yB = ySub - 50 * s, yK = yB - 150 * s * 0.74 - 20 * s;
+            kicker("THERMIK AUS DER NÄHE", yK, tl, 0.2);
+            reveal(tl, 0.35);
+            const num = "+" + seasonInt(sc.gain * p); ctx.font = `900 ${150 * s}px ${FONT}`;
+            const w = ctx.measureText(num).width;
+            T(num, mg, yB, 150 * s, 900, SEASON_ACCENT); T("m", mg + w + 12 * s, yB, 150 * s * 0.36, 800, SEASON_ACCENT);
+            T("in " + seasonMMSS(sc.secs) + " min · Ø " + sc.avg.toFixed(1) + " m/s", mg, ySub - 8 * s + 0, 27 * s, 700, "#fff");
+            T(sc.place, mg, yS + 34 * s, 22 * s, 600, "rgba(232,244,253,0.7)");
+            endReveal();
+            break;
+          }
+          case "totals": {
+            tint(0.4); grad(0.3, 0.9);
+            const rows = [[stats.count, "Flüge"], [Math.round(stats.sec / 3600), "Stunden in der Luft"], [stats.days, "Flugtage"], [stats.countries.length, "Länder"]].filter(r => r[0] > 0);
+            const pitch = 128 * s, last = bot, yK = last - (rows.length - 1) * pitch - 120 * s * 0.74 - 34 * s;
+            kicker("DEINE SAISON " + meta.big.toUpperCase(), yK, tl, 0.1);
+            rows.forEach((r, i) => { const y = last - (rows.length - 1 - i) * pitch; bigNum(count(r[0], tl, 0.3 + i * 0.4, 1), r[1], y, 110 * s, tl, 0.3 + i * 0.4); });
+            break;
+          }
+          case "outro": {
+            tint(0.22); grad(0.45, 0.88);
+            pinsOn(allPins, 9, "pin");
+            const yThanks = bot, items = [[stats.count, "FLÜGE"], [Math.round(stats.sec / 3600), "STUNDEN"], [stats.days, "FLUGTAGE"], [stats.countries.length, "LÄNDER"]].filter(r => r[0] > 0);
+            const yN = yThanks - 70 * s, yTitle = yN - 54 * s - 50 * s, yK = yTitle - 84 * s * 0.75 - 18 * s;
+            kicker("SAISON " + meta.big.toUpperCase(), yK, tl, 0.2);
+            reveal(tl, 0.4); T(meta.title, mg, yTitle, fitSize(meta.title, 84 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
+            reveal(tl, 0.8);
+            const colW = (W - 2 * mg) / items.length;
+            items.forEach((r, i) => { const x = mg + i * colW; T(seasonInt(r[0]), x, yN, 54 * s, 800, "#fff"); T(r[1], x, yN + 26 * s, 15 * s, 700, "rgba(232,244,253,0.6)", "left", 2 * s); });
+            endReveal();
+            reveal(tl, 1.3); T("Danke für diese Saison. Bis bald in der Luft.", mg, yThanks + 30 * s, 24 * s, 600, "rgba(232,244,253,0.85)"); endReveal();
+            break;
+          }
+        }
+      };
+
+      let lastSi = -1;
+      const drawFrame = (t, st) => {
+        ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1;   // nie einen Zeichenzustand ins nächste Bild mitnehmen
+        drawScene(t, st);
+        // weiche Überblendung vom letzten Bild der vorigen Szene
+        if (st.si > 0 && st.tl < 0.7) { ctx.globalAlpha = 1 - st.tl / 0.7; ctx.drawImage(prevSnap, 0, 0); ctx.globalAlpha = 1; }
+        const fade = Math.max(clamp(1 - t / 0.5, 0, 1), clamp(1 - (D - t) / 0.8, 0, 1));
+        if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
+      };
+
+      try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch {}
+      let mix = null, audioNote = "";
+      if (music && music.buf) {
+        setStatus("Musik wird vorbereitet …", 0);
+        mix = await prepareSeasonAudio(music.buf, music.start, D, music.fade);
+        if (cancelled) return;
+      }
+      const audioCfg = mix ? await pickAudioConfig() : null;
+      if (mix && !audioCfg) { audioNote = "Dieser Browser kann den Ton nicht in die Videodatei kodieren – das Video wurde ohne Musik erstellt."; mix = null; }
+
+      const frames = Math.round(D * FPS);
+      let lastPct = -1;
+      const blob = await encodeVideoWebCodecs({ canvas: out, W, H, fps: FPS, frames, bitrate: BITRATE, cfg: wcCfg, isCancelled: () => cancelled,
+        audio: mix && audioCfg ? { mix, cfg: audioCfg } : null,
+        renderFrame: async (k) => {
+          const t = Math.min(D - 0.001, k / FPS), st = sceneAt(t);
+          if (st.si !== lastSi) { if (lastSi >= 0) pctx.drawImage(out, 0, 0); lastSi = st.si; }
+          await ensureMap(st.sc.map);
+          if (cancelled) return;
+          applyScene(st);
+          await renderSettled();
+          drawFrame(t, st);
+        },
+        onProgress: (k, n) => { const p = Math.round(k / n * 100); if (p !== lastPct) { lastPct = p; setStatus("Video wird Bild für Bild berechnet – App bitte geöffnet lassen …", p); } } });
+      if (cancelled || !blob) return;
+      onDone(blob, "mp4", audioNote);
+    };
+
+    run().catch(e => { if (!cancelled) { console.error("Saison-Video:", e); onError(e && e.message ? e.message : String(e)); } });
+    return () => {
+      cancelled = true;
+      try { if (wake) wake.release(); } catch {}
+      try { main && main.remove(); } catch {}
+    };
+  }, []);
+
+  return (
+    <>
+      {ReactDOM.createPortal(
+        <div style={{position:"fixed",left:0,top:0,width:W,height:H,zIndex:1,pointerEvents:"none"}} ref={mainDivRef} />,
+        document.body
+      )}
+      <canvas ref={outRef} style={{width:"100%",maxWidth:portrait?340:square?480:760,maxHeight:"62vh",aspectRatio:`${W}/${H}`,borderRadius:12,background:"#000",display:"block",margin:"0 auto"}} />
+    </>
+  );
+}
+
+function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
+  const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const fromISO = (s) => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
+  const presets = useMemo(() => {
+    const now = new Date(), Y = now.getFullYear(), sy = now.getMonth() >= 9 ? Y : Y - 1;
+    const yy = (y) => String((y + 1) % 100).padStart(2, "0");
+    const a = new Date(Y - 1, now.getMonth(), now.getDate() + 1);
+    const list = [{ id: "12m", label: "Letzte 12 Monate", from: iso(a), to: iso(now), big: "" },
+      { id: "s" + sy, label: `Saison ${sy}/${yy(sy)}`, from: `${sy}-10-01`, to: `${sy + 1}-09-30`, big: `${sy}/${yy(sy)}` },
+      { id: "s" + (sy - 1), label: `Saison ${sy - 1}/${yy(sy - 1)}`, from: `${sy - 1}-10-01`, to: `${sy}-09-30`, big: `${sy - 1}/${yy(sy - 1)}` },
+      { id: "y" + Y, label: `Jahr ${Y}`, from: `${Y}-01-01`, to: `${Y}-12-31`, big: String(Y) },
+      { id: "y" + (Y - 1), label: `Jahr ${Y - 1}`, from: `${Y - 1}-01-01`, to: `${Y - 1}-12-31`, big: String(Y - 1) }];
+    const has = (p) => flights.some(f => { const ts = parseDateToTs(f.date || f.rawDate); return ts >= fromISO(p.from).getTime() && ts <= fromISO(p.to).getTime() + 86399999; });
+    return list.filter((p, i) => i === 0 || has(p));
+  }, [flights]);
+  const [stage, setStage] = useState("options"); // options | render | done | error
+  const [presetId, setPresetId] = useState(presets[0].id);
+  const [fromS, setFromS] = useState(presets[0].from);
+  const [toS, setToS] = useState(presets[0].to);
+  const [titleS, setTitleS] = useState(null), [bigS, setBigS] = useState(null);
+  const [target, setTarget] = useState(120);
+  const [format, setFormat] = useState("port");
+  const [music, setMusic] = useState(null);
   const [progress, setProgress] = useState({ text: "", pct: 0 });
-  const [result, setResult] = useState(null); // { url, ext, blob }
+  const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
   const cancelRef = useRef(null);
-  // Musik (optional): eigene Audiodatei, wird beim Erstellen in das Video gemischt
-  const [music, setMusic] = useState(null); // { file, name, dur, start }
+
+  const fromTs = fromISO(fromS).getTime(), toTs = fromISO(toS).getTime() + 86399999;
+  const valid = isFinite(fromTs) && isFinite(toTs) && toTs >= fromTs;
+  const stats = useMemo(() => valid ? buildSeasonStats(flights, fromTs, toTs) : null, [flights, fromTs, toTs, valid]);
+  const pilotFirst = useMemo(() => {
+    const m = new Map(); flights.forEach(f => { const p = (f.pilot || "").trim().split(/\s+/)[0]; if (p) m.set(p, (m.get(p) || 0) + 1); });
+    const top = [...m.entries()].sort((a, b) => b[1] - a[1])[0];
+    return top ? top[0] : "";
+  }, [flights]);
+  const autoTitle = pilotFirst ? (/[sßxz]$/i.test(pilotFirst) ? pilotFirst + "’ Saison" : pilotFirst + "s Saison") : "Meine Saison";
+  const autoBig = (() => {
+    const p = presets.find(x => x.id === presetId);
+    if (p && p.big && p.from === fromS && p.to === toS) return p.big;
+    return seasonDMY(fromTs) + " – " + seasonDMY(toTs);
+  })();
+  const meta = { title: (titleS != null ? titleS : autoTitle).trim() || autoTitle, big: (bigS != null ? bigS : autoBig).trim() || autoBig,
+    period: seasonLong(fromTs) + " – " + seasonLong(toTs) };
+
+  // Musik dekodieren und Takt analysieren (neu bei anderem Startpunkt oder anderer Wunschlänge)
+  const [mbuf, setMbuf] = useState(null), [mErr, setMErr] = useState("");
+  useEffect(() => {
+    let dead = false; setMbuf(null); setMErr("");
+    if (!music || !music.file) return;
+    decodeMusicFile(music.file).then(b => { if (!dead) setMbuf(b); }).catch(e => { if (!dead) setMErr(e.message || String(e)); });
+    return () => { dead = true; };
+  }, [music && music.file]);
+  const [plan, setPlan] = useState(null);
+  const mstart = music ? music.start : 0;
+  useEffect(() => {
+    if (!mbuf) { setPlan(null); return; }
+    const h = setTimeout(() => {
+      const remaining = Math.max(0, mbuf.duration - mstart);
+      let an = null;
+      try { an = analyzeBeats([mbuf.getChannelData(0), mbuf.numberOfChannels > 1 ? mbuf.getChannelData(1) : null], mbuf.sampleRate, mstart, Math.min(remaining, target * 1.25 + 10)); } catch (e) { console.warn("Beat-Analyse:", e); }
+      setPlan({ an, remaining, ...pickSeasonEnd(an, target, remaining) });
+    }, 200);
+    return () => clearTimeout(h);
+  }, [mbuf, mstart, target]);
+  const musicReady = !music || !!plan;
+  const D = music && plan ? plan.end : target;
+  const beats = music && plan && plan.an ? seasonBeatTimes(plan.an, D) : null;
+  const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats) : [], [stats, D, plan]);
+  const summary = (() => {
+    if (!script.length) return "";
+    const c = script.filter(x => x.kind === "region").length - 1, h = script.filter(x => x.kind === "flight").length, t = script.some(x => x.kind === "thermal");
+    return ["Intro", stats.home ? "Heimatregion" : "Karte", c > 0 ? c + (c === 1 ? " Land" : " Länder") : "", h ? h + (h === 1 ? " Highlight-Flug" : " Highlight-Flüge") : "", t ? "Thermik in 3D" : "", "Bilanz", "Abspann"].filter(Boolean).join(" · ");
+  })();
+
+  const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
+  useEffect(() => {
+    try { history.pushState({ fvDialog: true }, ""); } catch (e) {}
+    const onPop = () => { if (cancelRef.current) cancelRef.current(); onCloseRef.current(); };
+    window.addEventListener("popstate", onPop);
+    return () => { window.removeEventListener("popstate", onPop); try { if (history.state && history.state.fvDialog) history.back(); } catch (e) {} };
+  }, []);
+  useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
+  useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
+
+  const fileName = "Saison_" + meta.big.replace(/[^0-9A-Za-z]+/g, "-");
+  const chip = (active) => ({ flex:"1 1 auto", minHeight:40, padding:"0 10px", borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
+  const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
+  const lbl = { fontSize:12, color:"rgba(232,244,253,0.6)", marginBottom:6 };
+  const inp = { height:40, borderRadius:8, border:"1px solid rgba(255,255,255,0.2)", background:"rgba(0,0,0,0.25)", color:"#e8f4fd", padding:"0 10px", fontSize:15, boxSizing:"border-box", width:"100%" };
+  const portrait = format === "port";
+  const canShare = result && navigator.canShare && (() => { try { return navigator.canShare({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })] }); } catch { return false; } })();
+  const canStart = valid && stats && stats.count > 0 && musicReady && !mErr;
+  const musicNote = (() => {
+    if (!music) return null;
+    if (mErr) return mErr;
+    if (!mbuf || !plan) return "Musik wird analysiert …";
+    const bpm = plan.an ? Math.round(plan.an.bpm) + " BPM · " : "";
+    const how = plan.natural ? "Ende mit dem Song" : plan.bars ? "endet auf Takt " + plan.bars + " (Taktanfang)" : "";
+    return bpm + "Video " + seasonMMSS(plan.end) + (how ? " – " + how : "") + (plan.short ? " · Song ist kürzer als die Wunschlänge" : "") + (plan.an ? "" : " · Takt nicht erkannt");
+  })();
+
+  return ReactDOM.createPortal(
+    <div data-no-swipe="true" onTouchStart={e => e.stopPropagation()} onTouchMove={e => e.stopPropagation()} onTouchEnd={e => e.stopPropagation()}
+      style={{position:"fixed",inset:0,zIndex:400,background:"#040e20",overflowY:"auto",color:"#e8f4fd",fontFamily:"inherit"}}>
+      <div style={{maxWidth:820,margin:"0 auto",padding:"18px 16px 40px",display:"flex",flexDirection:"column",gap:14}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+          <div style={{fontSize:18,fontWeight:800}}>🎬 Saison-Rückblick</div>
+          <button onClick={()=>{ if (cancelRef.current) cancelRef.current(); onClose(); }} style={{...btn("rgba(255,255,255,0.1)"),height:36}}>✕</button>
+        </div>
+        {stage === "options" && (
+          <>
+            <div>
+              <div style={lbl}>Zeitraum</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {presets.map(p => <button key={p.id} onClick={()=>{ setPresetId(p.id); setFromS(p.from); setToS(p.to); }} style={chip(presetId === p.id && p.from === fromS && p.to === toS)}>{p.label}</button>)}
+              </div>
+              <div style={{display:"flex",gap:8,marginTop:8}}>
+                <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Von<input type="date" value={fromS} onChange={e=>{ if (e.target.value) { setFromS(e.target.value); setPresetId(""); } }} style={inp} /></label>
+                <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Bis<input type="date" value={toS} onChange={e=>{ if (e.target.value) { setToS(e.target.value); setPresetId(""); } }} style={inp} /></label>
+              </div>
+              <div style={{fontSize:13,marginTop:8,color:valid&&stats&&stats.count?"#e8f4fd":"#fca5a5"}}>
+                {!valid ? "„Bis“ muss nach „Von“ liegen." : stats.count ? `${stats.count} Flüge · ${seasonHM(stats.sec)} · ${stats.sites} Orte · ${stats.countries.length} Länder` : "Keine Flüge in diesem Zeitraum."}
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Titel<input value={titleS != null ? titleS : autoTitle} onChange={e=>setTitleS(e.target.value)} style={inp} /></label>
+              <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Grosser Text<input value={bigS != null ? bigS : autoBig} onChange={e=>setBigS(e.target.value)} style={inp} /></label>
+            </div>
+            <div>
+              <div style={lbl}>Länge (ca.)</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>{[60,90,120,150,180].map(d => <button key={d} onClick={()=>setTarget(d)} style={chip(target === d)}>{seasonMMSS(d)} min</button>)}</div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",marginTop:6,lineHeight:1.5}}>
+                {music ? "Mit Musik endet das Video auf einem Taktanfang in der Nähe dieser Länge; die Schnitte liegen auf den Taktschlägen." : "Ohne Musik dauert das Video genau so lange."}
+                {summary && <><br />{summary}</>}
+              </div>
+            </div>
+            <div>
+              <div style={lbl}>Format</div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setFormat("port")} style={chip(format==="port")}>Hoch 9:16</button>
+                <button onClick={()=>setFormat("square")} style={chip(format==="square")}>Quadrat 1:1</button>
+                <button onClick={()=>setFormat("land")} style={chip(format==="land")}>Quer 16:9</button>
+              </div>
+            </div>
+            <VideoMusicPicker music={music} setMusic={setMusic} btn={btn} note="Die Datei bleibt auf deinem Gerät. Wähle den Startpunkt so, dass dort ein ruhiger Einstieg liegt; das Ende wird automatisch auf einen Takt gelegt." />
+            {musicNote && <div style={{fontSize:13,color:mErr?"#fca5a5":"#7dd3fc"}}>♪ {musicNote}</div>}
+            <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
+              Das Video wird Bild für Bild berechnet (feste 30 fps). Das dauert je nach Gerät und Länge einige Minuten — die App dabei im Vordergrund und den Bildschirm eingeschaltet lassen. Karten kommen von MapTiler (Internet nötig).
+            </div>
+            <button disabled={!canStart} onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn(canStart ? "#16a34a" : "rgba(255,255,255,0.12)")}>🎬 Video erstellen ({seasonMMSS(D)} min)</button>
+          </>
+        )}
+        {stage === "render" && (
+          <>
+            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} D={D}
+              music={music && mbuf && plan ? { buf: mbuf, start: music.start, fade: plan.natural ? 0.5 : Math.min(3, Math.max(1.2, plan.an ? plan.an.beatSec * 4 : 2)) } : null}
+              onCancelRef={cancelRef}
+              setStatus={(text, pct) => setProgress({ text, pct })}
+              onDone={(blob, ext, note) => { setResult({ url: URL.createObjectURL(blob), ext, blob, note }); setStage("done"); }}
+              onError={(m) => { setErr(m); setStage("error"); }} />
+            <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
+            <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
+            <button onClick={()=>{ if (cancelRef.current) cancelRef.current(); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Abbrechen</button>
+          </>
+        )}
+        {stage === "done" && result && (
+          <>
+            <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
+            <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+              <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
+              {canShare && <button onClick={()=>{ try { navigator.share({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })], title: meta.title }); } catch {} }} style={btn("#7c3aed")}>Teilen</button>}
+              <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
+            </div>
+            {result.note && <div style={{fontSize:12,color:"#fca5a5"}}>⚠ {result.note}</div>}
+          </>
+        )}
+        {stage === "error" && (
+          <>
+            <div style={{color:"#fca5a5",fontSize:14,lineHeight:1.5}}>Das Video konnte nicht erstellt werden:<br/>{err}</div>
+            <button onClick={()=>setStage("options")} style={btn("rgba(255,255,255,0.12)")}>Zurück</button>
+          </>
+        )}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+// Musikauswahl (Datei oder Musikordner) mit Vorhören und Startpunkt im Song —
+// gemeinsam genutzt vom Flug-Video und vom Saison-Rückblick. `music` und
+// `setMusic` gehören dem Aufrufer ({ file, name, dur, start }); `btn` ist dessen
+// Knopf-Stil; `note` ersetzt den grauen Hinweistext unter der Auswahl.
+function VideoMusicPicker({ music, setMusic, btn, note }) {
   const prevRef = useRef(null);
   const stopPreview = () => { try { if (prevRef.current) { prevRef.current.pause(); URL.revokeObjectURL(prevRef.current.src); } } catch {} prevRef.current = null; };
   useEffect(() => stopPreview, []);
@@ -3037,6 +3809,123 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
     return list.slice(0, 60);
   })();
   const fmtMs = (t) => Math.floor(t / 60) + ":" + String(Math.floor(t % 60)).padStart(2, "0");
+  return (
+            <div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Musik (optional)</div>
+              {!music ? (
+                <div data-no-swipe="1" style={{display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{display:"flex",gap:8}}>
+                    <label style={{...btn("rgba(255,255,255,0.12)"),flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
+                      🎵 Datei wählen
+                      <input type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+                    </label>
+                    {musicFsOk && <button onClick={()=>scanMusic(false)} style={{...btn("rgba(255,255,255,0.12)"),flex:1,fontSize:14}}>🔍 Musikordner durchsuchen</button>}
+                  </div>
+                  {lib && (
+                    <div style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        <div style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>{lib.busy ? "Suche läuft …" : `${lib.items.length} Titel${lib.folder ? " in „" + lib.folder + "“" : ""}`}</div>
+                        <button onClick={()=>scanMusic(true)} style={{...btn("rgba(255,255,255,0.12)"),height:30,fontSize:12,padding:"0 10px"}}>Anderer Ordner</button>
+                        <button onClick={()=>{ setLib(null); setLibQ(""); }} style={{...btn("rgba(255,255,255,0.12)"),height:30,fontSize:12,padding:"0 10px"}}>✕</button>
+                      </div>
+                      {lib.msg && !lib.busy && <div style={{fontSize:12,color:"#fca5a5"}}>{lib.msg}</div>}
+                      {lib.items.length > 0 && <>
+                        <input value={libQ} onChange={e=>setLibQ(e.target.value)} placeholder="Suchen (Titel, Interpret, Ordner) …" style={{height:36,borderRadius:8,border:"1px solid rgba(255,255,255,0.2)",background:"rgba(0,0,0,0.25)",color:"#e8f4fd",padding:"0 10px",fontSize:14}} />
+                        {!libQ.trim() && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>Zuerst Titel mit Flug-Stichwörtern (Wolken, Himmel, fly, up …), danach alphabetisch.</div>}
+                        <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
+                          {libShown.map(({ it, sc }, i) => (
+                            <button key={i} onClick={()=>chooseLibItem(it)} style={{textAlign:"left",border:"none",borderRadius:8,background:sc>0&&!libQ.trim()?"rgba(125,211,252,0.15)":"rgba(255,255,255,0.06)",color:"#e8f4fd",padding:"7px 10px",fontSize:13,cursor:"pointer"}}>
+                              <div style={{fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
+                              {it.path && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.path}</div>}
+                            </button>
+                          ))}
+                          {!libShown.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.5)"}}>Keine Treffer.</div>}
+                        </div>
+                      </>}
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div data-no-swipe="1" style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <div style={{flex:1,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>🎵 {music.name}</div>
+                    <button onClick={previewMusic} style={{...btn("rgba(255,255,255,0.12)"),height:34,fontSize:13}}>▶ Vorhören</button>
+                    <button onClick={()=>{ stopPreview(); setMusic(null); }} style={{...btn("rgba(255,255,255,0.12)"),height:34,fontSize:13}}>✕</button>
+                  </div>
+                  {music.dur > 8 && (
+                    <div>
+                      <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Start im Song: {fmtMs(music.start)} von {fmtMs(music.dur)}</div>
+                      <input type="range" min={0} max={Math.floor(music.dur - 5)} step={1} value={music.start} onChange={e=>{ stopPreview(); setMusic({ ...music, start: +e.target.value }); }} style={{width:"100%"}} />
+                    </div>
+                  )}
+                  <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{note || "Wird auf die Videolänge zugeschnitten, am Anfang eingeblendet und am Ende ausgeblendet. Die Datei bleibt auf deinem Gerät."}</div>
+                </div>
+              )}
+            </div>
+  );
+}
+
+function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
+  const [stage, setStage] = useState("options"); // options | render | done | error
+  const [duration, setDuration] = useState(45);
+  const [format, setFormat] = useState("land"); // land | port | square
+  const portrait = format === "port";
+  const [mode, setMode] = useState("auto"); // auto | manual
+  const [segs, setSegs] = useState([]);
+  const [pending, setPending] = useState({ a: null, b: null });
+  const [mspeed, setMspeed] = useState(10);
+  const [cursor, setCursor] = useState(track[0].timeSec);
+  const manualSecs = segs.reduce((s, x) => s + videoSegSeconds(x), 0);
+  // Vorschläge (aus der automatischen Szenenauswahl) für den manuellen Modus
+  const demRef = useRef(null);
+  const [editId, setEditId] = useState(null);   // gerade im Höhenprofil bearbeiteter Abschnitt
+  const [sugg, setSugg] = useState({ state: "idle", list: [], autoIds: [], msg: "" });
+  const snapSpeed = (flightSec) => { // Geschwindigkeit so wählen, dass die Szene ~9 s dauert
+    const raw = Math.max(1, flightSec / 9); let best = VIDEO_SPEEDS[0];
+    for (const sp of VIDEO_SPEEDS) if (Math.abs(Math.log(sp / raw)) < Math.abs(Math.log(best / raw))) best = sp;
+    return best;
+  };
+  const toSegment = (cd) => ({ id: Date.now() + Math.random(), f0: cd.f0, f1: cd.f1, speed: snapSpeed(cd.f1 - cd.f0), label: cd.label || "",
+    kind: cd.kind, bSide: cd.bSide, heading: cd.heading, lat: cd.lat, lon: cd.lon });
+  const addSugg = (cd) => {
+    const ex = segs.find(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1);
+    if (ex) { setEditId(ex.id); return; }
+    const sg = toSegment(cd);
+    setSegs(list => [...list, sg].sort((x, y) => x.f0 - y.f0));
+    setEditId(sg.id);   // gleich auswählen: Start/Ende werden im Profil sichtbar und lassen sich anpassen
+  };
+  const adoptAuto = () => setSegs(list => {
+    const add = sugg.list.filter(cd => sugg.autoIds.includes(cd.id) && !list.some(s => Math.abs(s.f0 - cd.f0) < 1 && Math.abs(s.f1 - cd.f1) < 1)).map(toSegment);
+    return [...list, ...add].sort((x, y) => x.f0 - y.f0);
+  });
+  const loadSugg = async () => {
+    setSugg(s => ({ ...s, state: "loading", msg: "" }));
+    try {
+      if (!demRef.current) {
+        let dem = null;
+        try { dem = await loadVideoDem(track, mapTilerKey); } catch (e) { console.warn("Flug-Video: Geländedaten nicht verfügbar", e); }
+        demRef.current = dem || { elev: null, tiles: 0, z: 0 };
+      }
+      await new Promise(r => setTimeout(r, 30)); // UI kurz aktualisieren lassen
+      const elev = demRef.current.elev;
+      const cands = computeVideoHighlights(track, elev, 8, false);
+      const auto = computeVideoHighlights(track, elev, 3, true);
+      const n = track.length, t0 = track[0].timeSec, t1 = track[n-1].timeSec, total = t1 - t0;
+      const sL = Math.min(70, total * 0.08), lL = Math.min(80, total * 0.1);
+      const mk = (cd) => ({ ...cd, id: cd.kind + "_" + Math.round(cd.f0) });
+      const startC = mk({ kind: "start", label: "START" + (flight?.site ? " · " + flight.site : ""), f0: t0, f1: t0 + sL, center: t0 + sL / 2, score: 0 });
+      const landC = mk({ kind: "land", label: "LANDUNG", f0: t1 - lL, f1: t1, center: t1 - lL / 2, score: 0 });
+      const list = [startC, ...cands.map(mk), landC].sort((x, y) => x.center - y.center);
+      setSugg({ state: "done", list, autoIds: [startC.id, ...auto.map(a => mk(a).id), landC.id],
+        msg: elev ? "" : "Ohne Geländedaten werden Thermik am Berg, Hangflug und Gipfelüberflug nur eingeschränkt erkannt." });
+    } catch (e) { console.error("Flug-Video: Vorschläge", e); setSugg(s => ({ ...s, state: "error", msg: "Vorschläge konnten nicht berechnet werden: " + (e.message || e) })); }
+  };
+  const [progress, setProgress] = useState({ text: "", pct: 0 });
+  const [result, setResult] = useState(null); // { url, ext, blob }
+  const [err, setErr] = useState("");
+  const cancelRef = useRef(null);
+  // Musik (optional): eigene Audiodatei, wird beim Erstellen in das Video gemischt
+  const [music, setMusic] = useState(null); // { file, name, dur, start }
   // Gespeichertes Video (Variante "Verweis"): in den Daten liegt nur
   // storage "video:<flugId>" = { name, size, ext, created }; die Datei selbst
   // liegt als eigene Datei im Unterordner "videos" des Backup-Ordners
@@ -3164,63 +4053,12 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
                 <button onClick={()=>setFormat("square")} style={chip(format==="square")}>Quadrat 1:1</button>
               </div>
             </div>
-            <div>
-              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Musik (optional)</div>
-              {!music ? (
-                <div data-no-swipe="1" style={{display:"flex",flexDirection:"column",gap:8}}>
-                  <div style={{display:"flex",gap:8}}>
-                    <label style={{...btn("rgba(255,255,255,0.12)"),flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
-                      🎵 Datei wählen
-                      <input type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
-                    </label>
-                    {musicFsOk && <button onClick={()=>scanMusic(false)} style={{...btn("rgba(255,255,255,0.12)"),flex:1,fontSize:14}}>🔍 Musikordner durchsuchen</button>}
-                  </div>
-                  {lib && (
-                    <div style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
-                      <div style={{display:"flex",alignItems:"center",gap:8}}>
-                        <div style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>{lib.busy ? "Suche läuft …" : `${lib.items.length} Titel${lib.folder ? " in „" + lib.folder + "“" : ""}`}</div>
-                        <button onClick={()=>scanMusic(true)} style={{...btn("rgba(255,255,255,0.12)"),height:30,fontSize:12,padding:"0 10px"}}>Anderer Ordner</button>
-                        <button onClick={()=>{ setLib(null); setLibQ(""); }} style={{...btn("rgba(255,255,255,0.12)"),height:30,fontSize:12,padding:"0 10px"}}>✕</button>
-                      </div>
-                      {lib.msg && !lib.busy && <div style={{fontSize:12,color:"#fca5a5"}}>{lib.msg}</div>}
-                      {lib.items.length > 0 && <>
-                        <input value={libQ} onChange={e=>setLibQ(e.target.value)} placeholder="Suchen (Titel, Interpret, Ordner) …" style={{height:36,borderRadius:8,border:"1px solid rgba(255,255,255,0.2)",background:"rgba(0,0,0,0.25)",color:"#e8f4fd",padding:"0 10px",fontSize:14}} />
-                        {!libQ.trim() && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>Zuerst Titel mit Flug-Stichwörtern (Wolken, Himmel, fly, up …), danach alphabetisch.</div>}
-                        <div style={{maxHeight:220,overflowY:"auto",display:"flex",flexDirection:"column",gap:4}}>
-                          {libShown.map(({ it, sc }, i) => (
-                            <button key={i} onClick={()=>chooseLibItem(it)} style={{textAlign:"left",border:"none",borderRadius:8,background:sc>0&&!libQ.trim()?"rgba(125,211,252,0.15)":"rgba(255,255,255,0.06)",color:"#e8f4fd",padding:"7px 10px",fontSize:13,cursor:"pointer"}}>
-                              <div style={{fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
-                              {it.path && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.path}</div>}
-                            </button>
-                          ))}
-                          {!libShown.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.5)"}}>Keine Treffer.</div>}
-                        </div>
-                      </>}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div data-no-swipe="1" style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
-                  <div style={{display:"flex",alignItems:"center",gap:8}}>
-                    <div style={{flex:1,fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>🎵 {music.name}</div>
-                    <button onClick={previewMusic} style={{...btn("rgba(255,255,255,0.12)"),height:34,fontSize:13}}>▶ Vorhören</button>
-                    <button onClick={()=>{ stopPreview(); setMusic(null); }} style={{...btn("rgba(255,255,255,0.12)"),height:34,fontSize:13}}>✕</button>
-                  </div>
-                  {music.dur > 8 && (
-                    <div>
-                      <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Start im Song: {fmtMs(music.start)} von {fmtMs(music.dur)}</div>
-                      <input type="range" min={0} max={Math.floor(music.dur - 5)} step={1} value={music.start} onChange={e=>{ stopPreview(); setMusic({ ...music, start: +e.target.value }); }} style={{width:"100%"}} />
-                    </div>
-                  )}
-                  <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>Wird auf die Videolänge zugeschnitten, am Anfang eingeblendet und am Ende ausgeblendet. Die Datei bleibt auf deinem Gerät.</div>
-                </div>
-              )}
-            </div>
+            <VideoMusicPicker music={music} setMusic={setMusic} btn={btn} />
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
               Ablauf: Zuerst werden die Karten vorgeladen (ca. 20–90 s), dann wird das Video in Echtzeit aufgenommen ({mode === "manual" ? Math.round(manualSecs) : duration} s).
               Während dieser Zeit die App im Vordergrund und den Bildschirm eingeschaltet lassen.
             </div>
-            <button disabled={mode === "manual" && (!segs.length || manualSecs > 300)} onClick={()=>{ stopPreview(); setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={{...btn(mode === "manual" && (!segs.length || manualSecs > 300) ? "rgba(255,255,255,0.12)" : "#16a34a")}}>{mode === "manual" && !segs.length ? "Erst Abschnitte hinzufügen" : "Video erstellen"}</button>
+            <button disabled={mode === "manual" && (!segs.length || manualSecs > 300)} onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={{...btn(mode === "manual" && (!segs.length || manualSecs > 300) ? "rgba(255,255,255,0.12)" : "#16a34a")}}>{mode === "manual" && !segs.length ? "Erst Abschnitte hinzufügen" : "Video erstellen"}</button>
           </>
         )}
         {stage === "render" && (
@@ -3232,7 +4070,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
               onError={(m) => { setErr(m); setStage("error"); }} />
             <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
             <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
-            <button onClick={()=>{ stopPreview(); if (cancelRef.current) cancelRef.current(); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Abbrechen</button>
+            <button onClick={()=>{ if (cancelRef.current) cancelRef.current(); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Abbrechen</button>
           </>
         )}
         {stage === "done" && result && (
@@ -7764,6 +8602,7 @@ function FlugbuchApp() {
   const isWide = useIsWide();
   const isLandscapePhone = useIsLandscapePhone();
   const [flights, setFlights] = useState([]);
+  const [showSeason, setShowSeason] = useState(false); // Saison-Rückblick (Video über mehrere Flüge)
   // MapTiler-Schlüssel, ausschliesslich unter Service → API-Zugangsdaten
   // hinterlegt (kein eingebauter Schlüssel mehr im Code) — ohne Eintrag
   // dort bleiben die Karten leer, siehe die Hinweis-Overlays in
@@ -8842,6 +9681,7 @@ function FlugbuchApp() {
     { key:"import", title:"Import", active:showImportMenu, onClick:()=>{ setShowImportMenu(m=>!m); }, icon:"📥" },
     { key:"select", title:"Auswahl", active:selectMode, onClick:()=>{ setSelectMode(m=>!m); setSelectedIds(new Set()); setCopyMsg(""); }, icon: selectMode?"✕":"☑" },
     { key:"map", title:"Weltkarte", active:false, onClick:()=>setView("worldmap"), icon:"🗺️" },
+    { key:"season", title:"Saison-Rückblick (Video)", active:showSeason, onClick:()=>setShowSeason(true), icon:"🎬" },
     { key:"views", title:"Gespeicherte Darstellungen", active:showViewsMenu, onClick:()=>{ setShowViewsMenu(m=>!m); setShowImportMenu(false); setViewsMode("none"); setSavingViewName(null); }, icon:"💡" },
     { key:"search", title:"Suchen/Sortieren", active:searchRowOpen, onClick:()=>{ setSearchRowOpen(o=>!o); setShowImportMenu(false); }, icon:"🔍" },
   ];
@@ -8855,6 +9695,7 @@ function FlugbuchApp() {
   return (
     <div style={{maxWidth:isWide?1400:(isLandscapePhone?"100%":480),margin:"0 auto",minHeight:"100vh",background:"#040e20",color:"#e8f4fd",fontFamily:"system-ui,sans-serif"}}>
       <input ref={fileRef} type="file" accept=".igc" multiple style={{display:"none"}} onChange={e=>importIGCFiles(Array.from(e.target.files))} />
+      {showSeason && <SeasonVideoDialog flights={flights} mapTilerKey={mapTilerKey} onClose={()=>setShowSeason(false)} />}
 
       {/* Header */}
       <div style={{position:"sticky",top:0,zIndex:10,background:"#040e20"}}>
