@@ -1584,8 +1584,8 @@ function createAltitudeCurtainLayer(pts, groundAt) {
   const vtx = (v, c, a) => data.push(v[0] - cx, v[1] - cy, v[2], c[0], c[1], c[2], a);
   for (let k = 0; k < idx.length - 1; k++) {
     const c = col[k + 1];
-    vtx(top[k], c, 0.5); vtx(bot[k], c, 0.08); vtx(top[k + 1], c, 0.5);
-    vtx(top[k + 1], c, 0.5); vtx(bot[k], c, 0.08); vtx(bot[k + 1], c, 0.08);
+    vtx(top[k], c, 0.6); vtx(bot[k], c, 0.16); vtx(top[k + 1], c, 0.6);
+    vtx(top[k + 1], c, 0.6); vtx(bot[k], c, 0.16); vtx(bot[k + 1], c, 0.16);
   }
   let prog = null, buf = null, drawSegs = idx.length - 1;
   return {
@@ -3054,16 +3054,41 @@ function buildSeasonStats(flights, fromTs, toTs) {
     }
     return [...m.values()].map(g => ({ lat: g.lat / g.n, lon: g.lon / g.n, n: g.n }));
   };
-  const cm = new Map();
-  for (const r of rows) {
-    if (!r.country) continue;
-    const k = r.country.toLowerCase(); const g = cm.get(k) || { name: r.country, n: 0, sec: 0 };
-    g.n++; g.sec += r.sec; cm.set(k, g);
+  // Heimatregion: Land mit den meisten Flügen; Mittelpunkt = dichteste Stelle seiner Startplätze.
+  // Alle Flüge im Umkreis von 300 km gehören dazu (auch über die Landesgrenze); jedes andere Land
+  // bekommt eine eigene "Unterwegs"-Szene mit den Flügen ausserhalb der Heimatregion.
+  const kmBetween = (a, b) => { const r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lon - a.lon) * r; const x = Math.sin(dLa / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) ** 2; return 12742 * Math.asin(Math.sqrt(x)); };
+  const cnt = new Map();
+  for (const r of rows) if (r.country) { const k = r.country.toLowerCase(); cnt.set(k, (cnt.get(k) || 0) + 1); }
+  const homeKey = [...cnt.entries()].sort((a, b) => b[1] - a[1])[0];
+  let homeRows = rows, rest = [];
+  if (homeKey) {
+    const hp = rows.filter(r => r.country.toLowerCase() === homeKey[0] && r.pt);
+    let center = null, bestN = -1;
+    for (const r of hp) { const n = hp.filter(q => kmBetween(r.pt, q.pt) <= 300).length; if (n > bestN) { bestN = n; center = r.pt; } }
+    if (center) {
+      const near = hp.filter(q => kmBetween(center, q.pt) <= 300);
+      center = { lat: near.reduce((a, q) => a + q.pt.lat, 0) / near.length, lon: near.reduce((a, q) => a + q.pt.lon, 0) / near.length };
+    }
+    const inHome = (r) => r.pt && center ? kmBetween(center, r.pt) <= 300 : r.country.toLowerCase() === homeKey[0];
+    homeRows = rows.filter(inHome); rest = rows.filter(r => !inHome(r) && r.country);
   }
+  const groupOf = (rs) => {
+    const m = new Map();
+    for (const r of rs) { if (!r.country) continue; const k = r.country.toLowerCase(); const g = m.get(k) || { name: r.country, n: 0 }; g.n++; m.set(k, g); }
+    return [...m.values()].sort((a, b) => b.n - a.n).map(g => g.name);
+  };
+  const home = homeRows.length ? { countries: groupOf(homeRows), n: homeRows.length, sec: homeRows.reduce((a, r) => a + r.sec, 0), sites: topSites(homeRows), pins: pinsOf(homeRows) } : null;
+  const cm = new Map();
+  for (const r of rest) { const k = r.country.toLowerCase(); const g = cm.get(k) || { name: r.country, n: 0, sec: 0 }; g.n++; g.sec += r.sec; cm.set(k, g); }
   const countries = [...cm.values()].sort((a, b) => b.n - a.n).map(g => {
-    const rs = rows.filter(r => r.country.toLowerCase() === g.name.toLowerCase());
+    const rs = rest.filter(r => r.country.toLowerCase() === g.name.toLowerCase());
     return { ...g, sites: topSites(rs), pins: pinsOf(rs) };
   });
+  const countriesN = new Set(rows.filter(r => r.country).map(r => r.country.toLowerCase())).size;
+  // erster Flug je Startplatz in zeitlicher Reihenfolge (Intro: Pins erscheinen nacheinander)
+  const events = []; { const seen = new Set();
+    for (const r of rows.slice().sort((a, b) => a.ts - b.ts)) { if (!r.pt || !r.site) continue; const k = r.site.toLowerCase(); if (seen.has(k)) continue; seen.add(k); events.push({ name: r.site, ts: r.ts, lat: r.pt.lat, lon: r.pt.lon }); } }
   const siteSet = new Set(rows.filter(r => r.site).map(r => r.site.toLowerCase()));
 
   // Highlight-Flüge (brauchen einen Track): weitester, erstmals besuchter Ort, höchster, längster
@@ -3123,7 +3148,7 @@ function buildSeasonStats(flights, fromTs, toTs) {
 
   return { rows, count: rows.length, sec: rows.reduce((a, r) => a + r.sec, 0),
     days: new Set(rows.map(r => r.f.date || r.f.rawDate)).size, sites: siteSet.size,
-    countries, home: countries[0] || null, pins: pinsOf(rows), topSites: topSites(rows),
+    countries, countriesN, home, events, pins: pinsOf(rows), topSites: topSites(rows),
     highlights: hl, thermals, bestDist: Math.max(0, ...rows.map(r => r.dist)), maxAlt: Math.max(0, ...rows.map(r => r.alt)) };
 }
 
@@ -3238,7 +3263,7 @@ async function prepareSeasonAudio(buf, startSec, D, fadeOut) {
 // (ca. 5 s je Einheit), und verteilt die Zeit. Schnitte rasten auf `beats` ein.
 function buildSeasonScript(st, D, beats) {
   const UNIT = 5.2, W = { c: 1, h: 1.5, t: 1.5 };
-  const cs = st.countries.filter(c => c !== st.home).slice(0, 8), hs = st.highlights.slice(0, 5);
+  const cs = st.countries.slice(0, 8), hs = st.highlights.slice(0, 5);
   const seq = [];
   if (cs.length) seq.push("c"); if (hs.length) seq.push("h"); st.thermals.forEach(() => seq.push("t"));
   for (let r = 1; r < Math.max(cs.length, hs.length); r++) { if (r < cs.length) seq.push("c"); if (r < hs.length) seq.push("h"); }
@@ -3249,8 +3274,8 @@ function buildSeasonScript(st, D, beats) {
     if (k === "c") nc++; else if (k === "h") nh++; else nt++;
   }
   const sc = [{ kind: "intro", map: "globe", w: 1 }];
-  sc.push({ kind: "region", map: "terrain", w: 1, home: true, name: st.home ? st.home.name : "",
-    kicker: st.home ? "DEINE HEIMATREGION" : "DEINE FLÜGE", n: st.home ? st.home.n : st.count,
+  sc.push({ kind: "region", map: "terrain", w: 1, home: true,
+    kicker: st.home ? ["DEINE HEIMATREGION", ...st.home.countries].join(" · ").toUpperCase() : "DEINE FLÜGE", n: st.home ? st.home.n : st.count,
     sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins });
   cs.slice(0, nc).forEach(c => sc.push({ kind: "region", map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
     n: c.n, sec: c.sec, sites: c.sites, pins: c.pins }));
@@ -3354,71 +3379,98 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
       };
       const isGlobeMap = (m) => { try { const p = m.getProjection && m.getProjection(); return !!p && (p === "globe" || p.type === "globe"); } catch { return false; } };
 
-      // Kamera, die ein Punktefeld einpasst (einmal je Szene berechnet; braucht die Geländekarte)
-      const fitFor = (sc, pts, bottomFrac, key, tight) => {
-        key = key || "_fit";
-        if (sc[key]) return sc[key];
+      // ── Kameras ──
+      // Region-, Flug- und Bilanz-Szenen werden aus ihren Punkten berechnet (unabhängig von der Karte),
+      // damit die Kamera zwischen zwei Szenen weich hinüberfliegen kann (flyCam).
+      const CIRC = 40075016.686, R2D = Math.PI / 180;
+      const mpp0 = (lat, zoom) => CIRC * Math.cos(lat * R2D) / (512 * Math.pow(2, zoom));
+      const groundAt = (lon, lat) => { try { const g = main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null; return g != null && isFinite(g) ? g : null; } catch { return null; } };
+      // Zoom so, dass das Punktefeld in den freien Bildteil passt; die Neigung staucht Nord–Süd.
+      const fitCam = (pts, o) => {
         let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
         pts.forEach(p => { a = Math.min(a, p.lon); b = Math.min(b, p.lat); c = Math.max(c, p.lon); d = Math.max(d, p.lat); });
-        const sx = tight ? 0.012 : 0.06, sy = tight ? 0.008 : 0.04;   // Mindestausdehnung (°); Ausschnitte dürfen näher heran
-        if (c - a < sx) { const m = (a + c) / 2; a = m - sx / 2; c = m + sx / 2; }
-        if (d - b < sy) { const m = (b + d) / 2; b = m - sy / 2; d = m + sy / 2; }
-        const cam = main.cameraForBounds([[a, b], [c, d]], { padding: { top: H * 0.1, bottom: H * bottomFrac, left: W * 0.12, right: W * 0.12 }, maxZoom: tight ? 16.5 : 15 });
-        sc[key] = cam ? { center: [cam.center.lng != null ? cam.center.lng : cam.center[0], cam.center.lat != null ? cam.center.lat : cam.center[1]], zoom: cam.zoom }
-          : { center: [(a + c) / 2, (b + d) / 2], zoom: 8 };
-        return sc[key];
+        const la = (b + d) / 2, lo = (a + c) / 2;
+        const dx = Math.max((c - a) * 111320 * Math.cos(la * R2D), o.minSpan), dy = Math.max((d - b) * 111320, o.minSpan);
+        const fore = 0.35 + 0.65 * Math.cos(o.pitch * R2D);
+        const mpp = Math.max(dx / (W * (1 - 2 * o.padX)), dy * fore / (H * (1 - o.top - o.bottom)));
+        return { center: [lo, la], zoom: clamp(Math.log2(CIRC * Math.cos(la * R2D) / (512 * mpp)), 3, o.maxZoom) };
+      };
+      const sceneCam = (sc, u) => {
+        const e = ease(u);
+        if (sc.kind === "flight") {
+          if (!sc._f) sc._f = fitCam(sc.dec, { pitch: 40, top: 0.1, bottom: 0.44, padX: 0.1, minSpan: sc.excerpt ? 500 : 2000, maxZoom: sc.excerpt ? 16 : 14.5 });
+          return { center: sc._f.center, zoom: sc._f.zoom + 0.2 * e, bearing: lerp(-8, 10, u), pitch: lerp(36, 44, e), top: 0.1, bottom: 0.44 };
+        }
+        if (!sc._f) sc._f = fitCam(sc.pins && sc.pins.length ? sc.pins : allPins, { pitch: 38, top: 0.08, bottom: 0.5, padX: 0.1, minSpan: 15000, maxZoom: 11 });
+        return { center: sc._f.center, zoom: sc._f.zoom + 0.25 * e, bearing: lerp(0, sc.kind === "totals" ? 10 : -6, e), pitch: lerp(34, 40, e), top: 0.08, bottom: 0.5 };
+      };
+      // Weicher Kameraflug zwischen zwei Karten-Szenen (ausser Thermik): bei grosser Entfernung zoomt die Kamera zwischendurch heraus
+      const isFly = (a, b) => !!a && !!b && a.map === "terrain" && b.map === "terrain" && a.kind !== "thermal" && b.kind !== "thermal";
+      const flyDur = (sc) => Math.min(1.8, (sc.t1 - sc.t0) * 0.4);
+      const angle = (a, b, f) => a + ((((b - a) % 360) + 540) % 360 - 180) * f;
+      const flyCam = (A, B, f) => {
+        const la = (A.center[1] + B.center[1]) / 2;
+        const dm = Math.hypot((B.center[0] - A.center[0]) * 111320 * Math.cos(la * R2D), (B.center[1] - A.center[1]) * 111320);
+        const zFit = Math.log2(CIRC * Math.cos(la * R2D) / (512 * (Math.max(dm, 1) / (W * 0.8))));
+        const zMid = Math.min(A.zoom, B.zoom, zFit - 0.2);
+        const bump = Math.max(0, (A.zoom + B.zoom) / 2 - zMid) * 4 * f * (1 - f);
+        return { center: [lerp(A.center[0], B.center[0], f), lerp(A.center[1], B.center[1], f)], zoom: lerp(A.zoom, B.zoom, f) - bump,
+          bearing: angle(A.bearing, B.bearing, f), pitch: lerp(A.pitch, B.pitch, f), top: lerp(A.top, B.top, f), bottom: lerp(A.bottom, B.bottom, f) };
       };
       const sceneAt = (t) => {
         let si = scenes.findIndex(x => t < x.t1); if (si < 0) si = scenes.length - 1;
         const sc = scenes[si], len = sc.t1 - sc.t0, tl = clamp(t - sc.t0, 0, len);
-        return { si, sc, tl, len, u: len > 0 ? tl / len : 1 };
+        const prev = si > 0 ? scenes[si - 1] : null, next = si < scenes.length - 1 ? scenes[si + 1] : null;
+        const fly = isFly(prev, sc);
+        return { si, sc, tl, len, u: len > 0 ? tl / len : 1, fly,
+          tx: Math.max(0, tl - (fly ? flyDur(sc) * 0.55 : 0)),                                  // Textzeit: erst nach (halbem) Kameraflug einblenden
+          outA: next && isFly(sc, next) ? clamp((len - tl) / 0.5, 0, 1) : 1 };                 // Text blendet vor dem Flug aus
       };
       const applyScene = (st) => {
         const { sc, u } = st, e = ease(u);
         if (sc.kind === "thermal") {
           if (layerScene !== sc) {
             removeLayer();
-            const ground = (lon, lat) => { try { return main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null; } catch { return null; } };
-            curtain = createAltitudeCurtainLayer(sc.slice, ground); main.addLayer(curtain);
+            curtain = createAltitudeCurtainLayer(sc.slice, groundAt); main.addLayer(curtain);
             altLayer = createAltitudeTrackLayer(sc.slice, 6.5 * s); main.addLayer(altLayer); layerScene = sc;
           }
           // Geländehöhen sind in den ersten Bildern oft noch nicht geladen: Vorhänge einmal neu bauen
           if (curtain && !curtain.usesGround && !sc._rebuilt && st.tl > 0.5) {
             sc._rebuilt = true;
-            const ground = (lon, lat) => { try { return main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null; } catch { return null; } };
-            const nc = createAltitudeCurtainLayer(sc.slice, ground);
+            const nc = createAltitudeCurtainLayer(sc.slice, groundAt);
             if (nc.usesGround) { try { main.removeLayer("track-curtain"); main.addLayer(nc, "track-altitude"); curtain = nc; } catch {} }
           }
           const pr = Math.round(clamp((st.tl - 0.5) / (st.len * 0.78), 0, 1) * (sc.slice.length - 1));
           altLayer.setProgress(pr); curtain.setProgress(pr);
         } else if (layerScene) removeLayer();
-        const pad = { top: 0, bottom: 0, left: 0, right: 0 };
         switch (sc.kind) {
           case "intro":
-            main.jumpTo({ center: [lerp(focus.lon - 100, focus.lon, e), lerp(12, focus.lat, e)], zoom: lerp(zg - 0.4, zg + 0.55, e), bearing: 0, pitch: 0, padding: { ...pad, bottom: H * 0.3 } });
+            main.jumpTo({ center: [lerp(focus.lon - 40, focus.lon, e), lerp(14, 24, e)], zoom: lerp(zg + 0.3, zg + 0.62, e), bearing: 0, pitch: 0, padding: { top: 0, bottom: H * 0.3, left: 0, right: 0 } });
             break;
           case "outro":
-            main.jumpTo({ center: [lerp(focus.lon + 15, focus.lon - 35, u), lerp(focus.lat, 25, e)], zoom: lerp(zg + 0.1, zg - 0.2, e), bearing: 0, pitch: 0, padding: { ...pad, bottom: H * 0.3 } });
+            main.jumpTo({ center: [lerp(focus.lon + 10, focus.lon - 30, u), lerp(24, 18, e)], zoom: lerp(zg + 0.55, zg + 0.35, e), bearing: 0, pitch: 0, padding: { top: 0, bottom: H * 0.3, left: 0, right: 0 } });
             break;
-          case "region": case "totals": {
-            const f = fitFor(sc, sc.pins && sc.pins.length ? sc.pins : allPins, 0.5);
-            main.jumpTo({ center: f.center, zoom: f.zoom + 0.35 * e - 0.1, bearing: lerp(0, sc.kind === "totals" ? 12 : -8, e), pitch: lerp(0, 28, e) });
-            break;
-          }
-          case "flight": {
-            const f = fitFor(sc, sc.dec, 0.44, "_fit", sc.excerpt);
-            main.jumpTo({ center: f.center, zoom: f.zoom - (sc.excerpt ? 0.15 : 0.35), bearing: lerp(-14, 16, u), pitch: lerp(38, 52, e) });
-            break;
-          }
           case "thermal": {
-            const t = sc.slice; let la = 0, lo = 0, mnLa = 90, mxLa = -90, mnLo = 180, mxLo = -180;
-            t.forEach(p => { la += p.lat; lo += p.lon; mnLa = Math.min(mnLa, p.lat); mxLa = Math.max(mxLa, p.lat); mnLo = Math.min(mnLo, p.lon); mxLo = Math.max(mxLo, p.lon); });
-            la /= t.length; lo /= t.length;
-            const hor = Math.max((mxLa - mnLa) * 111320, (mxLo - mnLo) * 111320 * Math.cos(la * Math.PI / 180));
-            const ext = Math.max(hor * 1.15, sc.gain * 0.6) + 120, mpp = ext / (0.78 * Math.min(W, H));
-            const zoom = Math.min(16.2, Math.log2(40075016 * Math.cos(la * Math.PI / 180) / (512 * mpp)));
-            main.jumpTo({ center: [lo, la], zoom, bearing: lerp(10, 130, u), pitch: 54, padding: { ...pad, bottom: H * 0.26 } });
+            // Spur samt Höhe (Boden → Spur) in den freien Bildteil einpassen, leichtes Hineinfahren, kaum Drehung
+            if (!sc._geo) {
+              let la = 0, lo = 0, ma = 0, mnLa = 90, mxLa = -90, mnLo = 180, mxLo = -180, mn = 1e9;
+              sc.slice.forEach(p => { la += p.lat; lo += p.lon; ma += p.gpsAlt; mn = Math.min(mn, p.gpsAlt); mnLa = Math.min(mnLa, p.lat); mxLa = Math.max(mxLa, p.lat); mnLo = Math.min(mnLo, p.lon); mxLo = Math.max(mxLo, p.lon); });
+              const n = sc.slice.length; la /= n; lo /= n;
+              sc._geo = { la, lo, meanAlt: ma / n, minAlt: mn, hor: Math.max((mxLa - mnLa) * 111320, (mxLo - mnLo) * 111320 * Math.cos(la * R2D), 120) };
+            }
+            const g = sc._geo, pitch = 52, sp = Math.sin(pitch * R2D), cp = Math.cos(pitch * R2D);
+            const need = Math.max(g.hor / (W * 0.74), (g.hor * cp + (sc.gain + 80) * sp) / (H * 0.5));
+            const zoom = Math.min(16.2, Math.log2(CIRC * Math.cos(g.la * R2D) / (512 * need))) + lerp(-0.25, 0.1, e);
+            const gr = groundAt(g.lo, g.la), hMid = Math.max(0, (g.meanAlt - (gr != null ? gr : g.minAlt - 40)) / 2);
+            const shift = Math.min(0.35 * H, hMid * sp / mpp0(g.la, zoom));   // Objektmitte liegt über dem Bodenpunkt der Kartenmitte
+            const dy = -0.24 * H + 2 * shift;
+            main.jumpTo({ center: [g.lo, g.la], zoom, bearing: lerp(0, 35, u), pitch, padding: { top: Math.max(0, dy), bottom: Math.max(0, -dy), left: 0, right: 0 } });
             break;
+          }
+          default: {
+            let cam = sceneCam(sc, u);
+            if (st.fly) { const fd = flyDur(sc); if (st.tl < fd) cam = flyCam(sceneCam(scenes[st.si - 1], 1), sceneCam(sc, fd / st.len), ease(st.tl / fd)); }
+            main.jumpTo({ center: cam.center, zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch, padding: { top: H * cam.top, bottom: H * cam.bottom, left: 0, right: 0 } });
           }
         }
       };
@@ -3455,21 +3507,23 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
         g.addColorStop(0, "rgba(4,14,32,0)"); g.addColorStop(1, `rgba(4,14,32,${a})`);
         ctx.fillStyle = g; ctx.fillRect(0, H * from, W, H * (1 - from));
       };
-      const tint = (a) => { ctx.fillStyle = `rgba(4,14,32,${a})`; ctx.fillRect(0, 0, W, H); };
+      const tint = (a) => { ctx.fillStyle = `rgba(12,30,58,${a})`; ctx.fillRect(0, 0, W, H); };   // blaugrauer Schleier: Karte nicht zu hell
+      let curOutA = 1;   // Text/Pins blenden vor einem Kameraflug aus
+      const KICK = "#8fc3e8", TIMEC = "#c5d94a";
       // Einblenden: liefert 0..1 und setzt Transparenz und leichten Aufstieg
       const reveal = (tl, delay) => {
         const r = clamp((tl - delay) / 0.55, 0, 1), e = easeOut(r);
-        ctx.globalAlpha = e; ctx.save(); ctx.translate(0, 16 * s * (1 - e)); return r;
+        ctx.globalAlpha = e * curOutA; ctx.save(); ctx.translate(0, 16 * s * (1 - e)); return r;
       };
       const endReveal = () => { ctx.restore(); ctx.globalAlpha = 1; };
-      const count = (target, tl, delay, dur) => Math.round(target * easeOut(clamp((tl - delay) / (dur || 1.1), 0, 1)));
+      const count = (target, tl, delay, dur) => Math.round(target * Math.pow(clamp((tl - delay) / (dur || 1.1), 0, 1), 0.85));   // nahezu gleichmässiges Hochzählen
       const front = (lon, lat) => {
         if (!isGlobe) return true;
         const c = main.getCenter(), r = Math.PI / 180;
         return Math.sin(lat * r) * Math.sin(c.lat * r) + Math.cos(lat * r) * Math.cos(c.lat * r) * Math.cos((lon - c.lng) * r) > 0.1;
       };
       const pin = (x, y, k) => {
-        ctx.save(); ctx.translate(x, y); ctx.scale(k, k);
+        ctx.save(); ctx.globalAlpha = curOutA; ctx.translate(x, y); ctx.scale(k, k);
         ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 8 * s; ctx.fillStyle = "#dc2626";
         ctx.beginPath(); ctx.arc(0, -17 * s, 11 * s, 0, Math.PI * 2); ctx.fill();
         ctx.beginPath(); ctx.moveTo(-9 * s, -10 * s); ctx.lineTo(0, 0); ctx.lineTo(9 * s, -10 * s); ctx.closePath(); ctx.fill();
@@ -3477,7 +3531,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
         ctx.restore();
       };
       const dot = (x, y, r, k) => {
-        ctx.save(); ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 16 * s; ctx.fillStyle = SEASON_ACCENT;
+        ctx.save(); ctx.globalAlpha = curOutA; ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 16 * s; ctx.fillStyle = SEASON_ACCENT;
         ctx.beginPath(); ctx.arc(x, y, r * k, 0, Math.PI * 2); ctx.fill();
         ctx.shadowBlur = 0; ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 2.2 * s; ctx.stroke(); ctx.restore();
       };
@@ -3491,7 +3545,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
           if (kind === "pin") pin(q.x, q.y, k * (0.9 + Math.min(0.5, p.n / 40))); else dot(q.x, q.y, 8 * s * (0.9 + Math.min(0.6, p.n / 30)), k);
         });
       };
-      const kicker = (txt, y, tl, delay) => { reveal(tl, delay); T(txt, mg, y, 21 * s, 800, SEASON_ACCENT, "left", 3 * s); endReveal(); };
+      const kicker = (txt, y, tl, delay) => { reveal(tl, delay); T(txt, mg, y, Math.min(21 * s, fitSize(txt, 21 * s, 800, W - 2 * mg - 3 * s * txt.length)), 800, KICK, "left", 3 * s); endReveal(); };
       const bigNum = (n, suffix, y, size, tl, delay) => {
         reveal(tl, delay);
         const num = seasonInt(n); ctx.font = `900 ${size}px ${FONT}`;
@@ -3501,14 +3555,43 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
         endReveal();
       };
 
+      // Intro: Pins erscheinen in zeitlicher Reihenfolge der Startplätze, oben läuft die Liste der letzten Besuche mit
+      const events = stats.events && stats.events.length ? stats.events : allPins.map((p, i) => ({ name: "", ts: 0, lat: p.lat, lon: p.lon }));
+      const introEvents = (tl, len, kind) => {
+        const N = events.length, t0 = 0.6, span = Math.max(1.5, len * 0.72);
+        const shown = clamp(Math.floor((tl - t0) / span * N) + 1, 0, N);
+        events.forEach((ev, i) => {
+          const k = easeOut(clamp((tl - (t0 + i / N * span)) / 0.45, 0, 1));
+          if (k <= 0 || !front(ev.lon, ev.lat)) return;
+          const q = main.project([ev.lon, ev.lat]);
+          if (q.x < -40 || q.x > W + 40 || q.y < -60 || q.y > H + 40) return;
+          pin(q.x, q.y, k);
+        });
+        for (let r = 0; r < 4; r++) {
+          const i = shown - 4 + r;
+          if (i < 0 || !events[i] || !events[i].name) continue;
+          const a = 0.35 + 0.65 * (r + 1) / 4, y = 96 * s + r * 44 * s;
+          ctx.globalAlpha = a;
+          T(events[i].name, mg, y, 27 * s, r === 3 ? 800 : 600, "#fff", "left");
+          if (events[i].ts) T(seasonDay(events[i].ts), W - mg, y, 21 * s, 600, "rgba(232,244,253,0.8)", "right");
+          ctx.globalAlpha = 1;
+        }
+      };
+
       const drawScene = (t, st) => {
-        const { sc, tl, len, u } = st, bot = H - 78 * s;
-        ctx.drawImage(frameCopy, 0, 0, W, H);
+        const { sc, len, u } = st, tl = st.tx, tl0 = st.tl, bot = H - 78 * s;   // tl: Textzeit (nach dem Kameraflug), tl0: Szenenzeit
+        curOutA = st.outA;
+        if (sc.map === "globe") {
+          // Weltraum als blauer Verlauf (die Karte liefert dort Schwarz): "lighten" lässt nur dunklere Stellen durch
+          const bg = ctx.createLinearGradient(0, 0, 0, H); bg.addColorStop(0, "#020b22"); bg.addColorStop(0.55, "#0b2f66"); bg.addColorStop(1, "#041030");
+          ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+          ctx.globalCompositeOperation = "lighten"; ctx.drawImage(frameCopy, 0, 0, W, H); ctx.globalCompositeOperation = "source-over";
+        } else ctx.drawImage(frameCopy, 0, 0, W, H);
         switch (sc.kind) {
           case "intro": {
-            tint(0.06); grad(0.45, 0.8);
-            pinsOn(allPins, tl, "pin");
-            const stats1 = [stats.count + (stats.count === 1 ? " Flug" : " Flüge"), stats.sites ? stats.sites + (stats.sites === 1 ? " Ort" : " Orte") : "", stats.countries.length ? stats.countries.length + (stats.countries.length === 1 ? " Land" : " Länder") : ""].filter(Boolean).join(" · ");
+            grad(0.5, 0.75);
+            introEvents(tl, len, "pin");
+            const stats1 = [stats.count + (stats.count === 1 ? " Flug" : " Flüge"), stats.sites ? stats.sites + (stats.sites === 1 ? " Ort" : " Orte") : "", stats.countriesN ? stats.countriesN + (stats.countriesN === 1 ? " Land" : " Länder") : ""].filter(Boolean).join(" · ");
             const yS = bot, bigSize = fitSize(meta.big, 170 * s, 900, W - 2 * mg), yB = yS - 62 * s, yT = yB - bigSize * 0.74 - 26 * s, yP = yT - 72 * s * 0.8 - 18 * s;
             reveal(tl, 0.2); T(meta.period.toUpperCase(), mg, yP, 19 * s, 700, "rgba(232,244,253,0.85)", "left", 2.5 * s); endReveal();
             reveal(tl, 0.45); T(meta.title, mg, yT, fitSize(meta.title, 72 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
@@ -3517,13 +3600,14 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             break;
           }
           case "region": {
-            tint(0.08); grad(0.38, 0.82);
+            tint(0.34); grad(0.55, 0.6);
             pinsOn(sc.pins, tl, "dot");
+            const cdur = Math.max(2, len * 0.62);
             const rows = sc.sites.slice(0, 3), rowH = 54 * s, yRows = bot - (rows.length - 1) * rowH;
             const yTime = yRows - (rows.length ? 56 * s : 0) , yBig = yTime - 56 * s, yK = yBig - 150 * s * 0.74 - 20 * s;
             kicker(sc.kicker, yK, tl, 0.15);
-            bigNum(count(sc.n, tl, 0.3), sc.n === 1 ? "Flug" : "Flüge", yBig, 150 * s, tl, 0.3);
-            reveal(tl, 0.7); T(seasonHM(sc.sec * easeOut(clamp((tl - 0.7) / 1.1, 0, 1))) + " in der Luft", mg, yTime, 28 * s, 700, SEASON_ACCENT); endReveal();
+            bigNum(count(sc.n, tl, 0.3, cdur), sc.n === 1 ? "Flug" : "Flüge", yBig, 150 * s, tl, 0.3);
+            reveal(tl, 0.7); T(seasonHM(sc.sec * Math.pow(clamp((tl - 0.3) / cdur, 0, 1), 0.85)) + " in der Luft", mg, yTime, 28 * s, 700, TIMEC); endReveal();
             rows.forEach((r, i) => {
               reveal(tl, 1.0 + i * 0.25);
               const y = yRows + i * rowH;
@@ -3535,17 +3619,17 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             break;
           }
           case "flight": {
-            grad(0.45, 0.8);
+            tint(0.3); grad(0.5, 0.62);
             const track = sc.track, t0 = track[0].timeSec, t1 = track[track.length - 1].timeSec;
-            const p = clamp((tl - 0.4) / Math.max(0.5, len - 1.3), 0, 1), tc = t0 + (t1 - t0) * p;
+            const p = clamp((tl0 - 0.4) / Math.max(0.5, len - 1.3), 0, 1), tc = t0 + (t1 - t0) * p;
             const pts = [];
             for (const q of sc.dec) { if (q.timeSec > tc) break; pts.push(main.project([q.lon, q.lat])); }
             const cur = videoPosAt(track, tc), cp = main.project([cur.lon, cur.lat]);
             pts.push(cp);
-            ctx.save(); ctx.lineJoin = "round"; ctx.lineCap = "round";
+            ctx.save(); ctx.globalAlpha = curOutA; ctx.lineJoin = "round"; ctx.lineCap = "round";
             ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
             ctx.strokeStyle = "rgba(4,14,32,0.55)"; ctx.lineWidth = 8 * s; ctx.stroke();
-            ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 12 * s; ctx.strokeStyle = "#d9f99d"; ctx.lineWidth = 4 * s; ctx.stroke();
+            ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 10 * s; ctx.strokeStyle = "#e4f9b5"; ctx.lineWidth = 3.2 * s; ctx.stroke();
             ctx.restore();
             dot(cp.x, cp.y, 9 * s, 1);
             const yS = bot, yL = yS - 56 * s * 0.9 - 12 * s, ySub = yL - 36 * s, yT = ySub - 40 * s - 8 * s * 0, yK = yT - 84 * s * 0.72 - 14 * s;
@@ -3565,12 +3649,14 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             break;
           }
           case "thermal": {
-            grad(0.38, 0.84);
-            const p = easeOut(clamp((tl - 0.5) / (len * 0.78), 0, 1)), strong = sc.type === "strong";
+            tint(0.3); grad(0.5, 0.62);
+            // Zähler folgt dem tatsächlich bereits gestiegenen Höhengewinn der gezeichneten Spur
+            const pr = Math.round(clamp((tl0 - 0.5) / (len * 0.78), 0, 1) * (sc.slice.length - 1)), strong = sc.type === "strong";
+            const gNow = clamp(sc.slice[pr].gpsAlt - sc.slice[sc.from].gpsAlt, 0, sc.gain), p = sc.gain > 0 ? gNow / sc.gain : 0;
             const yS = bot, ySub = yS - 6 * s, yB = ySub - 50 * s, yK = yB - 150 * s * 0.74 - 20 * s;
             kicker(strong ? "STÄRKSTE THERMIK" : "LÄNGSTE THERMIK · MEISTE HÖHENMETER", yK, tl, 0.2);
             reveal(tl, 0.35);
-            const num = strong ? (sc.avg * p).toFixed(1) : "+" + seasonInt(sc.gain * p), unit = strong ? "m/s" : "m";
+            const num = strong ? (sc.avg * Math.min(1, p * 1.25)).toFixed(1) : "+" + seasonInt(gNow), unit = strong ? "m/s" : "m";
             ctx.font = `900 ${150 * s}px ${FONT}`;
             const w = ctx.measureText(num).width;
             T(num, mg, yB, 150 * s, 900, SEASON_ACCENT); T(unit, mg + w + 12 * s, yB, 150 * s * 0.36, 800, SEASON_ACCENT);
@@ -3580,18 +3666,18 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             break;
           }
           case "totals": {
-            tint(0.12); grad(0.34, 0.84);
+            tint(0.38); grad(0.45, 0.66);
             const pl = (n, a, b) => n === 1 ? a : b, hrs = Math.round(stats.sec / 3600);
-            const rows = [[stats.count, pl(stats.count, "Flug", "Flüge")], [hrs, pl(hrs, "Stunde in der Luft", "Stunden in der Luft")], [stats.days, pl(stats.days, "Flugtag", "Flugtage")], [stats.countries.length, pl(stats.countries.length, "Land", "Länder")]].filter(r => r[0] > 0);
+            const rows = [[stats.count, pl(stats.count, "Flug", "Flüge")], [hrs, pl(hrs, "Stunde in der Luft", "Stunden in der Luft")], [stats.days, pl(stats.days, "Flugtag", "Flugtage")], [stats.countriesN, pl(stats.countriesN, "Land", "Länder")]].filter(r => r[0] > 0);
             const pitch = 128 * s, last = bot, yK = last - (rows.length - 1) * pitch - 120 * s * 0.74 - 34 * s;
             kicker("DEINE SAISON " + meta.big.toUpperCase(), yK, tl, 0.1);
             rows.forEach((r, i) => { const y = last - (rows.length - 1 - i) * pitch; bigNum(count(r[0], tl, 0.3 + i * 0.4, 1), r[1], y, 110 * s, tl, 0.3 + i * 0.4); });
             break;
           }
           case "outro": {
-            tint(0.06); grad(0.45, 0.82);
-            pinsOn(allPins, 9, "pin");
-            const yThanks = bot, items = [[stats.count, "FLÜGE"], [Math.round(stats.sec / 3600), "STUNDEN"], [stats.days, "FLUGTAGE"], [stats.countries.length, "LÄNDER"]].filter(r => r[0] > 0);
+            grad(0.5, 0.78);
+            pinsOn(allPins, 99, "pin");
+            const yThanks = bot, items = [[stats.count, "FLÜGE"], [Math.round(stats.sec / 3600), "STUNDEN"], [stats.days, "FLUGTAGE"], [stats.countriesN, "LÄNDER"]].filter(r => r[0] > 0);
             const yN = yThanks - 70 * s, yTitle = yN - 54 * s - 50 * s, yK = yTitle - 84 * s * 0.75 - 18 * s;
             kicker("SAISON " + meta.big.toUpperCase(), yK, tl, 0.2);
             reveal(tl, 0.4); T(meta.title, mg, yTitle, fitSize(meta.title, 84 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
@@ -3610,7 +3696,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
         ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1;   // nie einen Zeichenzustand ins nächste Bild mitnehmen
         drawScene(t, st);
         // weiche Überblendung vom letzten Bild der vorigen Szene
-        if (st.si > 0 && st.tl < 0.7) { ctx.globalAlpha = 1 - st.tl / 0.7; ctx.drawImage(prevSnap, 0, 0); ctx.globalAlpha = 1; }
+        if (st.si > 0 && st.tl < 0.7 && !st.fly) { ctx.globalAlpha = 1 - st.tl / 0.7; ctx.drawImage(prevSnap, 0, 0); ctx.globalAlpha = 1; }
         const fade = Math.max(clamp(1 - t / 0.5, 0, 1), clamp(1 - (D - t) / 0.8, 0, 1));
         if (fade > 0) { ctx.fillStyle = `rgba(0,0,0,${fade})`; ctx.fillRect(0, 0, W, H); }
       };
@@ -3805,7 +3891,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
                 <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Bis<input type="date" value={toS} onChange={e=>{ if (e.target.value) { setToS(e.target.value); setPresetId(""); } }} style={inp} /></label>
               </div>
               <div style={{fontSize:13,marginTop:8,color:valid&&stats&&stats.count?"#e8f4fd":"#fca5a5"}}>
-                {!valid ? "„Bis“ muss nach „Von“ liegen." : stats.count ? `${stats.count} Flüge · ${seasonHM(stats.sec)} · ${stats.sites} Orte · ${stats.countries.length} Länder` : "Keine Flüge in diesem Zeitraum."}
+                {!valid ? "„Bis“ muss nach „Von“ liegen." : stats.count ? `${stats.count} Flüge · ${seasonHM(stats.sec)} · ${stats.sites} Orte · ${stats.countriesN} Länder` : "Keine Flüge in diesem Zeitraum."}
               </div>
             </div>
             <div style={{display:"flex",gap:8}}>
