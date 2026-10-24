@@ -2945,20 +2945,23 @@ function seasonCleanTrack(track) {
   return tr.length >= 30 ? tr : null;
 }
 
-// Stärkster Höhengewinn innerhalb von maxWin Sekunden (mit mindestens 0.8 m/s im Schnitt).
-function seasonBestClimb(tr, maxWin = 420) {
+// Steigflug-Suche über Fenster von minDt bis maxWin Sekunden: byRate = höchster Schnitt (m/s),
+// sonst grösster Höhengewinn; minAvg/minGain schliessen Zufallstreffer aus.
+function seasonBestClimb(tr, o) {
   const n = tr.length; let best = null;
   for (let i = 0; i < n - 5; i += 3) {
     const t0 = tr[i].timeSec, a0 = tr[i].gpsAlt;
     for (let k = i + 5; k < n; k++) {
       const dt = tr[k].timeSec - t0;
-      if (dt < 0 || dt > maxWin) break;
-      if (dt < 60) continue;
-      const g = tr[k].gpsAlt - a0;
-      if (g > 0 && g / dt >= 0.8 && (!best || g > best.gain)) best = { i0: i, i1: k, gain: g, secs: dt };
+      if (dt < 0 || dt > o.maxWin) break;
+      if (dt < o.minDt) continue;
+      const g = tr[k].gpsAlt - a0, avg = g / dt;
+      if (g < o.minGain || avg < o.minAvg) continue;
+      const v = o.byRate ? avg : g;
+      if (!best || v > best.v) best = { i0: i, i1: k, gain: g, secs: dt, avg, v };
     }
   }
-  return best && { ...best, avg: best.gain / best.secs };
+  return best;
 }
 
 // Zahlen und Listen für den Zeitraum [fromTs, toTs] (toTs inklusive).
@@ -3019,18 +3022,29 @@ function buildSeasonStats(flights, fromTs, toTs) {
   take(best(withTrack, x => x.r.sec), "LÄNGSTER FLUG");
   take(free().find(x => !first1 || x.r.site.toLowerCase() !== first1.r.site.toLowerCase()), "ZUM ERSTEN MAL HIER");
 
-  // stärkste Thermik: nur die Flüge mit dem grössten Höhengewinn durchsuchen
-  let thermal = null;
-  for (const x of withTrack.slice().sort((a, b) => (b.r.f.totalGain || 0) - (a.r.f.totalGain || 0)).slice(0, 15)) {
-    const c = seasonBestClimb(x.track);
-    if (c && (!thermal || c.gain > thermal.gain)) thermal = { ...c, r: x.r, track: x.track };
+  // Thermik-Szenen: stärkste (bester Schnitt in m/s) und längste (meiste Höhenmeter am Stück).
+  // Durchsucht werden die Flüge mit dem grössten Höhengewinn bzw. dem stärksten Steigen.
+  const num = (v) => parseFloat(String(v || "").replace(",", ".")) || 0;
+  const pool = new Set([...withTrack.slice().sort((a, b) => (b.r.f.totalGain || 0) - (a.r.f.totalGain || 0)).slice(0, 15),
+    ...withTrack.slice().sort((a, b) => num((b.r.f.customFields || {}).maxSteigen20) - num((a.r.f.customFields || {}).maxSteigen20)).slice(0, 15)]);
+  let strong = null, long = null;
+  for (const x of pool) {
+    const c1 = seasonBestClimb(x.track, { maxWin: 150, minDt: 40, minAvg: 1.5, minGain: 60, byRate: true });
+    if (c1 && (!strong || c1.v > strong.v)) strong = { ...c1, r: x.r, track: x.track, type: "strong" };
+    const c2 = seasonBestClimb(x.track, { maxWin: 1200, minDt: 60, minAvg: 0.6, minGain: 150, byRate: false });
+    if (c2 && (!long || c2.v > long.v)) long = { ...c2, r: x.r, track: x.track, type: "long" };
   }
-  if (thermal && thermal.gain < 150) thermal = null;
+  // fast identische Stelle nur einmal zeigen (dann die längere Variante)
+  if (strong && long && strong.r.f.id === long.r.f.id) {
+    const ov = Math.min(strong.i1, long.i1) - Math.max(strong.i0, long.i0);
+    if (ov > 0.6 * (strong.i1 - strong.i0)) strong = null;
+  }
+  const thermals = [strong, long].filter(Boolean);
 
   return { rows, count: rows.length, sec: rows.reduce((a, r) => a + r.sec, 0),
     days: new Set(rows.map(r => r.f.date || r.f.rawDate)).size, sites: siteSet.size,
     countries, home: countries[0] || null, pins: pinsOf(rows), topSites: topSites(rows),
-    highlights: hl, thermal, bestDist: Math.max(0, ...rows.map(r => r.dist)), maxAlt: Math.max(0, ...rows.map(r => r.alt)) };
+    highlights: hl, thermals, bestDist: Math.max(0, ...rows.map(r => r.dist)), maxAlt: Math.max(0, ...rows.map(r => r.alt)) };
 }
 
 // ── Musik: Takt erkennen und ein passendes Ende wählen ──────────────────
@@ -3146,13 +3160,13 @@ function buildSeasonScript(st, D, beats) {
   const UNIT = 5.2, W = { c: 1, h: 1.5, t: 1.5 };
   const cs = st.countries.filter(c => c !== st.home).slice(0, 8), hs = st.highlights.slice(0, 5);
   const seq = [];
-  if (cs.length) seq.push("c"); if (hs.length) seq.push("h"); if (st.thermal) seq.push("t");
+  if (cs.length) seq.push("c"); if (hs.length) seq.push("h"); st.thermals.forEach(() => seq.push("t"));
   for (let r = 1; r < Math.max(cs.length, hs.length); r++) { if (r < cs.length) seq.push("c"); if (r < hs.length) seq.push("h"); }
-  let budget = D / UNIT - 4.4, nc = 0, nh = 0, th = false;
+  let budget = D / UNIT - 4.4, nc = 0, nh = 0, nt = 0;
   for (const k of seq) {
     if (budget < W[k] - 0.01) continue;
     budget -= W[k];
-    if (k === "c") nc++; else if (k === "h") nh++; else th = true;
+    if (k === "c") nc++; else if (k === "h") nh++; else nt++;
   }
   const sc = [{ kind: "intro", map: "globe", w: 1 }];
   sc.push({ kind: "region", map: "terrain", w: 1, home: true, name: st.home ? st.home.name : "",
@@ -3168,11 +3182,11 @@ function buildSeasonScript(st, D, beats) {
     sc.push({ kind: "flight", map: "terrain", w: 1.5, kicker: h.label, title: h.r.site || "Flug", sub: parts.join(" · "),
       track: tr, dec, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 : null });
   });
-  if (th && st.thermal) {
-    const T = st.thermal, a = Math.max(0, T.i0 - 20), z = Math.min(T.track.length, T.i1 + 21), slice = T.track.slice(a, z);
-    sc.push({ kind: "thermal", map: "terrain", w: 1.5, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
+  st.thermals.slice(0, nt).forEach(T => {
+    const a = Math.max(0, T.i0 - 20), z = Math.min(T.track.length, T.i1 + 21), slice = T.track.slice(a, z);
+    sc.push({ kind: "thermal", map: "terrain", w: 1.5, type: T.type, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
       place: [T.r.site, seasonDay(T.r.ts)].filter(Boolean).join(" · ") });
-  }
+  });
   sc.push({ kind: "totals", map: "terrain", w: 1.2, pins: st.pins });
   sc.push({ kind: "outro", map: "globe", w: 1.2 });
   // Zeiten verteilen und auf Schläge einrasten
@@ -3190,7 +3204,7 @@ function buildSeasonScript(st, D, beats) {
 
 const seasonMapStyle = (sdk) => {
   const M = sdk.MapStyle || {};
-  return (M.OUTDOOR && (M.OUTDOOR.DARK || M.OUTDOOR)) || (M.BACKDROP && (M.BACKDROP.DARK || M.BACKDROP)) || M.OUTDOOR;
+  return M.OUTDOOR || (M.BACKDROP && M.BACKDROP.DEFAULT) || M.BACKDROP;
 };
 const seasonWaitLoad = (map) => new Promise((res, rej) => {
   if (map.loaded()) { res(); return; }
@@ -3398,9 +3412,9 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
         ctx.drawImage(frameCopy, 0, 0, W, H);
         switch (sc.kind) {
           case "intro": {
-            tint(0.22); grad(0.45, 0.85);
+            tint(0.06); grad(0.45, 0.8);
             pinsOn(allPins, tl, "pin");
-            const stats1 = [stats.count + " Flüge", stats.sites ? stats.sites + " Orte" : "", stats.countries.length ? stats.countries.length + " Länder" : ""].filter(Boolean).join(" · ");
+            const stats1 = [stats.count + (stats.count === 1 ? " Flug" : " Flüge"), stats.sites ? stats.sites + (stats.sites === 1 ? " Ort" : " Orte") : "", stats.countries.length ? stats.countries.length + (stats.countries.length === 1 ? " Land" : " Länder") : ""].filter(Boolean).join(" · ");
             const yS = bot, bigSize = fitSize(meta.big, 170 * s, 900, W - 2 * mg), yB = yS - 62 * s, yT = yB - bigSize * 0.74 - 26 * s, yP = yT - 72 * s * 0.8 - 18 * s;
             reveal(tl, 0.2); T(meta.period.toUpperCase(), mg, yP, 19 * s, 700, "rgba(232,244,253,0.85)", "left", 2.5 * s); endReveal();
             reveal(tl, 0.45); T(meta.title, mg, yT, fitSize(meta.title, 72 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
@@ -3409,12 +3423,12 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             break;
           }
           case "region": {
-            tint(0.3); grad(0.3, 0.9);
+            tint(0.08); grad(0.38, 0.82);
             pinsOn(sc.pins, tl, "dot");
             const rows = sc.sites.slice(0, 3), rowH = 54 * s, yRows = bot - (rows.length - 1) * rowH;
             const yTime = yRows - (rows.length ? 56 * s : 0) , yBig = yTime - 56 * s, yK = yBig - 150 * s * 0.74 - 20 * s;
             kicker(sc.kicker, yK, tl, 0.15);
-            bigNum(count(sc.n, tl, 0.3), "Flüge", yBig, 150 * s, tl, 0.3);
+            bigNum(count(sc.n, tl, 0.3), sc.n === 1 ? "Flug" : "Flüge", yBig, 150 * s, tl, 0.3);
             reveal(tl, 0.7); T(seasonHM(sc.sec * easeOut(clamp((tl - 0.7) / 1.1, 0, 1))) + " in der Luft", mg, yTime, 28 * s, 700, SEASON_ACCENT); endReveal();
             rows.forEach((r, i) => {
               reveal(tl, 1.0 + i * 0.25);
@@ -3427,7 +3441,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             break;
           }
           case "flight": {
-            grad(0.45, 0.9);
+            grad(0.45, 0.8);
             const track = sc.track, t0 = track[0].timeSec, t1 = track[track.length - 1].timeSec;
             const p = clamp((tl - 0.4) / Math.max(0.5, len - 1.3), 0, 1), tc = t0 + (t1 - t0) * p;
             const pts = [];
@@ -3457,29 +3471,31 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             break;
           }
           case "thermal": {
-            grad(0.45, 0.88);
-            const p = easeOut(clamp((tl - 0.5) / (len * 0.78), 0, 1));
+            grad(0.38, 0.84);
+            const p = easeOut(clamp((tl - 0.5) / (len * 0.78), 0, 1)), strong = sc.type === "strong";
             const yS = bot, ySub = yS - 6 * s, yB = ySub - 50 * s, yK = yB - 150 * s * 0.74 - 20 * s;
-            kicker("THERMIK AUS DER NÄHE", yK, tl, 0.2);
+            kicker(strong ? "STÄRKSTE THERMIK" : "LÄNGSTE THERMIK · MEISTE HÖHENMETER", yK, tl, 0.2);
             reveal(tl, 0.35);
-            const num = "+" + seasonInt(sc.gain * p); ctx.font = `900 ${150 * s}px ${FONT}`;
+            const num = strong ? (sc.avg * p).toFixed(1) : "+" + seasonInt(sc.gain * p), unit = strong ? "m/s" : "m";
+            ctx.font = `900 ${150 * s}px ${FONT}`;
             const w = ctx.measureText(num).width;
-            T(num, mg, yB, 150 * s, 900, SEASON_ACCENT); T("m", mg + w + 12 * s, yB, 150 * s * 0.36, 800, SEASON_ACCENT);
-            T("in " + seasonMMSS(sc.secs) + " min · Ø " + sc.avg.toFixed(1) + " m/s", mg, ySub - 8 * s + 0, 27 * s, 700, "#fff");
+            T(num, mg, yB, 150 * s, 900, SEASON_ACCENT); T(unit, mg + w + 12 * s, yB, 150 * s * 0.36, 800, SEASON_ACCENT);
+            T(strong ? "+" + seasonInt(sc.gain) + " m in " + seasonMMSS(sc.secs) + " min" : "in " + seasonMMSS(sc.secs) + " min · Ø " + sc.avg.toFixed(1) + " m/s", mg, ySub - 8 * s, 27 * s, 700, "#fff");
             T(sc.place, mg, yS + 34 * s, 22 * s, 600, "rgba(232,244,253,0.7)");
             endReveal();
             break;
           }
           case "totals": {
-            tint(0.4); grad(0.3, 0.9);
-            const rows = [[stats.count, "Flüge"], [Math.round(stats.sec / 3600), "Stunden in der Luft"], [stats.days, "Flugtage"], [stats.countries.length, "Länder"]].filter(r => r[0] > 0);
+            tint(0.12); grad(0.34, 0.84);
+            const pl = (n, a, b) => n === 1 ? a : b, hrs = Math.round(stats.sec / 3600);
+            const rows = [[stats.count, pl(stats.count, "Flug", "Flüge")], [hrs, pl(hrs, "Stunde in der Luft", "Stunden in der Luft")], [stats.days, pl(stats.days, "Flugtag", "Flugtage")], [stats.countries.length, pl(stats.countries.length, "Land", "Länder")]].filter(r => r[0] > 0);
             const pitch = 128 * s, last = bot, yK = last - (rows.length - 1) * pitch - 120 * s * 0.74 - 34 * s;
             kicker("DEINE SAISON " + meta.big.toUpperCase(), yK, tl, 0.1);
             rows.forEach((r, i) => { const y = last - (rows.length - 1 - i) * pitch; bigNum(count(r[0], tl, 0.3 + i * 0.4, 1), r[1], y, 110 * s, tl, 0.3 + i * 0.4); });
             break;
           }
           case "outro": {
-            tint(0.22); grad(0.45, 0.88);
+            tint(0.06); grad(0.45, 0.82);
             pinsOn(allPins, 9, "pin");
             const yThanks = bot, items = [[stats.count, "FLÜGE"], [Math.round(stats.sec / 3600), "STUNDEN"], [stats.days, "FLUGTAGE"], [stats.countries.length, "LÄNDER"]].filter(r => r[0] > 0);
             const yN = yThanks - 70 * s, yTitle = yN - 54 * s - 50 * s, yK = yTitle - 84 * s * 0.75 - 18 * s;
@@ -3623,8 +3639,8 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats) : [], [stats, D, plan]);
   const summary = (() => {
     if (!script.length) return "";
-    const c = script.filter(x => x.kind === "region").length - 1, h = script.filter(x => x.kind === "flight").length, t = script.some(x => x.kind === "thermal");
-    return ["Intro", stats.home ? "Heimatregion" : "Karte", c > 0 ? c + (c === 1 ? " Land" : " Länder") : "", h ? h + (h === 1 ? " Highlight-Flug" : " Highlight-Flüge") : "", t ? "Thermik in 3D" : "", "Bilanz", "Abspann"].filter(Boolean).join(" · ");
+    const c = script.filter(x => x.kind === "region").length - 1, h = script.filter(x => x.kind === "flight").length, t = script.filter(x => x.kind === "thermal").length;
+    return ["Intro", stats.home ? "Heimatregion" : "Karte", c > 0 ? c + (c === 1 ? " Land" : " Länder") : "", h ? h + (h === 1 ? " Highlight-Flug" : " Highlight-Flüge") : "", t ? (t === 1 ? "Thermik in 3D" : t + " Thermik-Szenen in 3D") : "", "Bilanz", "Abspann"].filter(Boolean).join(" · ");
   })();
 
   const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
