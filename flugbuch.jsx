@@ -534,6 +534,26 @@ function findRawManeuverRuns(track) {
   return runs;
 }
 
+// Kursänderung je Trackpunkt (Grad) aus geglätteten Kursen: Der Kurs eines Punkts ist die Richtung zwischen seinen
+// Nachbarn ±halfSec Sekunden davor/danach. Die IGC-Koordinaten sind auf 0,001' gerastert (≈ 1–2 m): aus Schritten
+// von nur 7 m ergäbe das einen Kurs mit ±10° Rauschen, und die Summe der Beträge wüchse bei gerader Fahrt auf
+// > 100° je 15 s an (so wurde der Windenschlepp früher als Kreisen gewertet bzw. nicht als gerade erkannt).
+// Unter 2 m/s (Stillstand am Boden) gibt es keinen Kurs.
+function headingTurns(track, halfSec = 2) {
+  const n = track.length, hd = new Array(n).fill(null), turn = new Float64Array(n);
+  let a = 0, b = 0;
+  for (let i = 1; i < n - 1; i++) {
+    while (a + 1 <= i - 1 && track[i].timeSec - track[a+1].timeSec >= halfSec) a++;
+    if (b < i + 1) b = i + 1;
+    while (b < n - 1 && track[b].timeSec - track[i].timeSec < halfSec) b++;
+    const dt = track[b].timeSec - track[a].timeSec;
+    if (dt <= 0 || dt > 12) continue;
+    if ((haversineDistKm(track[a], track[b]) || 0) * 1000 / dt < 2) continue;
+    hd[i] = bearingDeg(track[a], track[b]);
+  }
+  for (let i = 2; i < n - 1; i++) if (hd[i] != null && hd[i-1] != null) turn[i] = Math.abs(((hd[i] - hd[i-1] + 540) % 360) - 180);
+  return turn;
+}
 // ── Windenschlepp ───────────────────────────────────────────────────────────
 // Der Windenschlepp liefert 3–8 m/s, ist aber kein thermisches Steigen und verfälscht Max.Steigen, Ø-Steigen
 // und die "stärkste Thermik". Erkennung: in den ersten TOW_SEARCH_SEC ein Abschnitt, der anhaltend steigt
@@ -546,19 +566,8 @@ const TOW_SEARCH_SEC = 900;
 function findTowRun(track) {
   const n = track.length;
   if (n < 20) return null;
-  const turnCum = new Float64Array(n + 1);
-  let prevH = null;
-  for (let i = 1; i < n; i++) {
-    const dt = track[i].timeSec - track[i-1].timeSec;
-    const d = (haversineDistKm(track[i-1], track[i]) || 0) * 1000;
-    let turn = 0;
-    if (dt > 0 && d / dt >= 2) {
-      const h = bearingDeg(track[i-1], track[i]);
-      if (prevH != null) turn = Math.abs(((h - prevH + 540) % 360) - 180);
-      prevH = h;
-    } else prevH = null;
-    turnCum[i+1] = turnCum[i] + turn;
-  }
+  const turn = headingTurns(track), turnCum = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) turnCum[i+1] = turnCum[i] + turn[i];
   const tEnd = track[0].timeSec + TOW_SEARCH_SEC;
   const windows = []; // { i, j }: Fenster ≥ 15 s, das wie Schlepp aussieht
   let j = 0;
@@ -567,8 +576,8 @@ function findTowRun(track) {
     if (j >= n) break;
     const dt = track[j].timeSec - track[i].timeSec;
     if (dt <= 0) continue;
-    const climb = (track[j].gpsAlt - track[i].gpsAlt) / dt, turn = turnCum[j+1] - turnCum[i+1];
-    if (climb >= 1 && turn <= 60) windows.push({ i, j });
+    const climb = (track[j].gpsAlt - track[i].gpsAlt) / dt, tsum = turnCum[j+1] - turnCum[i+1];
+    if (climb >= 1 && tsum <= 60) windows.push({ i, j });
   }
   for (let w = 0; w < windows.length;) {
     let s = windows[w].i, e = windows[w].j, k = w + 1;
@@ -3083,27 +3092,21 @@ function computeThermalBest(track) {
   let strong = null, long = null;
   for (const c of seasonThermals(tr)) {
     if (tr[c.i0].timeSec <= towEnd) continue;
-    const e = { t0: tr[c.i0].timeSec, t1: tr[c.i1].timeSec, gain: Math.round(c.gain), secs: c.secs, avg: +c.avg.toFixed(2) };
-    if (c.secs >= 40 && c.gain >= 100 && (!strong || e.avg > strong.avg)) strong = e;
-    if (c.gain >= 150 && (!long || e.gain > long.gain)) long = e;
+    // längste: der ganze Kreisflug-Abschnitt; stärkste: bester Kern von höchstens 90 s darin (ein langer, schwacher
+    // Abschnitt würde sonst den Schnitt verwässern)
+    if (c.gain >= 150 && (!long || c.gain > long.gain)) long = { t0: tr[c.i0].timeSec, t1: tr[c.i1].timeSec, gain: Math.round(c.gain), secs: c.secs, avg: +c.avg.toFixed(2) };
+    const W = Math.min(c.secs, 90);
+    for (let i = c.i0, j = c.i0; i <= c.i1; i++) {
+      while (j < c.i1 && tr[j].timeSec - tr[i].timeSec < W) j++;
+      const dt = tr[j].timeSec - tr[i].timeSec, g = tr[j].gpsAlt - tr[i].gpsAlt;
+      if (dt < Math.min(40, W) || g < 80) continue;
+      if (!strong || g / dt > strong.avg) strong = { t0: tr[i].timeSec, t1: tr[j].timeSec, gain: Math.round(g), secs: dt, avg: +(g / dt).toFixed(2) };
+    }
   }
-  return { v: 1, strong, long };
+  return { v: 2, strong, long };   // v2: Kurs aus geglätteten Richtungen (headingTurns); ältere Werte werden ignoriert
 }
 function seasonThermals(tr) {
-  const n = tr.length, R = Math.PI / 180, hd = new Array(n).fill(null), turn = new Array(n).fill(0);
-  for (let i = 1; i < n; i++) {
-    const a = tr[i - 1], b = tr[i], dt = b.timeSec - a.timeSec;
-    if (dt <= 0 || dt > 10) continue;
-    const dy = (b.lat - a.lat) * 111320, dx = (b.lon - a.lon) * 111320 * Math.cos(a.lat * R);
-    if (Math.hypot(dx, dy) < 2 * dt) continue;   // unter 2 m/s: Kurs ist GPS-Rauschen (Stillstand am Boden)
-    hd[i] = Math.atan2(dx, dy) / R;
-  }
-  let last = -1;
-  for (let i = 1; i < n; i++) {
-    if (hd[i] == null) continue;
-    if (last >= 0 && i - last <= 3) turn[i] = Math.abs(((hd[i] - hd[last]) % 360 + 540) % 360 - 180);
-    last = i;
-  }
+  const n = tr.length, turn = headingTurns(tr);
   const circ = new Array(n).fill(false);
   let j = 0, sum = 0;
   for (let i = 0; i < n; i++) {
@@ -3252,7 +3255,7 @@ function buildSeasonStats(flights, fromTs, toTs, reise) {
   const idxAt = (tr, tt) => { let lo = 0, hi = tr.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (tr[m].timeSec < tt) lo = m + 1; else hi = m; } return lo; };
   let strong = null, long = null;
   for (const x of withTrack) {
-    const sb = x.r.f.thermalBest, tb = sb && sb.v === 1 ? sb : computeThermalBest(x.r.f.track);
+    const sb = x.r.f.thermalBest, tb = sb && sb.v === 2 ? sb : computeThermalBest(x.r.f.track);
     if (!tb) continue;
     for (const type of ["strong", "long"]) {
       const e = tb[type];
