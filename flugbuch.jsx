@@ -1558,6 +1558,65 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
   };
 }
 
+// Senkrechte, halbtransparente "Vorhänge" unter der 3D-Spur (Spur → Boden), Farbe wie die
+// Spur (Steig-/Sinkrate): macht Höhe und Steigen im Saison-Rückblick sichtbar. groundAt(lon, lat)
+// liefert die Geländehöhe (oder null); fehlt sie, reichen die Vorhänge bis knapp unter den
+// tiefsten Punkt. Gleiche Matrix-Verschiebung wie createAltitudeTrackLayer (Genauigkeit).
+function createAltitudeCurtainLayer(pts, groundAt) {
+  const step = Math.max(1, Math.ceil(pts.length / 400)), idx = [];
+  for (let i = 0; i < pts.length; i += step) idx.push(i);
+  if (idx[idx.length - 1] !== pts.length - 1) idx.push(pts.length - 1);
+  const R = Math.PI / 180, CIRC = 40075016.686;
+  const merc = (p, alt) => { const la = p.lat * R; return [(p.lon + 180) / 360, 0.5 - Math.log(Math.tan(Math.PI / 4 + la / 2)) / (2 * Math.PI), alt / (CIRC * Math.cos(la))]; };
+  const hsl = (h, s, l) => { const k = n => (n + h / 30) % 12, a = s * Math.min(l, 1 - l), f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1))); return [f(0), f(8), f(4)]; };
+  const minAlt = Math.min(...pts.map(p => p.gpsAlt));
+  const gr = idx.map(i => { const q = groundAt ? groundAt(pts[i].lon, pts[i].lat) : null; return q != null && isFinite(q) ? Math.min(q, pts[i].gpsAlt - 3) : null; });
+  const useG = gr.filter(v => v != null).length >= idx.length * 0.7;
+  const top = idx.map(i => merc(pts[i], pts[i].gpsAlt));
+  const bot = idx.map((i, k) => merc(pts[i], useG && gr[k] != null ? gr[k] : minAlt - 40));
+  const col = idx.map((i, k) => {
+    if (k === 0) return hsl(70, 0.9, 0.5);
+    const a = pts[idx[k - 1]], b = pts[i], dt = b.timeSec - a.timeSec, rate = dt > 0 ? (b.gpsAlt - a.gpsAlt) / dt : 0;
+    return hsl((Math.max(-4, Math.min(4, rate)) + 4) / 8 * 140, 0.9, 0.5);
+  });
+  const cx = top.reduce((a, v) => a + v[0], 0) / top.length, cy = top.reduce((a, v) => a + v[1], 0) / top.length;
+  const data = [];
+  const vtx = (v, c, a) => data.push(v[0] - cx, v[1] - cy, v[2], c[0], c[1], c[2], a);
+  for (let k = 0; k < idx.length - 1; k++) {
+    const c = col[k + 1];
+    vtx(top[k], c, 0.5); vtx(bot[k], c, 0.08); vtx(top[k + 1], c, 0.5);
+    vtx(top[k + 1], c, 0.5); vtx(bot[k], c, 0.08); vtx(bot[k + 1], c, 0.08);
+  }
+  let prog = null, buf = null, drawSegs = idx.length - 1;
+  return {
+    setProgress(i) { let k = 0; while (k < idx.length - 1 && idx[k + 1] <= i) k++; drawSegs = k; },
+    id: "track-curtain", type: "custom", renderingMode: "3d", usesGround: useG,
+    onAdd(map, gl) {
+      const sh = (type, src) => { const o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o); return o; };
+      const vs = sh(gl.VERTEX_SHADER, `uniform mat4 u_m; attribute vec3 a_p; attribute vec4 a_c; varying vec4 v_c; void main(){ gl_Position = u_m * vec4(a_p, 1.0); v_c = a_c; }`);
+      const fs = sh(gl.FRAGMENT_SHADER, `precision mediump float; varying vec4 v_c; void main(){ gl_FragColor = vec4(v_c.rgb * v_c.a, v_c.a); }`);
+      prog = gl.createProgram(); gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+      buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.STATIC_DRAW);
+    },
+    render(gl, args) {
+      const M = args && args.defaultProjectionData ? args.defaultProjectionData.mainMatrix : args;
+      if (!prog || !M || drawSegs < 1) return;
+      const m = Array.from(M);
+      for (let r = 0; r < 4; r++) m[12 + r] = M[r] * cx + M[4 + r] * cy + M[12 + r];
+      gl.useProgram(prog);
+      gl.uniformMatrix4fv(gl.getUniformLocation(prog, "u_m"), false, m);
+      gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      const F = 4, stride = 7 * F;
+      [["a_p", 3, 0], ["a_c", 4, 3]].forEach(([n, size, off]) => { const loc = gl.getAttribLocation(prog, n); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, stride, off * F); });
+      gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LEQUAL); gl.depthMask(false); gl.disable(gl.CULL_FACE);
+      gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      gl.drawArrays(gl.TRIANGLES, 0, drawSegs * 6);
+      gl.depthMask(true); gl.disable(gl.BLEND);
+    },
+    onRemove(map, gl) { if (buf) gl.deleteBuffer(buf); if (prog) gl.deleteProgram(prog); buf = prog = null; },
+  };
+}
+
 // ── Flug-Video (30 s bis 1:30 min) ─────────────────────────────────────────────────
 // Per Knopf (🎬 in der Kartenleiste von FlightMap) erzeugt die App ein
 // kurzes Video des Flugs: 3D-Satellitenkarte mit wechselnden Kameras
@@ -3009,18 +3068,39 @@ function buildSeasonStats(flights, fromTs, toTs) {
 
   // Highlight-Flüge (brauchen einen Track): weitester, erstmals besuchter Ort, höchster, längster
   const withTrack = rows.map(r => ({ r, track: seasonCleanTrack(r.f.track) })).filter(x => x.track);
-  const used = new Set(), hl = [];
-  const best = (arr, key) => arr.filter(x => !used.has(x.r.f.id)).reduce((b, x) => (!b || key(x) > key(b)) ? x : b, null);
-  const take = (x, label) => { if (!x || used.has(x.r.f.id)) return; used.add(x.r.f.id); hl.push({ ...x, label }); };
-  take(best(withTrack.filter(x => x.r.dist >= 3), x => x.r.dist), "WEITESTER FLUG");
+  // Jeder Rekord zeigt seinen eigenen Flug. Hat ein Flug mehrere Rekorde (z.B. längster Flug und
+  // höchster Punkt), kommt er nur einmal ganz vor (mit mehreren Überschriften); der höchste
+  // Punkt wird dann als kurzer Ausschnitt mit mehr Zoom gezeigt.
+  const hl = []; // { r, track, tags[], excerpt?: { i0, i1, alt } }
+  const bestOf = (arr, key) => arr.reduce((b, x) => (!b || key(x) > key(b)) ? x : b, null);
+  const whole = (x) => x && hl.find(h => h.r.f.id === x.r.f.id && !h.excerpt);
+  const addWhole = (x, tag) => {
+    if (!x) return;
+    const h = whole(x);
+    if (h) { if (!h.tags.includes(tag)) h.tags.push(tag); } else hl.push({ ...x, tags: [tag] });
+  };
+  const peakWindow = (tr) => {
+    let pi = 0, pv = -1e9;
+    for (let i = 4; i < tr.length - 4; i++) { let s = 0; for (let k = -4; k <= 4; k++) s += tr[i + k].gpsAlt; if (s / 9 > pv) { pv = s / 9; pi = i; } }
+    let i0 = pi, i1 = pi;
+    while (i0 > 0 && tr[pi].timeSec - tr[i0 - 1].timeSec <= 150) i0--;
+    while (i1 < tr.length - 1 && tr[i1 + 1].timeSec - tr[pi].timeSec <= 150) i1++;
+    return { i0, i1, alt: pv };
+  };
   const firsts = before.size ? withTrack.filter(x => x.r.site && !before.has(x.r.site.toLowerCase()))
     .sort((a, b) => (b.r.dist || b.r.sec / 3600) - (a.r.dist || a.r.sec / 3600)) : [];
-  const free = () => firsts.filter(x => !used.has(x.r.f.id));
-  const first1 = free()[0];
-  take(first1, "ZUM ERSTEN MAL HIER");
-  take(best(withTrack, x => x.r.alt), "HÖCHSTER PUNKT");
-  take(best(withTrack, x => x.r.sec), "LÄNGSTER FLUG");
-  take(free().find(x => !first1 || x.r.site.toLowerCase() !== first1.r.site.toLowerCase()), "ZUM ERSTEN MAL HIER");
+  const firstsFree = () => firsts.filter(x => !hl.some(h => h.r.f.id === x.r.f.id));
+  addWhole(bestOf(withTrack.filter(x => x.r.dist >= 3), x => x.r.dist), "WEITESTER FLUG");
+  const first1 = firstsFree()[0];
+  addWhole(first1, "ZUM ERSTEN MAL HIER");
+  addWhole(bestOf(withTrack, x => x.r.sec), "LÄNGSTER FLUG");
+  const high = bestOf(withTrack, x => x.r.alt);
+  if (high) {
+    const parent = whole(high);
+    if (parent) hl.splice(hl.indexOf(parent) + 1, 0, { ...high, tags: ["HÖCHSTER PUNKT"], excerpt: peakWindow(high.track) });
+    else hl.push({ ...high, tags: ["HÖCHSTER PUNKT"] });
+  }
+  addWhole(firstsFree().find(x => !first1 || x.r.site.toLowerCase() !== first1.r.site.toLowerCase()), "ZUM ERSTEN MAL HIER");
 
   // Thermik-Szenen: stärkste (bester Schnitt in m/s) und längste (meiste Höhenmeter am Stück).
   // Durchsucht werden die Flüge mit dem grössten Höhengewinn bzw. dem stärksten Steigen.
@@ -3175,12 +3255,12 @@ function buildSeasonScript(st, D, beats) {
   cs.slice(0, nc).forEach(c => sc.push({ kind: "region", map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
     n: c.n, sec: c.sec, sites: c.sites, pins: c.pins }));
   hs.slice(0, nh).forEach(h => {
-    const f = h.r.f, tr = h.track, step = Math.max(1, Math.ceil(tr.length / 600));
+    const f = h.r.f, ex = h.excerpt, tr = ex ? h.track.slice(ex.i0, ex.i1 + 1) : h.track, step = Math.max(1, Math.ceil(tr.length / 600));
     const dec = tr.filter((_, i) => i % step === 0 || i === tr.length - 1);
-    const km = h.r.dist, parts = [h.r.country, seasonDay(h.r.ts), km >= 5 ? Math.round(km) + " km" : (h.r.sec / 3600).toFixed(1) + " h"].filter(Boolean);
+    const km = h.r.dist, parts = [h.r.country, seasonDay(h.r.ts), ex ? seasonInt(ex.alt) + " m ü. M." : km >= 5 ? Math.round(km) + " km" : (h.r.sec / 3600).toFixed(1) + " h"].filter(Boolean);
     const sm = String(f.startTime || "").match(/(\d{1,2}):(\d{2})/);
-    sc.push({ kind: "flight", map: "terrain", w: 1.5, kicker: h.label, title: h.r.site || "Flug", sub: parts.join(" · "),
-      track: tr, dec, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 : null });
+    sc.push({ kind: "flight", map: "terrain", w: ex ? 1.1 : 1.5, excerpt: !!ex, kicker: h.tags.join(" · "), title: h.r.site || "Flug", sub: parts.join(" · "),
+      track: tr, dec, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (tr[0].timeSec - h.track[0].timeSec) : null });
   });
   st.thermals.slice(0, nt).forEach(T => {
     const a = Math.max(0, T.i0 - 20), z = Math.min(T.track.length, T.i1 + 21), slice = T.track.slice(a, z);
@@ -3253,11 +3333,11 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
       const gdia = Math.min(W, H * 0.78), zg = Math.log2(gdia * Math.PI / 512);
 
       // ── Karte: Weltkugel oder Gelände, je nach Szene ──
-      let mapKind = null, isGlobe = false, altLayer = null, layerScene = null;
-      const removeLayer = () => { try { if (main && main.getLayer("track-altitude")) main.removeLayer("track-altitude"); } catch {} altLayer = null; layerScene = null; };
+      let mapKind = null, isGlobe = false, altLayer = null, curtain = null, layerScene = null;
+      const removeLayer = () => { try { if (main && main.getLayer("track-altitude")) main.removeLayer("track-altitude"); if (main && main.getLayer("track-curtain")) main.removeLayer("track-curtain"); } catch {} altLayer = null; curtain = null; layerScene = null; };
       const ensureMap = async (kind) => {
         if (main && mapKind === kind) return;
-        if (main) { try { main.remove(); } catch {} main = null; altLayer = null; layerScene = null; }
+        if (main) { try { main.remove(); } catch {} main = null; altLayer = null; curtain = null; layerScene = null; }
         setStatus(kind === "globe" ? "Weltkugel wird geladen …" : "Geländekarte wird geladen …", 0);
         const o = { apiKey: mapTilerKey, language: "de", interactive: false, pixelRatio: 1, preserveDrawingBuffer: true,
           canvasContextAttributes: { preserveDrawingBuffer: true }, fadeDuration: 0, attributionControl: false, navigationControl: false,
@@ -3275,14 +3355,15 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
       const isGlobeMap = (m) => { try { const p = m.getProjection && m.getProjection(); return !!p && (p === "globe" || p.type === "globe"); } catch { return false; } };
 
       // Kamera, die ein Punktefeld einpasst (einmal je Szene berechnet; braucht die Geländekarte)
-      const fitFor = (sc, pts, bottomFrac, key) => {
+      const fitFor = (sc, pts, bottomFrac, key, tight) => {
         key = key || "_fit";
         if (sc[key]) return sc[key];
         let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
         pts.forEach(p => { a = Math.min(a, p.lon); b = Math.min(b, p.lat); c = Math.max(c, p.lon); d = Math.max(d, p.lat); });
-        if (c - a < 0.06) { const m = (a + c) / 2; a = m - 0.03; c = m + 0.03; }
-        if (d - b < 0.04) { const m = (b + d) / 2; b = m - 0.02; d = m + 0.02; }
-        const cam = main.cameraForBounds([[a, b], [c, d]], { padding: { top: H * 0.1, bottom: H * bottomFrac, left: W * 0.12, right: W * 0.12 }, maxZoom: 15 });
+        const sx = tight ? 0.012 : 0.06, sy = tight ? 0.008 : 0.04;   // Mindestausdehnung (°); Ausschnitte dürfen näher heran
+        if (c - a < sx) { const m = (a + c) / 2; a = m - sx / 2; c = m + sx / 2; }
+        if (d - b < sy) { const m = (b + d) / 2; b = m - sy / 2; d = m + sy / 2; }
+        const cam = main.cameraForBounds([[a, b], [c, d]], { padding: { top: H * 0.1, bottom: H * bottomFrac, left: W * 0.12, right: W * 0.12 }, maxZoom: tight ? 16.5 : 15 });
         sc[key] = cam ? { center: [cam.center.lng != null ? cam.center.lng : cam.center[0], cam.center.lat != null ? cam.center.lat : cam.center[1]], zoom: cam.zoom }
           : { center: [(a + c) / 2, (b + d) / 2], zoom: 8 };
         return sc[key];
@@ -3295,8 +3376,21 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
       const applyScene = (st) => {
         const { sc, u } = st, e = ease(u);
         if (sc.kind === "thermal") {
-          if (layerScene !== sc) { removeLayer(); altLayer = createAltitudeTrackLayer(sc.slice, 4.2 * s); main.addLayer(altLayer); layerScene = sc; }
-          altLayer.setProgress(Math.round(clamp((st.tl - 0.5) / (st.len * 0.78), 0, 1) * (sc.slice.length - 1)));
+          if (layerScene !== sc) {
+            removeLayer();
+            const ground = (lon, lat) => { try { return main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null; } catch { return null; } };
+            curtain = createAltitudeCurtainLayer(sc.slice, ground); main.addLayer(curtain);
+            altLayer = createAltitudeTrackLayer(sc.slice, 6.5 * s); main.addLayer(altLayer); layerScene = sc;
+          }
+          // Geländehöhen sind in den ersten Bildern oft noch nicht geladen: Vorhänge einmal neu bauen
+          if (curtain && !curtain.usesGround && !sc._rebuilt && st.tl > 0.5) {
+            sc._rebuilt = true;
+            const ground = (lon, lat) => { try { return main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null; } catch { return null; } };
+            const nc = createAltitudeCurtainLayer(sc.slice, ground);
+            if (nc.usesGround) { try { main.removeLayer("track-curtain"); main.addLayer(nc, "track-altitude"); curtain = nc; } catch {} }
+          }
+          const pr = Math.round(clamp((st.tl - 0.5) / (st.len * 0.78), 0, 1) * (sc.slice.length - 1));
+          altLayer.setProgress(pr); curtain.setProgress(pr);
         } else if (layerScene) removeLayer();
         const pad = { top: 0, bottom: 0, left: 0, right: 0 };
         switch (sc.kind) {
@@ -3312,8 +3406,8 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             break;
           }
           case "flight": {
-            const f = fitFor(sc, sc.dec, 0.44);
-            main.jumpTo({ center: f.center, zoom: f.zoom - 0.35, bearing: lerp(-14, 16, u), pitch: lerp(38, 52, e) });
+            const f = fitFor(sc, sc.dec, 0.44, "_fit", sc.excerpt);
+            main.jumpTo({ center: f.center, zoom: f.zoom - (sc.excerpt ? 0.15 : 0.35), bearing: lerp(-14, 16, u), pitch: lerp(38, 52, e) });
             break;
           }
           case "thermal": {
@@ -3321,9 +3415,9 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             t.forEach(p => { la += p.lat; lo += p.lon; mnLa = Math.min(mnLa, p.lat); mxLa = Math.max(mxLa, p.lat); mnLo = Math.min(mnLo, p.lon); mxLo = Math.max(mxLo, p.lon); });
             la /= t.length; lo /= t.length;
             const hor = Math.max((mxLa - mnLa) * 111320, (mxLo - mnLo) * 111320 * Math.cos(la * Math.PI / 180));
-            const ext = Math.max(hor, sc.gain * 0.9) + 160, mpp = ext / (0.5 * Math.min(W, H));
-            const zoom = Math.log2(40075016 * Math.cos(la * Math.PI / 180) / (512 * mpp));
-            main.jumpTo({ center: [lo, la], zoom, bearing: lerp(10, 130, u), pitch: 62, padding: { ...pad, bottom: H * 0.18 } });
+            const ext = Math.max(hor * 1.15, sc.gain * 0.6) + 120, mpp = ext / (0.78 * Math.min(W, H));
+            const zoom = Math.min(16.2, Math.log2(40075016 * Math.cos(la * Math.PI / 180) / (512 * mpp)));
+            main.jumpTo({ center: [lo, la], zoom, bearing: lerp(10, 130, u), pitch: 54, padding: { ...pad, bottom: H * 0.26 } });
             break;
           }
         }
