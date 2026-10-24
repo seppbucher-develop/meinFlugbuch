@@ -1434,7 +1434,16 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
 // vorbereitet und die Matrix entsprechend verschoben, sonst "zittert" die
 // Linie wegen der Float32-Genauigkeit der Mercator-Koordinaten (0..1).
 // Farbe wie die Kartenlinie: Steig-/Sinkrate (rot=Sinken … grün=Steigen).
-function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
+// Warme Farbskala für den Saison-Rückblick (Thermik): Sinken türkis → langsam gelb → stark steigend rot.
+// Die Rate wird über ±3 Punkte geglättet, sonst flackert die Spur zwischen den Farben.
+function warmClimbColor(pts, i) {
+  const a = pts[Math.max(0, i - 3)], b = pts[Math.min(pts.length - 1, i + 3)], dt = b.timeSec - a.timeSec;
+  const rate = dt > 0 ? (b.gpsAlt - a.gpsAlt) / dt : 0;
+  const h = rate >= 0 ? 55 - 50 * Math.min(rate, 4) / 4 : rate > -0.3 ? 55 : 185, s = 0.95, l = 0.5;   // Sinken: türkis (ohne grünen Übergang)
+  const k = n => (n + h / 30) % 12, aa = s * Math.min(l, 1 - l), f = n => l - aa * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return [f(0), f(8), f(4)];
+}
+function createAltitudeTrackLayer(pts, lineWidthPx = 3, warm = false) {
   // Stützpunkte: höchstens ~12000 (längere Tracks gleichmässig ausdünnen). Früher
   // waren es 3000 — ein Thermikkreis bestand dann nur noch aus wenigen Eckpunkten.
   const stride = Math.max(1, Math.ceil(pts.length / 12000));
@@ -1455,6 +1464,7 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
   };
   const bxyz = base.map(i => merc(pts[i]));
   const bcol = base.map((i, k) => {
+    if (warm) return warmClimbColor(pts, i);
     if (k === 0) return hslToRgb(70, 0.9, 0.5);
     const a = pts[base[k-1]], b = pts[i], dt = b.timeSec - a.timeSec;
     const rate = dt > 0 ? (b.gpsAlt - a.gpsAlt) / dt : 0;
@@ -1562,7 +1572,7 @@ function createAltitudeTrackLayer(pts, lineWidthPx = 3) {
 // Spur (Steig-/Sinkrate): macht Höhe und Steigen im Saison-Rückblick sichtbar. groundAt(lon, lat)
 // liefert die Geländehöhe (oder null); fehlt sie, reichen die Vorhänge bis knapp unter den
 // tiefsten Punkt. Gleiche Matrix-Verschiebung wie createAltitudeTrackLayer (Genauigkeit).
-function createAltitudeCurtainLayer(pts, groundAt) {
+function createAltitudeCurtainLayer(pts, groundAt, warm = false) {
   const step = Math.max(1, Math.ceil(pts.length / 400)), idx = [];
   for (let i = 0; i < pts.length; i += step) idx.push(i);
   if (idx[idx.length - 1] !== pts.length - 1) idx.push(pts.length - 1);
@@ -1575,6 +1585,7 @@ function createAltitudeCurtainLayer(pts, groundAt) {
   const top = idx.map(i => merc(pts[i], pts[i].gpsAlt));
   const bot = idx.map((i, k) => merc(pts[i], useG && gr[k] != null ? gr[k] : minAlt - 40));
   const col = idx.map((i, k) => {
+    if (warm) return warmClimbColor(pts, i);
     if (k === 0) return hsl(70, 0.9, 0.5);
     const a = pts[idx[k - 1]], b = pts[i], dt = b.timeSec - a.timeSec, rate = dt > 0 ? (b.gpsAlt - a.gpsAlt) / dt : 0;
     return hsl((Math.max(-4, Math.min(4, rate)) + 4) / 8 * 140, 0.9, 0.5);
@@ -1584,8 +1595,8 @@ function createAltitudeCurtainLayer(pts, groundAt) {
   const vtx = (v, c, a) => data.push(v[0] - cx, v[1] - cy, v[2], c[0], c[1], c[2], a);
   for (let k = 0; k < idx.length - 1; k++) {
     const c = col[k + 1];
-    vtx(top[k], c, 0.6); vtx(bot[k], c, 0.16); vtx(top[k + 1], c, 0.6);
-    vtx(top[k + 1], c, 0.6); vtx(bot[k], c, 0.16); vtx(bot[k + 1], c, 0.16);
+    vtx(top[k], c, 0.3); vtx(bot[k], c, 0.04); vtx(top[k + 1], c, 0.3);
+    vtx(top[k + 1], c, 0.3); vtx(bot[k], c, 0.04); vtx(bot[k + 1], c, 0.04);
   }
   let prog = null, buf = null, drawSegs = idx.length - 1;
   return {
@@ -3004,23 +3015,46 @@ function seasonCleanTrack(track) {
   return tr.length >= 30 ? tr : null;
 }
 
-// Steigflug-Suche über Fenster von minDt bis maxWin Sekunden: byRate = höchster Schnitt (m/s),
-// sonst grösster Höhengewinn; minAvg/minGain schliessen Zufallstreffer aus.
-function seasonBestClimb(tr, o) {
-  const n = tr.length; let best = null;
-  for (let i = 0; i < n - 5; i += 3) {
-    const t0 = tr[i].timeSec, a0 = tr[i].gpsAlt;
-    for (let k = i + 5; k < n; k++) {
-      const dt = tr[k].timeSec - t0;
-      if (dt < 0 || dt > o.maxWin) break;
-      if (dt < o.minDt) continue;
-      const g = tr[k].gpsAlt - a0, avg = g / dt;
-      if (g < o.minGain || avg < o.minAvg) continue;
-      const v = o.byRate ? avg : g;
-      if (!best || v > best.v) best = { i0: i, i1: k, gain: g, secs: dt, avg, v };
-    }
+// Thermiken = Kreisflug-Abschnitte mit Höhengewinn (wie im Vorbild: Spirale mit Versatz durch den Wind,
+// nicht ein gerader Steigflug am Hang). Ein 30-s-Fenster mit ≥ 270° Kursänderung gilt als Kreisen;
+// Kreis-Abschnitte (Lücken bis 12 s überbrückt) mit ≥ 540° Gesamtdrehung, ≥ 30 s und ≥ 60 m Gewinn sind Thermiken.
+function seasonThermals(tr) {
+  const n = tr.length, R = Math.PI / 180, hd = new Array(n).fill(null), turn = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    const a = tr[i - 1], b = tr[i], dt = b.timeSec - a.timeSec;
+    if (dt <= 0 || dt > 10) continue;
+    const dy = (b.lat - a.lat) * 111320, dx = (b.lon - a.lon) * 111320 * Math.cos(a.lat * R);
+    if (Math.hypot(dx, dy) < 0.6) continue;
+    hd[i] = Math.atan2(dx, dy) / R;
   }
-  return best;
+  let last = -1;
+  for (let i = 1; i < n; i++) {
+    if (hd[i] == null) continue;
+    if (last >= 0 && i - last <= 3) turn[i] = Math.abs(((hd[i] - hd[last]) % 360 + 540) % 360 - 180);
+    last = i;
+  }
+  const circ = new Array(n).fill(false);
+  let j = 0, sum = 0;
+  for (let i = 0; i < n; i++) {
+    sum += turn[i];
+    while (tr[i].timeSec - tr[j].timeSec > 30) { sum -= turn[j]; j++; }
+    if (sum >= 270) circ[i] = true;   // nur das Fensterende: sonst würde der Gleitflug davor zur Thermik gezählt
+  }
+  const segs = [];
+  for (let i = 0; i < n;) {
+    if (!circ[i]) { i++; continue; }
+    let e = i, k = i;
+    while (k < n) { if (circ[k]) { e = k; k++; } else if (tr[k].timeSec - tr[e].timeSec <= 12) k++; else break; }
+    let s = i; i = e + 1;
+    // Anfang und Ende auf den tatsächlichen Beginn/Abschluss der Kurven ausdehnen (≥ 4°/s)
+    const rate = (q) => (tr[q].timeSec - tr[q - 1].timeSec) > 0 ? turn[q] / (tr[q].timeSec - tr[q - 1].timeSec) : 0;
+    while (s > 1 && rate(s - 1) >= 4 && tr[s].timeSec - tr[s - 1].timeSec <= 10) s--;
+    while (e < n - 1 && rate(e + 1) >= 4 && tr[e + 1].timeSec - tr[e].timeSec <= 10) e++;
+    let tot = 0; for (let q = s; q <= e; q++) tot += turn[q];
+    const secs = tr[e].timeSec - tr[s].timeSec, gain = tr[e].gpsAlt - tr[s].gpsAlt;
+    if (tot >= 540 && secs >= 30 && gain >= 60 && gain / secs >= 0.4) segs.push({ i0: s, i1: e, gain, secs, avg: gain / secs });
+  }
+  return segs;
 }
 
 // Zahlen und Listen für den Zeitraum [fromTs, toTs] (toTs inklusive).
@@ -3057,6 +3091,19 @@ function buildSeasonStats(flights, fromTs, toTs) {
   // Heimatregion: Land mit den meisten Flügen; Mittelpunkt = dichteste Stelle seiner Startplätze.
   // Alle Flüge im Umkreis von 300 km gehören dazu (auch über die Landesgrenze); jedes andere Land
   // bekommt eine eigene "Unterwegs"-Szene mit den Flügen ausserhalb der Heimatregion.
+  // Kurzer Track je Flug (≤ 38 Punkte) für die Abspielanimation in den Regions-Szenen
+  const playOf = (r) => {
+    const tr = r.f.track; let path = null;
+    if (tr && tr.length >= 10) {
+      const step = Math.max(1, Math.floor(tr.length / 36)); path = [];
+      for (let i = 0; i < tr.length; i += step) if (isFinite(tr[i].lat) && isFinite(tr[i].lon)) path.push([tr[i].lon, tr[i].lat]);
+      const e = tr[tr.length - 1]; if (isFinite(e.lat) && isFinite(e.lon)) path.push([e.lon, e.lat]);
+      if (path.length >= 3) { const [l0, a0] = path[0]; path = path.filter(q => Math.abs(q[0] - l0) < 2 && Math.abs(q[1] - a0) < 2); }
+      if (path.length < 3) path = null;
+    }
+    return { ts: r.ts, sec: r.sec, path };
+  };
+  const playsOf = (rs) => rs.slice().sort((a, b) => a.ts - b.ts).map(playOf);
   const kmBetween = (a, b) => { const r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lon - a.lon) * r; const x = Math.sin(dLa / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) ** 2; return 12742 * Math.asin(Math.sqrt(x)); };
   const cnt = new Map();
   for (const r of rows) if (r.country) { const k = r.country.toLowerCase(); cnt.set(k, (cnt.get(k) || 0) + 1); }
@@ -3078,12 +3125,12 @@ function buildSeasonStats(flights, fromTs, toTs) {
     for (const r of rs) { if (!r.country) continue; const k = r.country.toLowerCase(); const g = m.get(k) || { name: r.country, n: 0 }; g.n++; m.set(k, g); }
     return [...m.values()].sort((a, b) => b.n - a.n).map(g => g.name);
   };
-  const home = homeRows.length ? { countries: groupOf(homeRows), n: homeRows.length, sec: homeRows.reduce((a, r) => a + r.sec, 0), sites: topSites(homeRows), pins: pinsOf(homeRows) } : null;
+  const home = homeRows.length ? { countries: groupOf(homeRows), n: homeRows.length, sec: homeRows.reduce((a, r) => a + r.sec, 0), sites: topSites(homeRows), pins: pinsOf(homeRows), plays: playsOf(homeRows) } : null;
   const cm = new Map();
   for (const r of rest) { const k = r.country.toLowerCase(); const g = cm.get(k) || { name: r.country, n: 0, sec: 0 }; g.n++; g.sec += r.sec; cm.set(k, g); }
   const countries = [...cm.values()].sort((a, b) => b.n - a.n).map(g => {
     const rs = rest.filter(r => r.country.toLowerCase() === g.name.toLowerCase());
-    return { ...g, sites: topSites(rs), pins: pinsOf(rs) };
+    return { ...g, sites: topSites(rs), pins: pinsOf(rs), plays: playsOf(rs) };
   });
   const countriesN = new Set(rows.filter(r => r.country).map(r => r.country.toLowerCase())).size;
   // erster Flug je Startplatz in zeitlicher Reihenfolge (Intro: Pins erscheinen nacheinander)
@@ -3134,10 +3181,10 @@ function buildSeasonStats(flights, fromTs, toTs) {
     ...withTrack.slice().sort((a, b) => num((b.r.f.customFields || {}).maxSteigen20) - num((a.r.f.customFields || {}).maxSteigen20)).slice(0, 15)]);
   let strong = null, long = null;
   for (const x of pool) {
-    const c1 = seasonBestClimb(x.track, { maxWin: 150, minDt: 40, minAvg: 1.5, minGain: 60, byRate: true });
-    if (c1 && (!strong || c1.v > strong.v)) strong = { ...c1, r: x.r, track: x.track, type: "strong" };
-    const c2 = seasonBestClimb(x.track, { maxWin: 1200, minDt: 60, minAvg: 0.6, minGain: 150, byRate: false });
-    if (c2 && (!long || c2.v > long.v)) long = { ...c2, r: x.r, track: x.track, type: "long" };
+    for (const c of seasonThermals(x.track)) {
+      if (c.secs >= 40 && c.gain >= 100 && (!strong || c.avg > strong.avg)) strong = { ...c, r: x.r, track: x.track, type: "strong" };
+      if (c.gain >= 150 && (!long || c.gain > long.gain)) long = { ...c, r: x.r, track: x.track, type: "long" };
+    }
   }
   // fast identische Stelle nur einmal zeigen (dann die längere Variante)
   if (strong && long && strong.r.f.id === long.r.f.id) {
@@ -3148,7 +3195,7 @@ function buildSeasonStats(flights, fromTs, toTs) {
 
   return { rows, count: rows.length, sec: rows.reduce((a, r) => a + r.sec, 0),
     days: new Set(rows.map(r => r.f.date || r.f.rawDate)).size, sites: siteSet.size,
-    countries, countriesN, home, events, pins: pinsOf(rows), topSites: topSites(rows),
+    countries, countriesN, home, events, plays: playsOf(rows), pins: pinsOf(rows), topSites: topSites(rows),
     highlights: hl, thermals, bestDist: Math.max(0, ...rows.map(r => r.dist)), maxAlt: Math.max(0, ...rows.map(r => r.alt)) };
 }
 
@@ -3276,9 +3323,9 @@ function buildSeasonScript(st, D, beats) {
   const sc = [{ kind: "intro", map: "globe", w: 1 }];
   sc.push({ kind: "region", map: "terrain", w: 1, home: true,
     kicker: st.home ? ["DEINE HEIMATREGION", ...st.home.countries].join(" · ").toUpperCase() : "DEINE FLÜGE", n: st.home ? st.home.n : st.count,
-    sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins });
+    sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins, plays: st.home ? st.home.plays : st.plays });
   cs.slice(0, nc).forEach(c => sc.push({ kind: "region", map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
-    n: c.n, sec: c.sec, sites: c.sites, pins: c.pins }));
+    n: c.n, sec: c.sec, sites: c.sites, pins: c.pins, plays: c.plays }));
   hs.slice(0, nh).forEach(h => {
     const f = h.r.f, ex = h.excerpt, tr = ex ? h.track.slice(ex.i0, ex.i1 + 1) : h.track, step = Math.max(1, Math.ceil(tr.length / 600));
     const dec = tr.filter((_, i) => i % step === 0 || i === tr.length - 1);
@@ -3431,13 +3478,13 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
         if (sc.kind === "thermal") {
           if (layerScene !== sc) {
             removeLayer();
-            curtain = createAltitudeCurtainLayer(sc.slice, groundAt); main.addLayer(curtain);
-            altLayer = createAltitudeTrackLayer(sc.slice, 6.5 * s); main.addLayer(altLayer); layerScene = sc;
+            curtain = createAltitudeCurtainLayer(sc.slice, groundAt, true); main.addLayer(curtain);
+            altLayer = createAltitudeTrackLayer(sc.slice, 10 * s, true); main.addLayer(altLayer); layerScene = sc;
           }
           // Geländehöhen sind in den ersten Bildern oft noch nicht geladen: Vorhänge einmal neu bauen
           if (curtain && !curtain.usesGround && !sc._rebuilt && st.tl > 0.5) {
             sc._rebuilt = true;
-            const nc = createAltitudeCurtainLayer(sc.slice, groundAt);
+            const nc = createAltitudeCurtainLayer(sc.slice, groundAt, true);
             if (nc.usesGround) { try { main.removeLayer("track-curtain"); main.addLayer(nc, "track-altitude"); curtain = nc; } catch {} }
           }
           const pr = Math.round(clamp((st.tl - 0.5) / (st.len * 0.78), 0, 1) * (sc.slice.length - 1));
@@ -3458,12 +3505,12 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
               const n = sc.slice.length; la /= n; lo /= n;
               sc._geo = { la, lo, meanAlt: ma / n, minAlt: mn, hor: Math.max((mxLa - mnLa) * 111320, (mxLo - mnLo) * 111320 * Math.cos(la * R2D), 120) };
             }
-            const g = sc._geo, pitch = 52, sp = Math.sin(pitch * R2D), cp = Math.cos(pitch * R2D);
-            const need = Math.max(g.hor / (W * 0.74), (g.hor * cp + (sc.gain + 80) * sp) / (H * 0.5));
-            const zoom = Math.min(16.2, Math.log2(CIRC * Math.cos(g.la * R2D) / (512 * need))) + lerp(-0.25, 0.1, e);
+            const g = sc._geo, pitch = 58, sp = Math.sin(pitch * R2D), cp = Math.cos(pitch * R2D);
+            const need = Math.max(g.hor / (W * 0.46), (g.hor * cp + (sc.gain + 60) * sp) / (H * 0.42));   // Spur wie im Vorbild nur etwa 40 % des Bildes
+            const zoom = Math.min(16.2, Math.log2(CIRC * Math.cos(g.la * R2D) / (512 * need))) + lerp(-0.15, 0.1, e);
             const gr = groundAt(g.lo, g.la), hMid = Math.max(0, (g.meanAlt - (gr != null ? gr : g.minAlt - 40)) / 2);
             const shift = Math.min(0.35 * H, hMid * sp / mpp0(g.la, zoom));   // Objektmitte liegt über dem Bodenpunkt der Kartenmitte
-            const dy = -0.24 * H + 2 * shift;
+            const dy = -0.1 * H + 2 * shift;   // freie Bildmitte bei 45 % der Höhe
             main.jumpTo({ center: [g.lo, g.la], zoom, bearing: lerp(0, 35, u), pitch, padding: { top: Math.max(0, dy), bottom: Math.max(0, -dy), left: 0, right: 0 } });
             break;
           }
@@ -3545,6 +3592,27 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
           if (kind === "pin") pin(q.x, q.y, k * (0.9 + Math.min(0.5, p.n / 40))); else dot(q.x, q.y, 8 * s * (0.9 + Math.min(0.6, p.n / 30)), k);
         });
       };
+      // Regions-Szenen: jeder Flug spielt kurz seinen Track ab (Start- und Landeort), der Zähler zählt die gestarteten
+      // Flüge. Bringt vor allem etwas, wenn es wenige Flüge von einem Ort gibt (Pins allein wären nur Punkte).
+      const drawPlays = (plays, tl, cdur) => {
+        const N = plays.length; if (!N) return;
+        const L = clamp(cdur / N * 3, 0.5, 1.1), started = clamp(Math.floor((tl - 0.3) / cdur * N) + 1, 0, N);
+        ctx.save(); ctx.globalAlpha = curOutA; ctx.lineJoin = "round"; ctx.lineCap = "round";
+        for (let i = started - 1; i >= 0; i--) {
+          const age = tl - (0.3 + i / N * cdur);
+          if (age > L + 0.5) break;
+          const pl = plays[i]; if (!pl.path || age < 0) continue;
+          const m = ease(clamp(age / L, 0, 1)) * (pl.path.length - 1), full = Math.floor(m), fr = m - full, a = age > L ? 1 - (age - L) / 0.5 : 1;
+          const pts = [];
+          for (let q = 0; q <= full; q++) pts.push(main.project(pl.path[q]));
+          if (full < pl.path.length - 1) { const A = pl.path[full], B = pl.path[full + 1]; pts.push(main.project([A[0] + (B[0] - A[0]) * fr, A[1] + (B[1] - A[1]) * fr])); }
+          ctx.globalAlpha = curOutA * a;
+          ctx.beginPath(); pts.forEach((q, k) => k ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
+          ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 8 * s; ctx.strokeStyle = "#e4f9b5"; ctx.lineWidth = 2.8 * s; ctx.stroke();
+          const h = pts[pts.length - 1]; ctx.shadowBlur = 0; ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(h.x, h.y, 4 * s, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.restore();
+      };
       const kicker = (txt, y, tl, delay) => { reveal(tl, delay); T(txt, mg, y, Math.min(21 * s, fitSize(txt, 21 * s, 800, W - 2 * mg - 3 * s * txt.length)), 800, KICK, "left", 3 * s); endReveal(); };
       const bigNum = (n, suffix, y, size, tl, delay) => {
         reveal(tl, delay);
@@ -3602,12 +3670,15 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
           case "region": {
             tint(0.34); grad(0.55, 0.6);
             pinsOn(sc.pins, tl, "dot");
-            const cdur = Math.max(2, len * 0.62);
+            const cdur = Math.max(2, len * 0.62), plays = sc.plays || [], N = plays.length;
+            drawPlays(plays, tl, cdur);
+            if (N && !sc._cum) { let c = 0; sc._cum = plays.map(q => (c += q.sec)); }
+            const started = N ? clamp(Math.floor((tl - 0.3) / cdur * N) + 1, 0, N) : 0;
             const rows = sc.sites.slice(0, 3), rowH = 54 * s, yRows = bot - (rows.length - 1) * rowH;
             const yTime = yRows - (rows.length ? 56 * s : 0) , yBig = yTime - 56 * s, yK = yBig - 150 * s * 0.74 - 20 * s;
             kicker(sc.kicker, yK, tl, 0.15);
-            bigNum(count(sc.n, tl, 0.3, cdur), sc.n === 1 ? "Flug" : "Flüge", yBig, 150 * s, tl, 0.3);
-            reveal(tl, 0.7); T(seasonHM(sc.sec * Math.pow(clamp((tl - 0.3) / cdur, 0, 1), 0.85)) + " in der Luft", mg, yTime, 28 * s, 700, TIMEC); endReveal();
+            bigNum(N ? started : count(sc.n, tl, 0.3, cdur), sc.n === 1 ? "Flug" : "Flüge", yBig, 150 * s, tl, 0.3);
+            reveal(tl, 0.7); T(seasonHM(N ? (started ? sc._cum[started - 1] : 0) : sc.sec * Math.pow(clamp((tl - 0.3) / cdur, 0, 1), 0.85)) + " in der Luft", mg, yTime, 28 * s, 700, TIMEC); endReveal();
             rows.forEach((r, i) => {
               reveal(tl, 1.0 + i * 0.25);
               const y = yRows + i * rowH;
