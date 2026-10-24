@@ -3594,7 +3594,28 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
+  const [folderMsg, setFolderMsg] = useState("");
   const cancelRef = useRef(null);
+  // Fertiges Video im Unterordner "videos" des Backup-Ordners ablegen (wie beim Flug-Video;
+  // nur Chrome/Edge am Desktop). interactive = false: nur versuchen, wenn der Zugriff schon erlaubt ist.
+  const fsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
+  const saveToFolder = async (res, interactive, nm) => {
+    try {
+      const handle = await window.fsapiHandle.get("backupDir");
+      if (!handle) throw new Error("Kein Backup-Ordner festgelegt (Service → Backup-Ordner).");
+      let perm = await handle.queryPermission({ mode: "readwrite" });
+      if (perm !== "granted") {
+        if (!interactive) throw new Error("NOPERM");
+        perm = await handle.requestPermission({ mode: "readwrite" });
+      }
+      if (perm !== "granted") throw new Error("Zugriff auf den Backup-Ordner nicht erlaubt.");
+      const dir = await handle.getDirectoryHandle("videos", { create: true });
+      const name = `${nm}.${res.ext}`;
+      const fh = await dir.getFileHandle(name, { create: true });
+      const w = await fh.createWritable(); await w.write(res.blob); await w.close();
+      setFolderMsg(`✓ Gespeichert im Backup-Ordner: videos/${name}`);
+    } catch (e) { setFolderMsg(e.message === "NOPERM" ? "Noch nicht im Backup-Ordner abgelegt – „In Backup-Ordner ablegen“ tippen." : "Ablegen im Backup-Ordner fehlgeschlagen: " + e.message); }
+  };
 
   const fromTs = fromISO(fromS).getTime(), toTs = fromISO(toS).getTime() + 86399999;
   const valid = isFinite(fromTs) && isFinite(toTs) && toTs >= fromTs;
@@ -3653,7 +3674,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
 
-  const fileName = "Saison_" + meta.big.replace(/[^0-9A-Za-z]+/g, "-");
+  const fileName = "Saison_" + fromS + "_" + toS;
   const chip = (active) => ({ flex:"1 1 auto", minHeight:40, padding:"0 10px", borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const lbl = { fontSize:12, color:"rgba(232,244,253,0.6)", marginBottom:6 };
@@ -3727,7 +3748,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
               music={music && mbuf && plan ? { buf: mbuf, start: music.start, fade: plan.natural ? 0.5 : Math.min(3, Math.max(1.2, plan.an ? plan.an.beatSec * 4 : 2)) } : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
-              onDone={(blob, ext, note) => { setResult({ url: URL.createObjectURL(blob), ext, blob, note }); setStage("done"); }}
+              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob, note }; setResult(res); setStage("done"); setFolderMsg(""); if (fsOk) saveToFolder(res, false, fileName); }}
               onError={(m) => { setErr(m); setStage("error"); }} />
             <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
             <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
@@ -3740,8 +3761,10 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
               {canShare && <button onClick={()=>{ try { navigator.share({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })], title: meta.title }); } catch {} }} style={btn("#7c3aed")}>Teilen</button>}
+              {fsOk && <button onClick={()=>saveToFolder(result, true, fileName)} style={btn("#0f766e")}>📁 In Backup-Ordner ablegen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
+            {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
             {result.note && <div style={{fontSize:12,color:"#fca5a5"}}>⚠ {result.note}</div>}
           </>
         )}
