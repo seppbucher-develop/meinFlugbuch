@@ -288,7 +288,7 @@ function windowedClimbSinkExtremes(track, windowSec, maneuverPrefix, glitchPrefi
     const rate = (track[j][altKey] - track[i][altKey]) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
     if (altitudeGlitchWindowOverlaps(glitchPrefix, i, j)) continue; // einzelner unplausibler Höhensprung im Fenster versteckt, ignorieren
-    if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover, ignorieren
+    if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover/Schlepp, ignorieren
     if (rate > maxRate) maxRate = rate;
     if (rate < minRate) minRate = rate;
   }
@@ -373,7 +373,7 @@ function computeClimbSinkPoints(track, windowSec) {
     const rate = (track[j].gpsAlt - track[i].gpsAlt) / dt;
     if (Math.abs(rate) > PLAUSIBLE_MAX_VARIO_MS) continue; // GPS-/Höhenausreisser, ignorieren
     if (altitudeGlitchWindowOverlaps(glitchPrefix, i, j)) continue; // einzelner unplausibler Höhensprung im Fenster versteckt, ignorieren
-    if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover, ignorieren
+    if (maneuverWindowOverlaps(maneuverPrefix, i, j)) continue; // Steilspirale/Wingover/Schlepp, ignorieren
     const mid = Math.round((i+j)/2);
     candidates.push({ idx: mid, rate, timeSec: track[mid].timeSec });
   }
@@ -534,6 +534,62 @@ function findRawManeuverRuns(track) {
   return runs;
 }
 
+// ── Schleppphase (Winde / Flugzeug) ─────────────────────────────────────────
+// Windenschlepp liefert 3–8 m/s, Flugzeugschlepp 1–3 m/s — aber beides ist kein thermisches Steigen und
+// verfälscht Max.Steigen, Ø-Steigen und die "stärkste Thermik". Erkennung: in den ersten TOW_SEARCH_SEC
+// ein Abschnitt, der anhaltend steigt (≥ 1 m/s über 15 s) und dabei fast gerade bleibt (≤ 60° Kursänderung
+// je 15 s; Kurs nur bei ≥ 2 m/s Bodengeschwindigkeit, sonst GPS-Rauschen am Boden). Zusammengefasst
+// (Lücken bis 8 s) gilt er als Schlepp, wenn er
+//  - Winde: im Schnitt ≥ 2.5 m/s steigt, ≥ 30 s dauert und ≥ 60 m bringt, oder
+//  - Flugzeug: im Schnitt ≥ 0.9 m/s steigt, ≥ 120 s dauert, ≥ 120 m bringt und schnell ist (Ø ≥ 13 m/s).
+// Hangsteigen (gerade, aber < 2.5 m/s und langsam) und Thermik (Kreisen) werden so nicht erfasst.
+// Rückgabe { startIdx, endIdx } (inkl. 5 s Nachlauf für das Ausklinken) oder null.
+const TOW_SEARCH_SEC = 900;
+function findTowRun(track) {
+  const n = track.length;
+  if (n < 20) return null;
+  const turnCum = new Float64Array(n + 1), distCum = new Float64Array(n + 1);
+  let prevH = null;
+  for (let i = 1; i < n; i++) {
+    const dt = track[i].timeSec - track[i-1].timeSec;
+    const d = (haversineDistKm(track[i-1], track[i]) || 0) * 1000;
+    let turn = 0;
+    if (dt > 0 && d / dt >= 2) {
+      const h = bearingDeg(track[i-1], track[i]);
+      if (prevH != null) turn = Math.abs(((h - prevH + 540) % 360) - 180);
+      prevH = h;
+    } else prevH = null;
+    turnCum[i+1] = turnCum[i] + turn;
+    distCum[i+1] = distCum[i] + d;
+  }
+  const tEnd = track[0].timeSec + TOW_SEARCH_SEC;
+  const windows = []; // { i, j }: Fenster ≥ 15 s, das wie Schlepp aussieht
+  let j = 0;
+  for (let i = 0; i < n && track[i].timeSec <= tEnd; i++) {
+    while (j < n && track[j].timeSec < track[i].timeSec + 15) j++;
+    if (j >= n) break;
+    const dt = track[j].timeSec - track[i].timeSec;
+    if (dt <= 0) continue;
+    const climb = (track[j].gpsAlt - track[i].gpsAlt) / dt, turn = turnCum[j+1] - turnCum[i+1];
+    if (climb >= 1 && turn <= 60) windows.push({ i, j });
+  }
+  for (let w = 0; w < windows.length;) {
+    let s = windows[w].i, e = windows[w].j, k = w + 1;
+    while (k < windows.length && track[windows[k].i].timeSec - track[e].timeSec <= 8) { e = Math.max(e, windows[k].j); k++; }
+    w = k;
+    const dur = track[e].timeSec - track[s].timeSec, gain = track[e].gpsAlt - track[s].gpsAlt;
+    if (dur <= 0) continue;
+    const avg = gain / dur, speed = (distCum[e+1] - distCum[s+1]) / dur;
+    const winch = avg >= 2.5 && dur >= 30 && gain >= 60;
+    const plane = avg >= 0.9 && dur >= 120 && gain >= 120 && speed >= 13;
+    if (winch || plane) {
+      let hi = e; while (hi < n - 1 && track[hi+1].timeSec <= track[e].timeSec + 5) hi++;
+      return { startIdx: s, endIdx: hi };
+    }
+  }
+  return null;
+}
+
 // Direkt an eine schnelle Dreh-Phase (Spirale/Wingover) grenzt praktisch
 // immer noch eine kurze "Nachlauf"-Phase, in der der Schirm die beim
 // Manöver aufgebaute Fahrt/den steilen Sinkflug erst abbaut, OHNE dabei
@@ -558,6 +614,9 @@ const MANEUVER_EDGE_PADDING_SEC = 6;
 // windowedClimbSinkExtremes oben).
 function buildManeuverPrefix(track) {
   const mask = new Uint8Array(track.length);
+  // Schleppphase (Winde/Flugzeug) wird wie ein Manöver ausgeklammert: kein thermisches Steigen
+  const tow = findTowRun(track);
+  if (tow) for (let k = tow.startIdx; k <= tow.endIdx; k++) mask[k] = 1;
   for (const { startIdx, endIdx } of findRawManeuverRuns(track)) {
     const tStart = track[startIdx].timeSec - MANEUVER_EDGE_PADDING_SEC;
     const tEnd = track[endIdx].timeSec + MANEUVER_EDGE_PADDING_SEC;
@@ -3024,7 +3083,7 @@ function seasonThermals(tr) {
     const a = tr[i - 1], b = tr[i], dt = b.timeSec - a.timeSec;
     if (dt <= 0 || dt > 10) continue;
     const dy = (b.lat - a.lat) * 111320, dx = (b.lon - a.lon) * 111320 * Math.cos(a.lat * R);
-    if (Math.hypot(dx, dy) < 0.6) continue;
+    if (Math.hypot(dx, dy) < 2 * dt) continue;   // unter 2 m/s: Kurs ist GPS-Rauschen (Stillstand am Boden)
     hd[i] = Math.atan2(dx, dy) / R;
   }
   let last = -1;
@@ -3176,12 +3235,12 @@ function buildSeasonStats(flights, fromTs, toTs) {
 
   // Thermik-Szenen: stärkste (bester Schnitt in m/s) und längste (meiste Höhenmeter am Stück).
   // Durchsucht werden die Flüge mit dem grössten Höhengewinn bzw. dem stärksten Steigen.
-  const num = (v) => parseFloat(String(v || "").replace(",", ".")) || 0;
-  const pool = new Set([...withTrack.slice().sort((a, b) => (b.r.f.totalGain || 0) - (a.r.f.totalGain || 0)).slice(0, 15),
-    ...withTrack.slice().sort((a, b) => num((b.r.f.customFields || {}).maxSteigen20) - num((a.r.f.customFields || {}).maxSteigen20)).slice(0, 15)]);
+  const pool = withTrack;   // alle Flüge mit Track (gespeicherte Max.Steigen-Werte älterer Importe enthalten noch den Schlepp)
   let strong = null, long = null;
   for (const x of pool) {
+    const tow = findTowRun(x.track);
     for (const c of seasonThermals(x.track)) {
+      if (tow && c.i0 <= tow.endIdx) continue;   // Winden-/Flugzeugschlepp ist keine Thermik
       if (c.secs >= 40 && c.gain >= 100 && (!strong || c.avg > strong.avg)) strong = { ...c, r: x.r, track: x.track, type: "strong" };
       if (c.gain >= 150 && (!long || c.gain > long.gain)) long = { ...c, r: x.r, track: x.track, type: "long" };
     }
