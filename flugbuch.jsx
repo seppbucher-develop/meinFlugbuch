@@ -3846,7 +3846,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             const pl = (n, a, b) => n === 1 ? a : b, hrs = Math.round(stats.sec / 3600);
             const rows = [[stats.count, pl(stats.count, "Flug", "Flüge")], [hrs, pl(hrs, "Stunde in der Luft", "Stunden in der Luft")], [stats.days, pl(stats.days, "Flugtag", "Flugtage")], [stats.countriesN, pl(stats.countriesN, "Land", "Länder")]].filter(r => r[0] > 0);
             const pitch = 128 * s, last = bot, yK = last - (rows.length - 1) * pitch - 120 * s * 0.74 - 34 * s;
-            kicker("DEINE " + meta.noun.toUpperCase() + " " + meta.big.toUpperCase(), yK, tl, 0.1);
+            kicker("DEINE " + (meta.noun || "Saison").toUpperCase() + " " + meta.big.toUpperCase(), yK, tl, 0.1);
             rows.forEach((r, i) => { const y = last - (rows.length - 1 - i) * pitch; bigNum(count(r[0], tl, 0.3 + i * 0.4, 1), r[1], y, 110 * s, tl, 0.3 + i * 0.4); });
             break;
           }
@@ -3855,13 +3855,13 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             pinsOn(allPins, 99, "pin");
             const yThanks = bot, items = [[stats.count, "FLÜGE"], [Math.round(stats.sec / 3600), "STUNDEN"], [stats.days, "FLUGTAGE"], [stats.countriesN, "LÄNDER"]].filter(r => r[0] > 0);
             const yN = yThanks - 70 * s, yTitle = yN - 54 * s - 50 * s, yK = yTitle - 84 * s * 0.75 - 18 * s;
-            kicker(meta.noun.toUpperCase() + " " + meta.big.toUpperCase(), yK, tl, 0.2);
+            kicker((meta.noun || "Saison").toUpperCase() + " " + meta.big.toUpperCase(), yK, tl, 0.2);
             reveal(tl, 0.4); T(meta.title, mg, yTitle, fitSize(meta.title, 84 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
             reveal(tl, 0.8);
             const colW = (W - 2 * mg) / items.length;
             items.forEach((r, i) => { const x = mg + i * colW; T(seasonInt(r[0]), x, yN, 54 * s, 800, "#fff"); T(r[1], x, yN + 26 * s, 15 * s, 700, "rgba(232,244,253,0.6)", "left", 2 * s); });
             endReveal();
-            reveal(tl, 1.3); T("Danke für diese " + meta.noun + ". Bis bald in der Luft.", mg, yThanks + 30 * s, 24 * s, 600, "rgba(232,244,253,0.85)"); endReveal();
+            reveal(tl, 1.3); T("Danke für diese " + (meta.noun || "Saison") + ". Bis bald in der Luft.", mg, yThanks + 30 * s, 24 * s, 600, "rgba(232,244,253,0.85)"); endReveal();
             break;
           }
         }
