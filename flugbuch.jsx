@@ -1595,8 +1595,8 @@ function createAltitudeCurtainLayer(pts, groundAt, warm = false) {
   const vtx = (v, c, a) => data.push(v[0] - cx, v[1] - cy, v[2], c[0], c[1], c[2], a);
   for (let k = 0; k < idx.length - 1; k++) {
     const c = col[k + 1];
-    vtx(top[k], c, 0.62); vtx(bot[k], c, 0.3); vtx(top[k + 1], c, 0.62);
-    vtx(top[k + 1], c, 0.62); vtx(bot[k], c, 0.3); vtx(bot[k + 1], c, 0.3);
+    vtx(top[k], c, 0.3); vtx(bot[k], c, 0.04); vtx(top[k + 1], c, 0.3);
+    vtx(top[k + 1], c, 0.3); vtx(bot[k], c, 0.04); vtx(bot[k + 1], c, 0.04);
   }
   let prog = null, buf = null, drawSegs = idx.length - 1;
   return {
