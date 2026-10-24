@@ -534,21 +534,19 @@ function findRawManeuverRuns(track) {
   return runs;
 }
 
-// ── Schleppphase (Winde / Flugzeug) ─────────────────────────────────────────
-// Windenschlepp liefert 3–8 m/s, Flugzeugschlepp 1–3 m/s — aber beides ist kein thermisches Steigen und
-// verfälscht Max.Steigen, Ø-Steigen und die "stärkste Thermik". Erkennung: in den ersten TOW_SEARCH_SEC
-// ein Abschnitt, der anhaltend steigt (≥ 1 m/s über 15 s) und dabei fast gerade bleibt (≤ 60° Kursänderung
-// je 15 s; Kurs nur bei ≥ 2 m/s Bodengeschwindigkeit, sonst GPS-Rauschen am Boden). Zusammengefasst
-// (Lücken bis 8 s) gilt er als Schlepp, wenn er
-//  - Winde: im Schnitt ≥ 2.5 m/s steigt, ≥ 30 s dauert und ≥ 60 m bringt, oder
-//  - Flugzeug: im Schnitt ≥ 0.9 m/s steigt, ≥ 120 s dauert, ≥ 120 m bringt und schnell ist (Ø ≥ 13 m/s).
-// Hangsteigen (gerade, aber < 2.5 m/s und langsam) und Thermik (Kreisen) werden so nicht erfasst.
+// ── Windenschlepp ───────────────────────────────────────────────────────────
+// Der Windenschlepp liefert 3–8 m/s, ist aber kein thermisches Steigen und verfälscht Max.Steigen, Ø-Steigen
+// und die "stärkste Thermik". Erkennung: in den ersten TOW_SEARCH_SEC ein Abschnitt, der anhaltend steigt
+// (≥ 1 m/s über 15 s) und dabei fast gerade bleibt (≤ 60° Kursänderung je 15 s; Kurs nur bei ≥ 2 m/s
+// Bodengeschwindigkeit, sonst GPS-Rauschen am Boden). Zusammengefasst (Lücken bis 8 s) gilt er als Schlepp, wenn
+// er im Schnitt ≥ 2.5 m/s steigt, ≥ 30 s dauert und ≥ 60 m bringt. Hangsteigen (gerade, aber < 2.5 m/s) und
+// Thermik (Kreisen) werden so nicht erfasst.
 // Rückgabe { startIdx, endIdx } (inkl. 5 s Nachlauf für das Ausklinken) oder null.
 const TOW_SEARCH_SEC = 900;
 function findTowRun(track) {
   const n = track.length;
   if (n < 20) return null;
-  const turnCum = new Float64Array(n + 1), distCum = new Float64Array(n + 1);
+  const turnCum = new Float64Array(n + 1);
   let prevH = null;
   for (let i = 1; i < n; i++) {
     const dt = track[i].timeSec - track[i-1].timeSec;
@@ -560,7 +558,6 @@ function findTowRun(track) {
       prevH = h;
     } else prevH = null;
     turnCum[i+1] = turnCum[i] + turn;
-    distCum[i+1] = distCum[i] + d;
   }
   const tEnd = track[0].timeSec + TOW_SEARCH_SEC;
   const windows = []; // { i, j }: Fenster ≥ 15 s, das wie Schlepp aussieht
@@ -579,10 +576,7 @@ function findTowRun(track) {
     w = k;
     const dur = track[e].timeSec - track[s].timeSec, gain = track[e].gpsAlt - track[s].gpsAlt;
     if (dur <= 0) continue;
-    const avg = gain / dur, speed = (distCum[e+1] - distCum[s+1]) / dur;
-    const winch = avg >= 2.5 && dur >= 30 && gain >= 60;
-    const plane = avg >= 0.9 && dur >= 120 && gain >= 120 && speed >= 13;
-    if (winch || plane) {
+    if (gain / dur >= 2.5 && dur >= 30 && gain >= 60) {
       let hi = e; while (hi < n - 1 && track[hi+1].timeSec <= track[e].timeSec + 5) hi++;
       return { startIdx: s, endIdx: hi };
     }
@@ -981,7 +975,7 @@ function analyzeIGC(track, tzOffsetHours, dateStr) {
   // Flug keine entsprechende Sequenz enthält.
   const { spirale, wingover } = analyzeSpiralWingover(track);
   return { maxAlt, minAlt, startAlt, endAlt, startPt, endPt, durationSec, durationStr, startTime, endTime,
-    thermalCount: thermals.length, maxClimb, maxClimb20, maxSinkRate, maxClimbBaro, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm, maxSpeedKmh,
+    thermalCount: thermals.length, thermalBest: computeThermalBest(track), maxClimb, maxClimb20, maxSinkRate, maxClimbBaro, totalGain: Math.round(totalGain), hDiff, scoreDistanceKm, maxSpeedKmh,
     spiraleMaxSinken: spirale ? spirale.maxSink : null,
     spiraleSinkenSchnitt: spirale ? spirale.avgSink : null,
     spiraleAnzahlKreise: spirale ? spirale.count : null,
@@ -1805,7 +1799,9 @@ function computeVideoHighlights(track, elev, maxPicks = 3, strict = true) {
     return 4 * rel * rel + (alt >= 3500 ? 1.5 : 0);
   };
   const cands = []; // { kind, primary, score, center, f0, f1, lat, lon, label, orbit?, bSide? }
-  const push = (e) => cands.push(e);
+  // Windenschlepp liefert starkes, aber kein thermisches Steigen: Szenen darin werden nicht vorgeschlagen
+  const tow = findTowRun(track), towEndT = tow ? track[tow.endIdx].timeSec : -1;
+  const push = (e) => { if (e.f0 < towEndT) return; cands.push(e); };
 
   // 1) Thermik: 60-s-Fenster mit Kreisen
   const W = 60;
@@ -3077,6 +3073,22 @@ function seasonCleanTrack(track) {
 // Thermiken = Kreisflug-Abschnitte mit Höhengewinn (wie im Vorbild: Spirale mit Versatz durch den Wind,
 // nicht ein gerader Steigflug am Hang). Ein 30-s-Fenster mit ≥ 270° Kursänderung gilt als Kreisen;
 // Kreis-Abschnitte (Lücken bis 12 s überbrückt) mit ≥ 540° Gesamtdrehung, ≥ 30 s und ≥ 60 m Gewinn sind Thermiken.
+// Beste Thermiken eines Flugs für den Saison-Rückblick, einmal beim Import/Nachrechnen bestimmt und am Flug
+// gespeichert (thermalBest), damit das Video nicht jedes Mal alle Tracks analysieren muss. Zeiten (timeSec) statt
+// Indizes, weil der Track beim Video bereinigt wird. Winden-Schlepp wird übersprungen.
+function computeThermalBest(track) {
+  const tr = seasonCleanTrack(track);
+  if (!tr) return null;
+  const tow = findTowRun(tr), towEnd = tow ? tr[tow.endIdx].timeSec : -1;
+  let strong = null, long = null;
+  for (const c of seasonThermals(tr)) {
+    if (tr[c.i0].timeSec <= towEnd) continue;
+    const e = { t0: tr[c.i0].timeSec, t1: tr[c.i1].timeSec, gain: Math.round(c.gain), secs: c.secs, avg: +c.avg.toFixed(2) };
+    if (c.secs >= 40 && c.gain >= 100 && (!strong || e.avg > strong.avg)) strong = e;
+    if (c.gain >= 150 && (!long || e.gain > long.gain)) long = e;
+  }
+  return { v: 1, strong, long };
+}
 function seasonThermals(tr) {
   const n = tr.length, R = Math.PI / 180, hd = new Array(n).fill(null), turn = new Array(n).fill(0);
   for (let i = 1; i < n; i++) {
@@ -3117,7 +3129,7 @@ function seasonThermals(tr) {
 }
 
 // Zahlen und Listen für den Zeitraum [fromTs, toTs] (toTs inklusive).
-function buildSeasonStats(flights, fromTs, toTs) {
+function buildSeasonStats(flights, fromTs, toTs, reise) {
   const before = new Set(), rows = [];
   for (const f of flights) {
     const ts = parseDateToTs(f.date || f.rawDate);
@@ -3125,6 +3137,7 @@ function buildSeasonStats(flights, fromTs, toTs) {
     const site = (f.site || "").trim();
     if (ts < fromTs) { if (site) before.add(site.toLowerCase()); continue; }
     if (ts > toTs) continue;
+    if (reise && ((f.customFields || {}).reise || "").trim() !== reise) continue;   // nur Flüge dieser Flugreise
     const tr = f.track && f.track.length ? f.track : null;
     const p0 = f.startPt || (tr && tr[0]) || null;
     rows.push({ f, ts, site, country: ((f.customFields || {}).land || "").trim(),
@@ -3235,14 +3248,17 @@ function buildSeasonStats(flights, fromTs, toTs) {
 
   // Thermik-Szenen: stärkste (bester Schnitt in m/s) und längste (meiste Höhenmeter am Stück).
   // Durchsucht werden die Flüge mit dem grössten Höhengewinn bzw. dem stärksten Steigen.
-  const pool = withTrack;   // alle Flüge mit Track (gespeicherte Max.Steigen-Werte älterer Importe enthalten noch den Schlepp)
+  // Gespeichertes thermalBest (Import/Nachrechnen) nutzen; fehlt es, wird es hier aus dem Track bestimmt
+  const idxAt = (tr, tt) => { let lo = 0, hi = tr.length - 1; while (lo < hi) { const m = (lo + hi) >> 1; if (tr[m].timeSec < tt) lo = m + 1; else hi = m; } return lo; };
   let strong = null, long = null;
-  for (const x of pool) {
-    const tow = findTowRun(x.track);
-    for (const c of seasonThermals(x.track)) {
-      if (tow && c.i0 <= tow.endIdx) continue;   // Winden-/Flugzeugschlepp ist keine Thermik
-      if (c.secs >= 40 && c.gain >= 100 && (!strong || c.avg > strong.avg)) strong = { ...c, r: x.r, track: x.track, type: "strong" };
-      if (c.gain >= 150 && (!long || c.gain > long.gain)) long = { ...c, r: x.r, track: x.track, type: "long" };
+  for (const x of withTrack) {
+    const sb = x.r.f.thermalBest, tb = sb && sb.v === 1 ? sb : computeThermalBest(x.r.f.track);
+    if (!tb) continue;
+    for (const type of ["strong", "long"]) {
+      const e = tb[type];
+      if (!e || (type === "strong" ? strong && e.avg <= strong.avg : long && e.gain <= long.gain)) continue;
+      const c = { i0: idxAt(x.track, e.t0), i1: idxAt(x.track, e.t1), gain: e.gain, secs: e.secs, avg: e.avg, r: x.r, track: x.track, type };
+      if (type === "strong") strong = c; else long = c;
     }
   }
   // fast identische Stelle nur einmal zeigen (dann die längere Variante)
@@ -3367,7 +3383,7 @@ async function prepareSeasonAudio(buf, startSec, D, fadeOut) {
 // ── Drehbuch ───────────────────────────────────────────────────────────
 // Wählt anhand der Länge, wie viele Länder-/Highlight-Szenen Platz haben
 // (ca. 5 s je Einheit), und verteilt die Zeit. Schnitte rasten auf `beats` ein.
-function buildSeasonScript(st, D, beats) {
+function buildSeasonScript(st, D, beats, trip) {
   const UNIT = 5.2, W = { c: 1, h: 1.5, t: 1.5 };
   const cs = st.countries.slice(0, 8), hs = st.highlights.slice(0, 5);
   const seq = [];
@@ -3381,7 +3397,7 @@ function buildSeasonScript(st, D, beats) {
   }
   const sc = [{ kind: "intro", map: "globe", w: 1 }];
   sc.push({ kind: "region", map: "terrain", w: 1, home: true,
-    kicker: st.home ? ["DEINE HEIMATREGION", ...st.home.countries].join(" · ").toUpperCase() : "DEINE FLÜGE", n: st.home ? st.home.n : st.count,
+    kicker: st.home ? [trip ? "DEINE FLÜGE" : "DEINE HEIMATREGION", ...st.home.countries].join(" · ").toUpperCase() : "DEINE FLÜGE", n: st.home ? st.home.n : st.count,
     sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins, plays: st.home ? st.home.plays : st.plays });
   cs.slice(0, nc).forEach(c => sc.push({ kind: "region", map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
     n: c.n, sec: c.sec, sites: c.sites, pins: c.pins, plays: c.plays }));
@@ -3830,7 +3846,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             const pl = (n, a, b) => n === 1 ? a : b, hrs = Math.round(stats.sec / 3600);
             const rows = [[stats.count, pl(stats.count, "Flug", "Flüge")], [hrs, pl(hrs, "Stunde in der Luft", "Stunden in der Luft")], [stats.days, pl(stats.days, "Flugtag", "Flugtage")], [stats.countriesN, pl(stats.countriesN, "Land", "Länder")]].filter(r => r[0] > 0);
             const pitch = 128 * s, last = bot, yK = last - (rows.length - 1) * pitch - 120 * s * 0.74 - 34 * s;
-            kicker("DEINE SAISON " + meta.big.toUpperCase(), yK, tl, 0.1);
+            kicker("DEINE " + meta.noun.toUpperCase() + " " + meta.big.toUpperCase(), yK, tl, 0.1);
             rows.forEach((r, i) => { const y = last - (rows.length - 1 - i) * pitch; bigNum(count(r[0], tl, 0.3 + i * 0.4, 1), r[1], y, 110 * s, tl, 0.3 + i * 0.4); });
             break;
           }
@@ -3839,13 +3855,13 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             pinsOn(allPins, 99, "pin");
             const yThanks = bot, items = [[stats.count, "FLÜGE"], [Math.round(stats.sec / 3600), "STUNDEN"], [stats.days, "FLUGTAGE"], [stats.countriesN, "LÄNDER"]].filter(r => r[0] > 0);
             const yN = yThanks - 70 * s, yTitle = yN - 54 * s - 50 * s, yK = yTitle - 84 * s * 0.75 - 18 * s;
-            kicker("SAISON " + meta.big.toUpperCase(), yK, tl, 0.2);
+            kicker(meta.noun.toUpperCase() + " " + meta.big.toUpperCase(), yK, tl, 0.2);
             reveal(tl, 0.4); T(meta.title, mg, yTitle, fitSize(meta.title, 84 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
             reveal(tl, 0.8);
             const colW = (W - 2 * mg) / items.length;
             items.forEach((r, i) => { const x = mg + i * colW; T(seasonInt(r[0]), x, yN, 54 * s, 800, "#fff"); T(r[1], x, yN + 26 * s, 15 * s, 700, "rgba(232,244,253,0.6)", "left", 2 * s); });
             endReveal();
-            reveal(tl, 1.3); T("Danke für diese Saison. Bis bald in der Luft.", mg, yThanks + 30 * s, 24 * s, 600, "rgba(232,244,253,0.85)"); endReveal();
+            reveal(tl, 1.3); T("Danke für diese " + meta.noun + ". Bis bald in der Luft.", mg, yThanks + 30 * s, 24 * s, 600, "rgba(232,244,253,0.85)"); endReveal();
             break;
           }
         }
@@ -3928,6 +3944,17 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [fromS, setFromS] = useState(presets[0].from);
   const [toS, setToS] = useState(presets[0].to);
   const [titleS, setTitleS] = useState(null), [bigS, setBigS] = useState(null);
+  const [reise, setReise] = useState("");   // nur Flüge dieser Flugreise (customFields.reise)
+  const reisen = useMemo(() => {
+    const m = new Map();
+    flights.forEach(f => {
+      const n = ((f.customFields || {}).reise || "").trim(), ts = parseDateToTs(f.date || f.rawDate);
+      if (!n || !ts) return;
+      const g = m.get(n) || { name: n, n: 0, first: ts, last: ts };
+      g.n++; g.first = Math.min(g.first, ts); g.last = Math.max(g.last, ts); m.set(n, g);
+    });
+    return [...m.values()].sort((a, b) => b.first - a.first || b.last - a.last);   // nach Datum absteigend
+  }, [flights]);
   const [target, setTarget] = useState(120);
   const [format, setFormat] = useState("port");
   const [music, setMusic] = useState(null);
@@ -3959,20 +3986,20 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
 
   const fromTs = fromISO(fromS).getTime(), toTs = fromISO(toS).getTime() + 86399999;
   const valid = isFinite(fromTs) && isFinite(toTs) && toTs >= fromTs;
-  const stats = useMemo(() => valid ? buildSeasonStats(flights, fromTs, toTs) : null, [flights, fromTs, toTs, valid]);
+  const stats = useMemo(() => valid ? buildSeasonStats(flights, fromTs, toTs, reise) : null, [flights, fromTs, toTs, valid, reise]);
   const pilotFirst = useMemo(() => {
     const m = new Map(); flights.forEach(f => { const p = (f.pilot || "").trim().split(/\s+/)[0]; if (p) m.set(p, (m.get(p) || 0) + 1); });
     const top = [...m.entries()].sort((a, b) => b[1] - a[1])[0];
     return top ? top[0] : "";
   }, [flights]);
-  const autoTitle = pilotFirst ? (/[sßxz]$/i.test(pilotFirst) ? pilotFirst + "’ Saison" : pilotFirst + "s Saison") : "Meine Saison";
+  const autoTitle = reise ? reise : pilotFirst ? (/[sßxz]$/i.test(pilotFirst) ? pilotFirst + "’ Saison" : pilotFirst + "s Saison") : "Meine Saison";
   const autoBig = (() => {
     const p = presets.find(x => x.id === presetId);
     if (p && p.big && p.from === fromS && p.to === toS) return p.big;
     return seasonDMY(fromTs) + " – " + seasonDMY(toTs);
   })();
   const meta = { title: (titleS != null ? titleS : autoTitle).trim() || autoTitle, big: (bigS != null ? bigS : autoBig).trim() || autoBig,
-    period: seasonLong(fromTs) + " – " + seasonLong(toTs) };
+    period: seasonLong(fromTs) + " – " + seasonLong(toTs), noun: reise ? "Reise" : "Saison" };
 
   // Musik dekodieren und Takt analysieren (neu bei anderem Startpunkt oder anderer Wunschlänge)
   const [mbuf, setMbuf] = useState(null), [mErr, setMErr] = useState("");
@@ -3997,7 +4024,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const musicReady = !music || !!plan;
   const D = music && plan ? plan.end : target;
   const beats = music && plan && plan.an ? seasonBeatTimes(plan.an, D) : null;
-  const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats) : [], [stats, D, plan]);
+  const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats, !!reise) : [], [stats, D, plan, reise]);
   const summary = (() => {
     if (!script.length) return "";
     const c = script.filter(x => x.kind === "region").length - 1, h = script.filter(x => x.kind === "flight").length, t = script.filter(x => x.kind === "thermal").length;
@@ -4014,7 +4041,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
 
-  const fileName = "Saison_" + fromS + "_" + toS;
+  const fileName = (reise ? "Reise_" + reise.replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_") : "Saison") + "_" + fromS + "_" + toS;
   const chip = (active) => ({ flex:"1 1 auto", minHeight:40, padding:"0 10px", borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const lbl = { fontSize:12, color:"rgba(232,244,253,0.6)", marginBottom:6 };
@@ -4050,8 +4077,20 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
                 <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Von<input type="date" value={fromS} onChange={e=>{ if (e.target.value) { setFromS(e.target.value); setPresetId(""); } }} style={inp} /></label>
                 <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Bis<input type="date" value={toS} onChange={e=>{ if (e.target.value) { setToS(e.target.value); setPresetId(""); } }} style={inp} /></label>
               </div>
+              {reisen.length > 0 && (
+                <label style={{display:"block",marginTop:8,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Flugreise (optional)
+                  <select value={reise} onChange={e=>{
+                    const v = e.target.value, r = reisen.find(x => x.name === v);
+                    setReise(v); setTitleS(null);
+                    if (r) { setFromS(iso(new Date(r.first))); setToS(iso(new Date(r.last))); setPresetId(""); }   // Zeitraum auf die Reise setzen (danach anpassbar)
+                  }} style={inp}>
+                    <option value="">Alle Flüge im Zeitraum</option>
+                    {reisen.map(r => <option key={r.name} value={r.name}>{r.name} · {seasonDMY(r.first)}{r.last !== r.first ? " – " + seasonDMY(r.last) : ""} · {r.n} {r.n === 1 ? "Flug" : "Flüge"}</option>)}
+                  </select>
+                </label>
+              )}
               <div style={{fontSize:13,marginTop:8,color:valid&&stats&&stats.count?"#e8f4fd":"#fca5a5"}}>
-                {!valid ? "„Bis“ muss nach „Von“ liegen." : stats.count ? `${stats.count} Flüge · ${seasonHM(stats.sec)} · ${stats.sites} Orte · ${stats.countriesN} Länder` : "Keine Flüge in diesem Zeitraum."}
+                {!valid ? "„Bis“ muss nach „Von“ liegen." : stats.count ? `${stats.count} Flüge · ${seasonHM(stats.sec)} · ${stats.sites} ${stats.sites === 1 ? "Ort" : "Orte"} · ${stats.countriesN} ${stats.countriesN === 1 ? "Land" : "Länder"}` : "Keine Flüge in diesem Zeitraum."}
               </div>
             </div>
             <div style={{display:"flex",gap:8}}>
@@ -9599,6 +9638,7 @@ function FlugbuchApp() {
       // Immer aus dem gerade eingelesenen Track neu gesetzt (nicht nur wenn
       // leer) — siehe Begründung bei Max.Steigen/-20s/Max.Sinken oben.
       maxSpeedKmh: igcData.maxSpeedKmh,
+      thermalBest: igcData.thermalBest,
       startPt: existing.startPt || igcData.startPt,
       endPt: existing.endPt || igcData.endPt,
       startAlt: existing.startAlt || igcData.startAlt,
@@ -9614,6 +9654,39 @@ function FlugbuchApp() {
     setFlights(prev=>prev.map(f=>f.id===updated.id?updated:f));
     if (selected?.id===updated.id) setSelected(updated);
   }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
+
+  // TEMPORÄR: Max.Steigen, Max.Steigen 20s, Max.Steigen (Druck) und thermalBest (Saison-Rückblick) bei allen
+  // Flügen mit IGC-Track neu berechnen — jetzt ohne Windenschlepp (siehe findTowRun). Läuft auf demselben
+  // (bodentransport-bereinigten) Track wie der Import. Kann nach dem einmaligen Nachrechnen wieder entfernt werden.
+  const [recalcBusy, setRecalcBusy] = useState(false), [recalcMsg, setRecalcMsg] = useState("");
+  const recalcClimbAll = useCallback(async () => {
+    const todo = flights.filter(f => f.track && f.track.length >= 30);
+    if (!todo.length) { setRecalcMsg("Keine Flüge mit IGC-Track vorhanden."); return; }
+    if (!window.confirm(`Max.Steigen, Max.Steigen 20s, Max.Steigen (Druck) und die Thermik-Daten für den Saison-Rückblick bei ${todo.length} Flügen mit IGC-Track neu berechnen? Windenschlepp wird dabei ausgeklammert.`)) return;
+    setRecalcBusy(true);
+    const done = new Map(); let changed = 0, tows = 0, failed = 0;
+    for (let k = 0; k < todo.length; k++) {
+      const f = todo[k];
+      try {
+        const tr = trimGroundTransportTrack(f.track), cs = computeClimbSinkStats(tr);
+        if (findTowRun(tr)) tows++;
+        const cf = { ...(f.customFields || {}) };
+        const nm = String(cs.maxClimb), n20 = String(cs.maxClimb20), nb = cs.maxClimbBaro != null ? String(cs.maxClimbBaro) : "";
+        if (cf.maxSteigen !== nm || cf.maxSteigen20 !== n20 || (cf.maxSteigenBaro || "") !== nb) changed++;
+        cf.maxSteigen = nm; cf.maxSteigen20 = n20; cf.maxSteigenBaro = nb;
+        const upd = { ...f, customFields: cf, maxClimb: cs.maxClimb, maxClimb20: cs.maxClimb20, maxClimbBaro: cs.maxClimbBaro, thermalBest: computeThermalBest(tr) };
+        const r = await saveFlight(upd);
+        if (!r.ok) throw r.error;
+        done.set(f.id, upd);
+      } catch (e) { failed++; console.error("Steigwerte nachrechnen fehlgeschlagen:", f.id, e); }
+      if (k % 5 === 4) { setRecalcMsg(`⏳ ${k + 1}/${todo.length}`); await new Promise(r => setTimeout(r, 0)); }
+    }
+    setFlights(prev => prev.map(f => done.get(f.id) || f));
+    if (selected && done.has(selected.id)) setSelected(done.get(selected.id));
+    try { window.storage.set("settings:backupDirty", "1"); } catch {}
+    setRecalcMsg(`✅ ${done.size} Flüge neu berechnet (${tows} mit Windenschlepp, bei ${changed} änderten sich die Max.Steigen-Werte)${failed ? ` · ${failed} fehlgeschlagen` : ""}`);
+    setRecalcBusy(false);
+  }, [flights, selected, saveFlight]);
 
   // Zweiter Teil des Imports (nach einer evtl. NewSchirmDialog-Bestätigung)
   // — arbeitet auf bereits geparsten Dateien, damit ein pausierter Import
@@ -10193,6 +10266,17 @@ function FlugbuchApp() {
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing ? "⏳ Importiere…" : igcDirScanning ? "⏳ Suche…" : "IGC"}
             </div>
           </div>
+        </div>
+      )}
+
+      {showImportMenu && (
+        <div style={{margin:"6px 16px 0",display:"flex",flexDirection:"column",gap:4}}>
+          <button disabled={recalcBusy} onClick={recalcClimbAll}
+            title="Temporär: Max.Steigen-Werte und Thermik-Daten aller Flüge mit IGC-Track ohne Windenschlepp neu berechnen"
+            style={{background:"rgba(255,255,255,0.05)",border:"1px dashed rgba(255,255,255,0.2)",borderRadius:8,padding:"7px 10px",color:"rgba(232,244,253,0.75)",fontSize:12,cursor:recalcBusy?"default":"pointer",textAlign:"left"}}>
+            🔧 Steigwerte neu berechnen (temporär, ohne Windenschlepp)
+          </button>
+          {recalcMsg && <div style={{fontSize:11,color:recalcMsg.startsWith("✅")?"#86efac":"rgba(232,244,253,0.6)"}}>{recalcMsg}</div>}
         </div>
       )}
 
