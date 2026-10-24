@@ -3354,6 +3354,39 @@ function buildSeasonScript(st, D, beats) {
   return sc;
 }
 
+// ── Thermik-Kamera ──
+// Verfolgerkamera: Die Kartenmitte folgt dem Steigflug (Mittel der letzten 25 s samt Höhe), zoomt auf Kreisgrösse,
+// dreht um die Spur und fährt im letzten Teil heraus, um die ganze Thermik zu zeigen.
+function seasonThermalGeo(slice) {
+  const n = slice.length; let la = 0, lo = 0, mnLa = 90, mxLa = -90, mnLo = 180, mxLo = -180, mn = 1e9, mx = -1e9;
+  slice.forEach(p => { la += p.lat; lo += p.lon; mn = Math.min(mn, p.gpsAlt); mx = Math.max(mx, p.gpsAlt); mnLa = Math.min(mnLa, p.lat); mxLa = Math.max(mxLa, p.lat); mnLo = Math.min(mnLo, p.lon); mxLo = Math.max(mxLo, p.lon); });
+  la /= n; lo /= n;
+  // typischer Kreisradius: Abstand der Punkte zum Mittel ihrer Umgebung (±10 Punkte)
+  const ds = [], mLat = 111320, mLon = 111320 * Math.cos(la * Math.PI / 180);
+  for (let i = 10; i < n - 10; i += 4) {
+    let a = 0, b = 0; for (let k = -10; k <= 10; k++) { a += slice[i + k].lat; b += slice[i + k].lon; }
+    ds.push(Math.hypot((slice[i].lat - a / 21) * mLat, (slice[i].lon - b / 21) * mLon));
+  }
+  ds.sort((x, y) => x - y);
+  return { la, lo, minAlt: mn, maxAlt: mx, hor: Math.max((mxLa - mnLa) * mLat, (mxLo - mnLo) * mLon, 120), rad: ds.length ? Math.max(15, ds[ds.length >> 1]) : 40 };
+}
+function seasonThermalCam(slice, g, prF, u, W, H) {
+  const n = slice.length, i1 = Math.max(0, Math.min(n - 1, Math.floor(prF))), t1 = slice[i1].timeSec, R = Math.PI / 180, CIRC = 40075016.686;
+  let i0 = i1; while (i0 > 0 && t1 - slice[i0 - 1].timeSec <= 25) i0--;
+  let la = 0, lo = 0, al = 0; for (let k = i0; k <= i1; k++) { la += slice[k].lat; lo += slice[k].lon; al += slice[k].gpsAlt; }
+  const c = i1 - i0 + 1; la /= c; lo /= c; al /= c;
+  const pitch = 60, sp = Math.sin(pitch * R), cp = Math.cos(pitch * R), lerp = (a, b, f) => a + (b - a) * f;
+  const viewW = Math.max(110, Math.min(450, g.rad * 6.5));                       // Bildbreite ≈ 6,5 Kreisradien: Kreise füllen etwa ein Drittel
+  const zChase = Math.min(17.4, Math.log2(CIRC * Math.cos(la * R) / (512 * (viewW / W))));
+  const need = Math.max(g.hor / (W * 0.5), (g.hor * cp + (g.maxAlt - g.minAlt + 60) * sp) / (H * 0.45));
+  const zOv = Math.min(zChase, Math.log2(CIRC * Math.cos(g.la * R) / (512 * need)));
+  const f = Math.max(0, Math.min(1, (u - 0.66) / 0.26)), ov = f * f * (3 - 2 * f);
+  return { center: [lerp(lo, g.lo, ov), lerp(la, g.la, ov)], zoom: lerp(zChase, zOv, ov), elevation: lerp(al, (g.minAlt + g.maxAlt) / 2, ov),
+    bearing: lerp(-20, 150, u), pitch };
+}
+// Anteil der Spur, der zum Zeitpunkt tl0 (s) gezeichnet ist
+const seasonThermalProg = (tl0, len) => Math.max(0, Math.min(1, (tl0 - 0.4) / (len * 0.62)));
+
 const seasonMapStyle = (sdk) => {
   const M = sdk.MapStyle || {};
   return M.OUTDOOR || (M.BACKDROP && M.BACKDROP.DEFAULT) || M.BACKDROP;
@@ -3405,7 +3438,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
       const gdia = Math.min(W, H * 0.78), zg = Math.log2(gdia * Math.PI / 512);
 
       // ── Karte: Weltkugel oder Gelände, je nach Szene ──
-      let mapKind = null, isGlobe = false, altLayer = null, curtain = null, layerScene = null;
+      let mapKind = null, isGlobe = false, altLayer = null, curtain = null, layerScene = null, freeCam = false, canElev = false;
       const removeLayer = () => { try { if (main && main.getLayer("track-altitude")) main.removeLayer("track-altitude"); if (main && main.getLayer("track-curtain")) main.removeLayer("track-curtain"); } catch {} altLayer = null; curtain = null; layerScene = null; };
       const ensureMap = async (kind) => {
         if (main && mapKind === kind) return;
@@ -3421,6 +3454,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
         await seasonWaitLoad(main);
         if (kind === "globe") { try { if (main.enableGlobe && !isGlobeMap(main)) main.enableGlobe(); } catch {} }
         isGlobe = kind === "globe" && isGlobeMap(main);
+        freeCam = false; canElev = typeof main.setCenterClampedToGround === "function" && typeof main.setCenterElevation === "function";
         await seasonWaitIdle(main, 8000);
         mapKind = kind;
       };
@@ -3487,9 +3521,10 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             const nc = createAltitudeCurtainLayer(sc.slice, groundAt, true);
             if (nc.usesGround) { try { main.removeLayer("track-curtain"); main.addLayer(nc, "track-altitude"); curtain = nc; } catch {} }
           }
-          const pr = Math.round(clamp((st.tl - 0.5) / (st.len * 0.78), 0, 1) * (sc.slice.length - 1));
+          const pr = Math.round(seasonThermalProg(st.tl, st.len) * (sc.slice.length - 1));
           altLayer.setProgress(pr); curtain.setProgress(pr);
         } else if (layerScene) removeLayer();
+        if (canElev && freeCam !== (sc.kind === "thermal")) { freeCam = sc.kind === "thermal"; try { main.setCenterClampedToGround(!freeCam); } catch {} }
         switch (sc.kind) {
           case "intro":
             main.jumpTo({ center: [lerp(focus.lon - 40, focus.lon, e), lerp(14, 24, e)], zoom: lerp(zg + 0.3, zg + 0.62, e), bearing: 0, pitch: 0, padding: { top: 0, bottom: H * 0.3, left: 0, right: 0 } });
@@ -3498,20 +3533,15 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             main.jumpTo({ center: [lerp(focus.lon + 10, focus.lon - 30, u), lerp(24, 18, e)], zoom: lerp(zg + 0.55, zg + 0.35, e), bearing: 0, pitch: 0, padding: { top: 0, bottom: H * 0.3, left: 0, right: 0 } });
             break;
           case "thermal": {
-            // Spur samt Höhe (Boden → Spur) in den freien Bildteil einpassen, leichtes Hineinfahren, kaum Drehung
-            if (!sc._geo) {
-              let la = 0, lo = 0, ma = 0, mnLa = 90, mxLa = -90, mnLo = 180, mxLo = -180, mn = 1e9;
-              sc.slice.forEach(p => { la += p.lat; lo += p.lon; ma += p.gpsAlt; mn = Math.min(mn, p.gpsAlt); mnLa = Math.min(mnLa, p.lat); mxLa = Math.max(mxLa, p.lat); mnLo = Math.min(mnLo, p.lon); mxLo = Math.max(mxLo, p.lon); });
-              const n = sc.slice.length; la /= n; lo /= n;
-              sc._geo = { la, lo, meanAlt: ma / n, minAlt: mn, hor: Math.max((mxLa - mnLa) * 111320, (mxLo - mnLo) * 111320 * Math.cos(la * R2D), 120) };
+            // Verfolgerkamera (siehe seasonThermalCam); die Kartenmitte steigt mit, falls die Karte das kann
+            if (!sc._geo) sc._geo = seasonThermalGeo(sc.slice);
+            const cam = seasonThermalCam(sc.slice, sc._geo, seasonThermalProg(st.tl, st.len) * (sc.slice.length - 1), u, W, H);
+            if (canElev) main.jumpTo({ center: cam.center, zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch, elevation: cam.elevation, padding: { top: 0, bottom: H * 0.1, left: 0, right: 0 } });
+            else {   // Ersatz ohne Höhenversatz: Bildmitte um die Höhe über dem Boden verschieben
+              const gr = groundAt(cam.center[0], cam.center[1]), h = Math.max(0, cam.elevation - (gr != null ? gr : sc._geo.minAlt - 40));
+              const dy = -0.1 * H + 2 * Math.min(0.35 * H, h * Math.sin(cam.pitch * R2D) / mpp0(cam.center[1], cam.zoom));
+              main.jumpTo({ center: cam.center, zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch, padding: { top: Math.max(0, dy), bottom: Math.max(0, -dy), left: 0, right: 0 } });
             }
-            const g = sc._geo, pitch = 58, sp = Math.sin(pitch * R2D), cp = Math.cos(pitch * R2D);
-            const need = Math.max(g.hor / (W * 0.46), (g.hor * cp + (sc.gain + 60) * sp) / (H * 0.42));   // Spur wie im Vorbild nur etwa 40 % des Bildes
-            const zoom = Math.min(16.2, Math.log2(CIRC * Math.cos(g.la * R2D) / (512 * need))) + lerp(-0.15, 0.1, e);
-            const gr = groundAt(g.lo, g.la), hMid = Math.max(0, (g.meanAlt - (gr != null ? gr : g.minAlt - 40)) / 2);
-            const shift = Math.min(0.35 * H, hMid * sp / mpp0(g.la, zoom));   // Objektmitte liegt über dem Bodenpunkt der Kartenmitte
-            const dy = -0.1 * H + 2 * shift;   // freie Bildmitte bei 45 % der Höhe
-            main.jumpTo({ center: [g.lo, g.la], zoom, bearing: lerp(0, 35, u), pitch, padding: { top: Math.max(0, dy), bottom: Math.max(0, -dy), left: 0, right: 0 } });
             break;
           }
           default: {
@@ -3722,7 +3752,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
           case "thermal": {
             tint(0.3); grad(0.5, 0.62);
             // Zähler folgt dem tatsächlich bereits gestiegenen Höhengewinn der gezeichneten Spur
-            const pr = Math.round(clamp((tl0 - 0.5) / (len * 0.78), 0, 1) * (sc.slice.length - 1)), strong = sc.type === "strong";
+            const pr = Math.round(seasonThermalProg(tl0, len) * (sc.slice.length - 1)), strong = sc.type === "strong";
             const gNow = clamp(sc.slice[pr].gpsAlt - sc.slice[sc.from].gpsAlt, 0, sc.gain), p = sc.gain > 0 ? gNow / sc.gain : 0;
             const yS = bot, ySub = yS - 6 * s, yB = ySub - 50 * s, yK = yB - 150 * s * 0.74 - 20 * s;
             kicker(strong ? "STÄRKSTE THERMIK" : "LÄNGSTE THERMIK · MEISTE HÖHENMETER", yK, tl, 0.2);
