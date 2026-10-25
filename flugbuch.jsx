@@ -2194,6 +2194,92 @@ async function prepareVideoAudio(file, startSec, D) {
   const out = await ctx.startRendering();
   return { sampleRate: out.sampleRate, buffer: out, channels: [out.getChannelData(0), out.getChannelData(1)] };
 }
+// ── Videos im Backup-Ordner ──────────────────────────────────────────────
+// Gemeinsame Logik für Saison-Rückblick (Ordner "Rückblick") und Flug-Video (Ordner "videos"): ein Zielordner im
+// Backup-Ordner (File System Access API, Chrome/Edge), ein Speichern-Knopf (Backup-Ordner, sonst Download des
+// Browsers) und eine Liste des Ordners nach Dateiname absteigend mit Abspielen/Löschen.
+// save(…, interactive = false) versucht es nur, wenn der Zugriff schon erlaubt ist (automatisch nach dem Rendern).
+function useVideoFolder(dirName) {
+  const fsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
+  const [msg, setMsg] = useState("");
+  const [listOpen, setListOpen] = useState(false), [items, setItems] = useState(null), [listMsg, setListMsg] = useState(""), [playItem, setPlayItem] = useState(null);
+  useEffect(() => () => { if (playItem) URL.revokeObjectURL(playItem.url); }, [playItem]);
+  const getDir = async (create, interactive) => {
+    const handle = await window.fsapiHandle.get("backupDir");
+    if (!handle) throw new Error("Kein Backup-Ordner festgelegt (Service → Backup-Ordner).");
+    let perm = await handle.queryPermission({ mode: "readwrite" });
+    if (perm !== "granted") {
+      if (!interactive) throw new Error("NOPERM");
+      perm = await handle.requestPermission({ mode: "readwrite" });
+    }
+    if (perm !== "granted") throw new Error("Zugriff auf den Backup-Ordner nicht erlaubt.");
+    return handle.getDirectoryHandle(dirName, { create });
+  };
+  const save = async (res, interactive, nm) => {
+    try {
+      const dir = await getDir(true, interactive);
+      const name = `${nm}.${res.ext}`;
+      const fh = await dir.getFileHandle(name, { create: true });
+      const w = await fh.createWritable(); await w.write(res.blob); await w.close();
+      setMsg(`✓ Gespeichert im Backup-Ordner: ${dirName}/${name}`);
+      return true;
+    } catch (e) { setMsg(e.message === "NOPERM" ? "Noch nicht im Backup-Ordner abgelegt – „Speichern“ tippen." : "Ablegen im Backup-Ordner fehlgeschlagen: " + e.message); return false; }
+  };
+  const saveVideo = async (res, nm) => {
+    if (fsOk && await save(res, true, nm)) return;
+    const a = document.createElement("a"); a.href = res.url; a.download = `${nm}.${res.ext}`; document.body.appendChild(a); a.click(); a.remove();
+    setMsg(m => (fsOk && m ? m + " Das Video wurde stattdessen heruntergeladen." : "Das Video wurde heruntergeladen."));
+  };
+  const loadList = async () => {
+    setListMsg("");
+    try {
+      let dir;
+      try { dir = await getDir(false, true); } catch (e) { if (e && e.name === "NotFoundError") { setItems([]); return; } throw e; }
+      const arr = [];
+      for await (const [name, h] of dir.entries()) {
+        if (h.kind !== "file" || !/\.(mp4|webm)$/i.test(name)) continue;
+        const f = await h.getFile(); arr.push({ name, size: f.size, mod: f.lastModified });
+      }
+      arr.sort((a, b) => b.name.localeCompare(a.name, "de"));
+      setItems(arr);
+    } catch (e) { setItems(null); setListMsg("Liste nicht lesbar: " + (e && e.message ? e.message : e)); }
+  };
+  const toggleList = async () => { if (listOpen) { setPlayItem(null); setListOpen(false); return; } setListOpen(true); await loadList(); };
+  const playFile = async (name) => {
+    try { const dir = await getDir(false, true); const f = await (await dir.getFileHandle(name)).getFile(); setPlayItem({ name, url: URL.createObjectURL(f) }); }
+    catch (e) { setListMsg("Video nicht lesbar: " + (e && e.message ? e.message : e)); }
+  };
+  const deleteFile = async (name) => {
+    if (!window.confirm(`„${name}“ löschen?`)) return;
+    try { const dir = await getDir(false, true); await dir.removeEntry(name); if (playItem && playItem.name === name) setPlayItem(null); await loadList(); }
+    catch (e) { setListMsg("Löschen fehlgeschlagen: " + (e && e.message ? e.message : e)); }
+  };
+  return { dirName, fsOk, msg, setMsg, save, saveVideo, listOpen, items, listMsg, playItem, toggleList, playFile, deleteFile };
+}
+function VideoFolderPanel({ vf, title, btn }) {
+  return (
+    <div style={{border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+      <button onClick={vf.toggleList} style={{...btn("rgba(255,255,255,0.08)"),height:38,fontSize:14,textAlign:"left"}}>{title} {vf.listOpen ? "▾" : "▸"}</button>
+      {vf.listOpen && (
+        <>
+          {vf.listMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{vf.listMsg}</div>}
+          {vf.items && !vf.items.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Noch keine Videos im Ordner „{vf.dirName}“ des Backup-Ordners.</div>}
+          {vf.playItem && <video src={vf.playItem.url} controls playsInline autoPlay style={{width:"100%",maxHeight:"50vh",borderRadius:10,background:"#000"}} />}
+          {vf.items && vf.items.map(it => (
+            <div key={it.name} style={{display:"flex",alignItems:"center",gap:8,background:vf.playItem && vf.playItem.name === it.name ? "rgba(125,211,252,0.12)" : "rgba(255,255,255,0.04)",borderRadius:8,padding:"6px 8px"}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
+                <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{(it.size / 1048576).toFixed(0)} MB · {new Date(it.mod).toLocaleDateString("de-CH")}</div>
+              </div>
+              <button onClick={()=>vf.playFile(it.name)} title="Abspielen" style={{...btn("rgba(22,163,74,0.7)"),height:34,padding:"0 12px"}}>▶</button>
+              <button onClick={()=>vf.deleteFile(it.name)} title="Löschen" style={{...btn("rgba(220,38,38,0.6)"),height:34,padding:"0 12px"}}>🗑</button>
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
 // "Teilen" (Web Share) erlaubt Chromium nur bis 50 MB Dateigrösse: grössere Videos werden mit
 // NotAllowedError "Permission denied" abgelehnt. Die Bitrate wird deshalb so gewählt, dass das Video samt Ton
 // bei etwa 46 MB landet (bis 10 Mbit/s bei kurzen Videos, mindestens 2 Mbit/s).
@@ -4003,67 +4089,9 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
-  const [folderMsg, setFolderMsg] = useState(""), [shareMsg, setShareMsg] = useState("");
+  const [shareMsg, setShareMsg] = useState("");
+  const vf = useVideoFolder(RUECKBLICK_DIR);   // Zielordner "Rückblick" im Backup-Ordner
   const cancelRef = useRef(null);
-  // Ein Zielordner: "Rückblick" im Backup-Ordner (File System Access API, Chrome/Edge). Ohne Backup-Ordner oder
-  // Zugriff fällt "Speichern" auf den normalen Download des Browsers zurück. interactive = false: nur versuchen,
-  // wenn der Zugriff schon erlaubt ist (automatisches Ablegen direkt nach dem Rendern).
-  const fsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
-  const getRueckblickDir = async (create, interactive) => {
-    const handle = await window.fsapiHandle.get("backupDir");
-    if (!handle) throw new Error("Kein Backup-Ordner festgelegt (Service → Backup-Ordner).");
-    let perm = await handle.queryPermission({ mode: "readwrite" });
-    if (perm !== "granted") {
-      if (!interactive) throw new Error("NOPERM");
-      perm = await handle.requestPermission({ mode: "readwrite" });
-    }
-    if (perm !== "granted") throw new Error("Zugriff auf den Backup-Ordner nicht erlaubt.");
-    return handle.getDirectoryHandle(RUECKBLICK_DIR, { create });
-  };
-  const saveToFolder = async (res, interactive, nm) => {
-    try {
-      const dir = await getRueckblickDir(true, interactive);
-      const name = `${nm}.${res.ext}`;
-      const fh = await dir.getFileHandle(name, { create: true });
-      const w = await fh.createWritable(); await w.write(res.blob); await w.close();
-      setFolderMsg(`✓ Gespeichert im Backup-Ordner: ${RUECKBLICK_DIR}/${name}`);
-      return true;
-    } catch (e) { setFolderMsg(e.message === "NOPERM" ? "Noch nicht im Backup-Ordner abgelegt – „Speichern“ tippen." : "Ablegen im Backup-Ordner fehlgeschlagen: " + e.message); return false; }
-  };
-  const downloadFile = (res, nm) => { const a = document.createElement("a"); a.href = res.url; a.download = `${nm}.${res.ext}`; document.body.appendChild(a); a.click(); a.remove(); };
-  const saveVideo = async (res) => {
-    if (fsOk && await saveToFolder(res, true, fileName)) return;
-    downloadFile(res, fileName);
-    setFolderMsg(m => (fsOk && m ? m + " Das Video wurde stattdessen heruntergeladen." : "Das Video wurde heruntergeladen."));
-  };
-  // Liste der gespeicherten Rückblicke (nach Dateiname absteigend; die Namen beginnen mit dem Von-Datum): abspielen, löschen
-  const [listOpen, setListOpen] = useState(false), [items, setItems] = useState(null), [listMsg, setListMsg] = useState(""), [playItem, setPlayItem] = useState(null);
-  useEffect(() => () => { if (playItem) URL.revokeObjectURL(playItem.url); }, [playItem]);
-  const loadList = async () => {
-    setListMsg("");
-    try {
-      let dir;
-      try { dir = await getRueckblickDir(false, true); } catch (e) { if (e && e.name === "NotFoundError") { setItems([]); return; } throw e; }
-      const arr = [];
-      for await (const [name, h] of dir.entries()) {
-        if (h.kind !== "file" || !/\.(mp4|webm)$/i.test(name)) continue;
-        const f = await h.getFile(); arr.push({ name, size: f.size, mod: f.lastModified });
-      }
-      arr.sort((a, b) => b.name.localeCompare(a.name, "de"));
-      setItems(arr);
-    } catch (e) { setItems(null); setListMsg("Liste nicht lesbar: " + (e && e.message ? e.message : e)); }
-  };
-  const toggleList = async () => { if (listOpen) { setPlayItem(null); setListOpen(false); return; } setListOpen(true); await loadList(); };
-  const playFile = async (name) => {
-    try { const dir = await getRueckblickDir(false, true); const f = await (await dir.getFileHandle(name)).getFile(); setPlayItem({ name, url: URL.createObjectURL(f) }); }
-    catch (e) { setListMsg("Video nicht lesbar: " + (e && e.message ? e.message : e)); }
-  };
-  const deleteFile = async (name) => {
-    if (!window.confirm(`„${name}“ löschen?`)) return;
-    try { const dir = await getRueckblickDir(false, true); await dir.removeEntry(name); if (playItem && playItem.name === name) setPlayItem(null); await loadList(); }
-    catch (e) { setListMsg("Löschen fehlgeschlagen: " + (e && e.message ? e.message : e)); }
-  };
-
   const fromTs = fromISO(fromS).getTime(), toTs = fromISO(toS).getTime() + 86399999;
   const valid = isFinite(fromTs) && isFinite(toTs) && toTs >= fromTs;
   const stats = useMemo(() => valid ? buildSeasonStats(flights, fromTs, toTs, reise) : null, [flights, fromTs, toTs, valid, reise]);
@@ -4149,28 +4177,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
         </div>
         {stage === "options" && (
           <>
-            {fsOk && (
-              <div style={{border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
-                <button onClick={toggleList} style={{...btn("rgba(255,255,255,0.08)"),height:38,fontSize:14,textAlign:"left"}}>📁 Gespeicherte Rückblicke {listOpen ? "▾" : "▸"}</button>
-                {listOpen && (
-                  <>
-                    {listMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{listMsg}</div>}
-                    {items && !items.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Noch keine Rückblicke im Ordner „{RUECKBLICK_DIR}“ des Backup-Ordners.</div>}
-                    {playItem && <video src={playItem.url} controls playsInline autoPlay style={{width:"100%",maxHeight:"50vh",borderRadius:10,background:"#000"}} />}
-                    {items && items.map(it => (
-                      <div key={it.name} style={{display:"flex",alignItems:"center",gap:8,background:playItem && playItem.name === it.name ? "rgba(125,211,252,0.12)" : "rgba(255,255,255,0.04)",borderRadius:8,padding:"6px 8px"}}>
-                        <div style={{flex:1,minWidth:0}}>
-                          <div style={{fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
-                          <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{(it.size / 1048576).toFixed(0)} MB · {new Date(it.mod).toLocaleDateString("de-CH")}</div>
-                        </div>
-                        <button onClick={()=>playFile(it.name)} title="Abspielen" style={{...btn("rgba(22,163,74,0.7)"),height:34,padding:"0 12px"}}>▶</button>
-                        <button onClick={()=>deleteFile(it.name)} title="Löschen" style={{...btn("rgba(220,38,38,0.6)"),height:34,padding:"0 12px"}}>🗑</button>
-                      </div>
-                    ))}
-                  </>
-                )}
-              </div>
-            )}
+            {vf.fsOk && <VideoFolderPanel vf={vf} title="📁 Gespeicherte Rückblicke" btn={btn} />}
             <div>
               <div style={lbl}>Zeitraum</div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -4241,7 +4248,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
               music={music && mbuf && plan ? { buf: mbuf, start: music.start, fade: plan.natural ? 0.5 : Math.min(3, Math.max(1.2, plan.an ? plan.an.beatSec * 4 : 2)) } : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
-              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob, note }; setResult(res); setStage("done"); setShareMsg(""); setFolderMsg(""); if (fsOk) saveToFolder(res, false, fileName); }}
+              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob, note }; setResult(res); setStage("done"); setShareMsg(""); vf.setMsg(""); if (vf.fsOk) vf.save(res, false, fileName); }}
               onError={(m) => { setErr(m); setStage("error"); }} />
             <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
             <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
@@ -4252,11 +4259,11 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
           <>
             <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <button onClick={()=>saveVideo(result)} style={btn("#1e40af")}>💾 Speichern</button>
+              <button onClick={()=>vf.saveVideo(result, fileName)} style={btn("#1e40af")}>💾 Speichern</button>
               {canShare && result.blob.size <= SHARE_MAX_BYTES && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, meta.title)); }} style={btn("#7c3aed")}>Teilen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
-            {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
+            {vf.msg && <div style={{fontSize:12,color:vf.msg.startsWith("✓")?"#86efac":"#fca5a5"}}>{vf.msg}</div>}
             {shareMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{shareMsg}</div>}
             {result.note && <div style={{fontSize:12,color:"#fca5a5"}}>⚠ {result.note}</div>}
           </>
@@ -4464,49 +4471,8 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   // liegt als eigene Datei im Unterordner "videos" des Backup-Ordners
   // (nur Chrome/Edge am Desktop, siehe Service → Backup-Ordner). Der Verweis
   // steckt im normalen Backup, das Video bläht es nicht auf.
-  const fsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
-  const refKey = `video:${flight?.id}`;
-  const [saved, setSaved] = useState(null);
-  const [folderMsg, setFolderMsg] = useState(""), [shareMsg, setShareMsg] = useState("");
-  const [playUrl, setPlayUrl] = useState(null);
-  useEffect(() => { (async () => { try { const r = await window.storage.get(refKey); setSaved(r && r.value ? JSON.parse(r.value) : null); } catch { setSaved(null); } })(); }, [refKey]);
-  useEffect(() => () => { if (playUrl) URL.revokeObjectURL(playUrl); }, [playUrl]);
-  const getVideosDir = async (create, interactive) => {
-    const handle = await window.fsapiHandle.get("backupDir");
-    if (!handle) throw new Error("Kein Backup-Ordner festgelegt (Service → Backup-Ordner).");
-    let perm = await handle.queryPermission({ mode: "readwrite" });
-    if (perm !== "granted") {
-      if (!interactive) throw new Error("NOPERM");
-      perm = await handle.requestPermission({ mode: "readwrite" });
-    }
-    if (perm !== "granted") throw new Error("Zugriff auf den Backup-Ordner nicht erlaubt.");
-    return handle.getDirectoryHandle("videos", { create });
-  };
-  const saveToFolder = async (res, interactive) => {
-    try {
-      const dir = await getVideosDir(true, interactive);
-      const name = `${fileName}_${String(flight.id).slice(-6)}.${res.ext}`;
-      const fh = await dir.getFileHandle(name, { create: true });
-      const w = await fh.createWritable(); await w.write(res.blob); await w.close();
-      const ref = { name, size: res.blob.size, ext: res.ext, created: new Date().toISOString() };
-      await window.storage.set(refKey, JSON.stringify(ref));
-      await window.storage.set("settings:backupDirty", "1");
-      setSaved(ref); setFolderMsg(`✓ Gespeichert im Backup-Ordner: videos/${name}`);
-    } catch (e) { setFolderMsg(e.message === "NOPERM" ? "" : "Ablegen im Backup-Ordner fehlgeschlagen: " + e.message); }
-  };
-  const playSaved = async () => {
-    try {
-      const dir = await getVideosDir(false, true);
-      const file = await (await dir.getFileHandle(saved.name)).getFile();
-      setPlayUrl(URL.createObjectURL(file)); setFolderMsg("");
-    } catch (e) { setFolderMsg("Video nicht gefunden (Backup-Ordner/videos/" + saved.name + "): " + e.message); }
-  };
-  const removeSaved = async () => {
-    if (!window.confirm("Verweis und Videodatei im Backup-Ordner löschen?")) return;
-    try { const dir = await getVideosDir(false, true); await dir.removeEntry(saved.name); } catch {}
-    try { await window.storage.delete(refKey); await window.storage.set("settings:backupDirty", "1"); } catch {}
-    setSaved(null); setPlayUrl(null); setFolderMsg("");
-  };
+  const [shareMsg, setShareMsg] = useState("");
+  const vf = useVideoFolder("videos");   // Zielordner "videos" im Backup-Ordner
   // Zurück-Geste (Android: Wischen vom Bildschirmrand) schliesst nur diesen Dialog
   // — und fragt vorher nach, wenn schon Abschnitte erfasst wurden — statt die
   // Seite zu verlassen.
@@ -4530,7 +4496,9 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   }, []);
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
-    const fileName = `Flug_${(flight?.date || "").replace(/[^0-9A-Za-z]+/g, "-")}_${(flight?.site || "").replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_")}`;
+    // Dateiname beginnt mit dem Flugdatum (ISO): absteigend sortiert steht der jüngste Flug oben; Kennung gegen Doppelungen
+    const dm = String(flight?.date || "").match(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})/);
+    const fileName = `${dm ? `${dm[3].length === 2 ? "20" + dm[3] : dm[3]}-${dm[2].padStart(2, "0")}-${dm[1].padStart(2, "0")}` : "Flug"}_${(flight?.site || "").replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_")}_${String(flight?.id).slice(-6)}`;
   const chip = (active) => ({ flex:1, height:40, borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const canShare = result && navigator.canShare && (() => { try { return navigator.canShare({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })] }); } catch { return false; } })();
@@ -4547,17 +4515,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
         </div>
         {stage === "options" && (
           <>
-            {saved && (
-              <div style={{border:"1px solid rgba(125,211,252,0.3)",borderRadius:10,padding:12,display:"flex",flexDirection:"column",gap:8}}>
-                <div style={{fontSize:13}}>Gespeichertes Video: <b>{saved.name}</b> · {(saved.size/1048576).toFixed(0)} MB · {new Date(saved.created).toLocaleDateString("de-CH")}</div>
-                {playUrl && <video src={playUrl} controls playsInline autoPlay style={{width:"100%",maxHeight:"50vh",borderRadius:10,background:"#000"}} />}
-                {fsOk && <div style={{display:"flex",gap:8}}>
-                  <button onClick={playSaved} style={btn("#16a34a")}>▶ Abspielen</button>
-                  <button onClick={removeSaved} style={btn("rgba(220,38,38,0.6)")}>Löschen</button>
-                </div>}
-                {folderMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{folderMsg}</div>}
-              </div>
-            )}
+            {vf.fsOk && <VideoFolderPanel vf={vf} title="📁 Gespeicherte Flug-Videos" btn={btn} />}
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>setMode("auto")} style={chip(mode==="auto")}>Automatisch</button>
               <button onClick={()=>setMode("manual")} style={chip(mode==="manual")}>Manuell</button>
@@ -4609,7 +4567,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} purpose={purpose} music={music} demCache={demRef} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
-              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setShareMsg(""); setFolderMsg(note ? "⚠ " + note : ""); if (fsOk) saveToFolder(res, false); }}
+              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setShareMsg(""); vf.setMsg(note ? "⚠ " + note : ""); if (vf.fsOk) vf.save(res, false, fileName); }}
               onError={(m) => { setErr(m); setStage("error"); }} />
             <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
             <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
@@ -4620,12 +4578,11 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
           <>
             <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
+              <button onClick={()=>vf.saveVideo(result, fileName)} style={btn("#1e40af")}>💾 Speichern</button>
               {canShare && result.blob.size <= SHARE_MAX_BYTES && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, "Mein Flug")); }} style={btn("#7c3aed")}>Teilen</button>}
-              {fsOk && <button onClick={()=>saveToFolder(result, true)} style={btn("#0f766e")}>📁 In Backup-Ordner ablegen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
-            {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
+            {vf.msg && <div style={{fontSize:12,color:vf.msg.startsWith("✓")?"#86efac":"#fca5a5"}}>{vf.msg}</div>}
             {shareMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{shareMsg}</div>}
           </>
         )}
