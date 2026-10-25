@@ -2194,6 +2194,17 @@ async function prepareVideoAudio(file, startSec, D) {
   const out = await ctx.startRendering();
   return { sampleRate: out.sampleRate, buffer: out, channels: [out.getChannelData(0), out.getChannelData(1)] };
 }
+// "Teilen" (Web Share) erlaubt Chromium nur bis 50 MB Dateigrösse: grössere Videos werden mit
+// NotAllowedError "Permission denied" abgelehnt. Die Bitrate wird deshalb so gewählt, dass das Video samt Ton
+// bei etwa 46 MB landet (bis 10 Mbit/s bei kurzen Videos, mindestens 2 Mbit/s).
+const SHARE_MAX_BYTES = 50 * 1024 * 1024;
+const videoBitrateFor = (D) => Math.round(Math.max(2e6, Math.min(10e6, 46e6 * 8 / Math.max(1, D) - 170000)));
+// Teilt eine Videodatei; gibt "" bei Erfolg/Abbruch zurück, sonst eine Meldung für die Anzeige.
+async function shareVideoFile(blob, name, title) {
+  if (blob.size > SHARE_MAX_BYTES) return `Das Video ist ${(blob.size / 1048576).toFixed(0)} MB gross – der Browser erlaubt „Teilen“ nur bis 50 MB. Bitte „Speichern“ verwenden.`;
+  try { await navigator.share({ files: [new File([blob], name, { type: blob.type })], title }); return ""; }
+  catch (e) { return e && e.name === "AbortError" ? "" : "Teilen nicht möglich: " + (e && e.message ? e.message : e) + " – bitte „Speichern“ verwenden."; }
+}
 async function pickAudioConfig() {
   if (typeof AudioEncoder === "undefined" || typeof AudioData === "undefined") return null;
   for (const c of [{ codec: "mp4a.40.2", muxer: "aac" }, { codec: "opus", muxer: "opus" }]) {
@@ -2946,7 +2957,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
 
       // ── 2) Aufnahme ──
       try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch {}
-      const FPS = 30, BITRATE = 10000000;
+      const FPS = 30, BITRATE = videoBitrateFor(D);
       const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
       let mix = null, audioNote = "";
       if (music && music.file) {
@@ -3469,7 +3480,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
     const run = async () => {
       if (!sdk) throw new Error("MapTiler-SDK nicht geladen");
       if (!mapTilerKey) throw new Error("Kein MapTiler-Schlüssel hinterlegt (Service → API-Zugangsdaten).");
-      const FPS = 30, BITRATE = 10000000, scenes = script;
+      const FPS = 30, BITRATE = videoBitrateFor(D), scenes = script;
       const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
       if (!wcCfg) throw new Error("Dieser Browser kann keine MP4-Videos kodieren (WebCodecs/H.264). Bitte Chrome, Edge oder einen aktuellen Safari verwenden.");
 
@@ -3974,7 +3985,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null);
   const [err, setErr] = useState("");
-  const [folderMsg, setFolderMsg] = useState("");
+  const [folderMsg, setFolderMsg] = useState(""), [shareMsg, setShareMsg] = useState("");
   const cancelRef = useRef(null);
   // Fertiges Video im Unterordner "videos" des Backup-Ordners ablegen (wie beim Flug-Video;
   // nur Chrome/Edge am Desktop). interactive = false: nur versuchen, wenn der Zugriff schon erlaubt ist.
@@ -4141,7 +4152,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
               music={music && mbuf && plan ? { buf: mbuf, start: music.start, fade: plan.natural ? 0.5 : Math.min(3, Math.max(1.2, plan.an ? plan.an.beatSec * 4 : 2)) } : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
-              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob, note }; setResult(res); setStage("done"); setFolderMsg(""); if (fsOk) saveToFolder(res, false, fileName); }}
+              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob, note }; setResult(res); setStage("done"); setShareMsg(""); setFolderMsg(""); if (fsOk) saveToFolder(res, false, fileName); }}
               onError={(m) => { setErr(m); setStage("error"); }} />
             <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
             <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
@@ -4153,11 +4164,12 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
-              {canShare && <button onClick={()=>{ try { navigator.share({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })], title: meta.title }); } catch {} }} style={btn("#7c3aed")}>Teilen</button>}
+              {canShare && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, meta.title)); }} style={btn("#7c3aed")}>Teilen</button>}
               {fsOk && <button onClick={()=>saveToFolder(result, true, fileName)} style={btn("#0f766e")}>📁 In Backup-Ordner ablegen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
             {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
+            {shareMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{shareMsg}</div>}
             {result.note && <div style={{fontSize:12,color:"#fca5a5"}}>⚠ {result.note}</div>}
           </>
         )}
@@ -4366,7 +4378,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const fsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
   const refKey = `video:${flight?.id}`;
   const [saved, setSaved] = useState(null);
-  const [folderMsg, setFolderMsg] = useState("");
+  const [folderMsg, setFolderMsg] = useState(""), [shareMsg, setShareMsg] = useState("");
   const [playUrl, setPlayUrl] = useState(null);
   useEffect(() => { (async () => { try { const r = await window.storage.get(refKey); setSaved(r && r.value ? JSON.parse(r.value) : null); } catch { setSaved(null); } })(); }, [refKey]);
   useEffect(() => () => { if (playUrl) URL.revokeObjectURL(playUrl); }, [playUrl]);
@@ -4498,7 +4510,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} music={music} demCache={demRef} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
-              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setFolderMsg(note ? "⚠ " + note : ""); if (fsOk) saveToFolder(res, false); }}
+              onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setShareMsg(""); setFolderMsg(note ? "⚠ " + note : ""); if (fsOk) saveToFolder(res, false); }}
               onError={(m) => { setErr(m); setStage("error"); }} />
             <div style={{fontSize:13,textAlign:"center"}}>{progress.text} {progress.pct}%</div>
             <div style={{height:6,borderRadius:3,background:"rgba(255,255,255,0.15)",overflow:"hidden"}}><div style={{height:"100%",width:progress.pct+"%",background:"#7dd3fc"}} /></div>
@@ -4510,11 +4522,12 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
-              {canShare && <button onClick={()=>{ try { navigator.share({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })], title: "Mein Flug" }); } catch {} }} style={btn("#7c3aed")}>Teilen</button>}
+              {canShare && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, "Mein Flug")); }} style={btn("#7c3aed")}>Teilen</button>}
               {fsOk && <button onClick={()=>saveToFolder(result, true)} style={btn("#0f766e")}>📁 In Backup-Ordner ablegen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
             {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
+            {shareMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{shareMsg}</div>}
           </>
         )}
         {stage === "error" && (
