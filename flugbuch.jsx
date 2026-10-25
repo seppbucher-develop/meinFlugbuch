@@ -3550,7 +3550,12 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
           if (!sc._f) sc._f = fitCam(sc.dec, { pitch: 40, top: 0.1, bottom: 0.44, padX: 0.1, minSpan: sc.excerpt ? 500 : 2000, maxZoom: sc.excerpt ? 16 : 14.5 });
           return { center: sc._f.center, zoom: sc._f.zoom + 0.2 * e, bearing: lerp(-8, 10, u), pitch: lerp(36, 44, e), top: 0.1, bottom: 0.44 };
         }
-        if (!sc._f) sc._f = fitCam(sc.pins && sc.pins.length ? sc.pins : allPins, { pitch: 38, top: 0.08, bottom: 0.5, padX: 0.1, minSpan: 15000, maxZoom: 11 });
+        if (!sc._f) {
+          // Ausschnitt nicht nur nach den Startplätzen (Pins), sondern auch nach allen abgespielten Tracks, sonst laufen Flüge aus dem Bild
+          const pts = (sc.pins && sc.pins.length ? sc.pins : allPins).slice();
+          (sc.plays || []).forEach(pl => { if (pl.path) pl.path.forEach(q => pts.push({ lon: q[0], lat: q[1] })); });
+          sc._f = fitCam(pts, { pitch: 38, top: 0.08, bottom: 0.5, padX: 0.1, minSpan: 15000, maxZoom: 11 });
+        }
         return { center: sc._f.center, zoom: sc._f.zoom + 0.25 * e, bearing: lerp(0, sc.kind === "totals" ? 10 : -6, e), pitch: lerp(34, 40, e), top: 0.08, bottom: 0.5 };
       };
       // Weicher Kameraflug zwischen zwei Karten-Szenen (ausser Thermik): bei grosser Entfernung zoomt die Kamera zwischendurch heraus
@@ -3860,7 +3865,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             const colW = (W - 2 * mg) / items.length;
             items.forEach((r, i) => { const x = mg + i * colW; T(seasonInt(r[0]), x, yN, 54 * s, 800, "#fff"); T(r[1], x, yN + 26 * s, 15 * s, 700, "rgba(232,244,253,0.6)", "left", 2 * s); });
             endReveal();
-            reveal(tl, 1.3); T("Danke für diese " + (meta.noun || "Saison") + ". Bis bald in der Luft.", mg, yThanks + 30 * s, 24 * s, 600, "rgba(232,244,253,0.85)"); endReveal();
+            reveal(tl, 1.3); T("schön wars:)", mg, yThanks + 30 * s, 24 * s, 600, "rgba(232,244,253,0.85)"); endReveal();
             break;
           }
         }
