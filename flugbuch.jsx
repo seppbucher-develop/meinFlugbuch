@@ -2195,7 +2195,7 @@ async function prepareVideoAudio(file, startSec, D) {
   return { sampleRate: out.sampleRate, buffer: out, channels: [out.getChannelData(0), out.getChannelData(1)] };
 }
 // ── Videos im Backup-Ordner ──────────────────────────────────────────────
-// Gemeinsame Logik für Saison-Rückblick (Ordner "Rückblick") und Flug-Video (Ordner "videos"): ein Zielordner im
+// Gemeinsame Logik für Saison-Rückblick (Ordner "Rückblick") und Flug-Video (Ordner "Flüge"): ein Zielordner im
 // Backup-Ordner (File System Access API, Chrome/Edge), ein Speichern-Knopf (Backup-Ordner, sonst Download des
 // Browsers) und eine Liste des Ordners nach Dateiname absteigend mit Abspielen/Löschen.
 // save(…, interactive = false) versucht es nur, wenn der Zugriff schon erlaubt ist (automatisch nach dem Rendern).
@@ -3177,6 +3177,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, purpo
 const SEASON_MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
 const SEASON_ACCENT = "#a3e635";
 const RUECKBLICK_DIR = "Rückblick";   // Ordner im Backup-Ordner für die Saison-Rückblick-Videos
+const FLUEGE_DIR = "Flüge";           // Ordner im Backup-Ordner für die Videos einzelner Flüge
 const seasonDay = (ts) => { const d = new Date(ts); return d.getDate() + ". " + SEASON_MONTHS[d.getMonth()]; };
 const seasonDMY = (ts) => { const d = new Date(ts); return d.getDate() + "." + (d.getMonth() + 1) + "." + d.getFullYear(); };
 const seasonLong = (ts) => { const d = new Date(ts); return d.getDate() + ". " + SEASON_MONTHS[d.getMonth()] + " " + d.getFullYear(); };
@@ -4471,13 +4472,10 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const cancelRef = useRef(null);
   // Musik (optional): eigene Audiodatei, wird beim Erstellen in das Video gemischt
   const [music, setMusic] = useState(null); // { file, name, dur, start }
-  // Gespeichertes Video (Variante "Verweis"): in den Daten liegt nur
-  // storage "video:<flugId>" = { name, size, ext, created }; die Datei selbst
-  // liegt als eigene Datei im Unterordner "videos" des Backup-Ordners
-  // (nur Chrome/Edge am Desktop, siehe Service → Backup-Ordner). Der Verweis
-  // steckt im normalen Backup, das Video bläht es nicht auf.
+  // Gespeicherte Videos liegen im Ordner "Flüge" des Backup-Ordners (nur Chrome/Edge, siehe Service →
+  // Backup-Ordner); die Liste dort erkennt das Video zu diesem Flug an der Kennung im Dateinamen.
   const [shareMsg, setShareMsg] = useState("");
-  const vf = useVideoFolder("videos");   // Zielordner "videos" im Backup-Ordner
+  const vf = useVideoFolder(FLUEGE_DIR);
   // Zurück-Geste (Android: Wischen vom Bildschirmrand) schliesst nur diesen Dialog
   // — und fragt vorher nach, wenn schon Abschnitte erfasst wurden — statt die
   // Seite zu verlassen.
