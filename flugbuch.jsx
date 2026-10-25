@@ -2256,7 +2256,9 @@ function useVideoFolder(dirName) {
   };
   return { dirName, fsOk, msg, setMsg, save, saveVideo, listOpen, items, listMsg, playItem, toggleList, playFile, deleteFile };
 }
-function VideoFolderPanel({ vf, title, btn }) {
+// isMine(name): optional — markiert das zum aktuellen Flug gehörende Video (Rahmen, Hinweis) und rollt es beim Öffnen ins Bild
+function VideoFolderPanel({ vf, title, btn, isMine }) {
+  useEffect(() => { const el = document.querySelector("[data-mine=\"1\"]"); if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" }); }, [vf.items]);
   return (
     <div style={{border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
       <button onClick={vf.toggleList} style={{...btn("rgba(255,255,255,0.08)"),height:38,fontSize:14,textAlign:"left"}}>{title} {vf.listOpen ? "▾" : "▸"}</button>
@@ -2265,16 +2267,19 @@ function VideoFolderPanel({ vf, title, btn }) {
           {vf.listMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{vf.listMsg}</div>}
           {vf.items && !vf.items.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Noch keine Videos im Ordner „{vf.dirName}“ des Backup-Ordners.</div>}
           {vf.playItem && <video src={vf.playItem.url} controls playsInline autoPlay style={{width:"100%",maxHeight:"50vh",borderRadius:10,background:"#000"}} />}
-          {vf.items && vf.items.map(it => (
-            <div key={it.name} style={{display:"flex",alignItems:"center",gap:8,background:vf.playItem && vf.playItem.name === it.name ? "rgba(125,211,252,0.12)" : "rgba(255,255,255,0.04)",borderRadius:8,padding:"6px 8px"}}>
+          {vf.items && vf.items.map(it => {
+            const mine = !!isMine && isMine(it.name);
+            return (
+            <div key={it.name} data-mine={mine ? "1" : undefined} style={{display:"flex",alignItems:"center",gap:8,background:vf.playItem && vf.playItem.name === it.name ? "rgba(125,211,252,0.12)" : "rgba(255,255,255,0.04)",borderRadius:8,padding:"6px 8px",border:mine ? "1px solid #7dd3fc" : "1px solid transparent"}}>
               <div style={{flex:1,minWidth:0}}>
                 <div style={{fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
-                <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{(it.size / 1048576).toFixed(0)} MB · {new Date(it.mod).toLocaleDateString("de-CH")}</div>
+                <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{mine && <b style={{color:"#7dd3fc"}}>● Video zu diesem Flug · </b>}{(it.size / 1048576).toFixed(0)} MB · {new Date(it.mod).toLocaleDateString("de-CH")}</div>
               </div>
               <button onClick={()=>vf.playFile(it.name)} title="Abspielen" style={{...btn("rgba(22,163,74,0.7)"),height:34,padding:"0 12px"}}>▶</button>
               <button onClick={()=>vf.deleteFile(it.name)} title="Löschen" style={{...btn("rgba(220,38,38,0.6)"),height:34,padding:"0 12px"}}>🗑</button>
             </div>
-          ))}
+            );
+          })}
         </>
       )}
     </div>
@@ -4496,9 +4501,10 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   }, []);
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
-    // Dateiname beginnt mit dem Flugdatum (ISO): absteigend sortiert steht der jüngste Flug oben; Kennung gegen Doppelungen
-    const dm = String(flight?.date || "").match(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})/);
-    const fileName = `${dm ? `${dm[3].length === 2 ? "20" + dm[3] : dm[3]}-${dm[2].padStart(2, "0")}-${dm[1].padStart(2, "0")}` : "Flug"}_${(flight?.site || "").replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_")}_${String(flight?.id).slice(-6)}`;
+    // Dateiname beginnt mit Flugdatum und Startzeit (ISO, nicht der Erstellzeitpunkt des Videos): absteigend sortiert steht der
+    // jüngste Flug oben; die Kennung am Ende ordnet die Datei beim Öffnen der Liste dem Flug zu
+    const dm = String(flight?.date || "").match(/(\d{1,2})\.(\d{1,2})\.(\d{2,4})/), tm = String(flight?.startTime || "").match(/(\d{1,2}):(\d{2})/);
+    const fileName = `${dm ? `${dm[3].length === 2 ? "20" + dm[3] : dm[3]}-${dm[2].padStart(2, "0")}-${dm[1].padStart(2, "0")}` : "Flug"}${tm ? "_" + tm[1].padStart(2, "0") + tm[2] : ""}_${(flight?.site || "").replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_")}_${String(flight?.id).slice(-6)}`;
   const chip = (active) => ({ flex:1, height:40, borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const canShare = result && navigator.canShare && (() => { try { return navigator.canShare({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })] }); } catch { return false; } })();
@@ -4515,7 +4521,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
         </div>
         {stage === "options" && (
           <>
-            {vf.fsOk && <VideoFolderPanel vf={vf} title="📁 Gespeicherte Flug-Videos" btn={btn} />}
+            {vf.fsOk && <VideoFolderPanel vf={vf} title="📁 Gespeicherte Flug-Videos" btn={btn} isMine={(n) => n.includes("_" + String(flight?.id).slice(-6) + ".")} />}
             <div style={{display:"flex",gap:8}}>
               <button onClick={()=>setMode("auto")} style={chip(mode==="auto")}>Automatisch</button>
               <button onClick={()=>setMode("manual")} style={chip(mode==="manual")}>Manuell</button>
