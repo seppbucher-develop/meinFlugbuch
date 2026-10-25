@@ -4258,7 +4258,6 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             </div>
             {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
             {shareMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{shareMsg}</div>}
-            <div style={{fontSize:11,color:"rgba(232,244,253,0.45)"}}>{(result.blob.size / 1048576).toFixed(0)} MB · {result.ext.toUpperCase()}{result.blob.size > SHARE_MAX_BYTES ? " – zu gross zum Teilen (max. 50 MB)" : ""}</div>
             {result.note && <div style={{fontSize:12,color:"#fca5a5"}}>⚠ {result.note}</div>}
           </>
         )}
@@ -4628,7 +4627,6 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             </div>
             {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
             {shareMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{shareMsg}</div>}
-            <div style={{fontSize:11,color:"rgba(232,244,253,0.45)"}}>{(result.blob.size / 1048576).toFixed(0)} MB · {result.ext.toUpperCase()}{result.blob.size > SHARE_MAX_BYTES ? " – zu gross zum Teilen (max. 50 MB)" : ""}</div>
           </>
         )}
         {stage === "error" && (
