@@ -3932,17 +3932,42 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [fromS, setFromS] = useState(presets[0].from);
   const [toS, setToS] = useState(presets[0].to);
   const [titleS, setTitleS] = useState(null), [bigS, setBigS] = useState(null);
-  const [reise, setReise] = useState("");   // nur Flüge dieser Flugreise (customFields.reise)
+  // Flugreisen zur Auswahl: (1) Kalender-Reisen aus der Reiseanalyse (Statistik; deren Zwischenspeicher
+  // reiseanalyse:tripsCache liegt im gleichen Speicher) — die Flüge ergeben sich aus dem Zeitraum der Reise;
+  // (2) Reisen, die im Feld "Reise" der Flüge eingetragen sind — gefiltert über dieses Feld.
+  const [sel, setSel] = useState("");
+  const [calTrips, setCalTrips] = useState([]);
+  useEffect(() => {
+    (async () => {
+      try { const r = await window.storage.get("reiseanalyse:tripsCache"); const p = r && r.value ? JSON.parse(r.value) : null; if (p && Array.isArray(p.trips)) setCalTrips(p.trips); } catch {}
+    })();
+  }, []);
   const reisen = useMemo(() => {
+    const ts = flights.map(f => parseDateToTs(f.date || f.rawDate)).filter(Boolean);
+    const list = [], calNames = new Set();
+    for (const tr of calTrips) {
+      if (!tr.startDate || !tr.endDate) continue;
+      const [y1, m1, d1] = tr.startDate.split("-").map(Number), [y2, m2, d2] = tr.endDate.split("-").map(Number);
+      const first = new Date(y1, m1 - 1, d1).getTime();
+      let last = new Date(y2, m2 - 1, d2 - (tr.allDay ? 1 : 0)).getTime();   // Ende ganztägiger Termine ist exklusiv
+      if (last < first) last = first;
+      const n = ts.filter(x => x >= first && x <= last).length;
+      if (!n) continue;   // Reisen ohne Flüge sind nicht interessant
+      list.push({ key: "cal:" + tr.id, name: tr.title, type: "cal", first, last, n });
+      calNames.add((tr.title || "").trim().toLowerCase());
+    }
     const m = new Map();
     flights.forEach(f => {
-      const n = ((f.customFields || {}).reise || "").trim(), ts = parseDateToTs(f.date || f.rawDate);
-      if (!n || !ts) return;
-      const g = m.get(n) || { name: n, n: 0, first: ts, last: ts };
-      g.n++; g.first = Math.min(g.first, ts); g.last = Math.max(g.last, ts); m.set(n, g);
+      const n = ((f.customFields || {}).reise || "").trim(), tsf = parseDateToTs(f.date || f.rawDate);
+      if (!n || !tsf || calNames.has(n.toLowerCase())) return;
+      const g = m.get(n) || { key: "field:" + n, name: n, type: "field", n: 0, first: tsf, last: tsf };
+      g.n++; g.first = Math.min(g.first, tsf); g.last = Math.max(g.last, tsf); m.set(n, g);
     });
-    return [...m.values()].sort((a, b) => b.first - a.first || b.last - a.last);   // nach Datum absteigend
-  }, [flights]);
+    return [...list, ...m.values()].sort((a, b) => b.first - a.first || b.last - a.last);   // nach Datum absteigend
+  }, [flights, calTrips]);
+  const selEntry = reisen.find(r => r.key === sel) || null;
+  const reise = selEntry && selEntry.type === "field" ? selEntry.name : "";   // Feld-Filter (Kalender-Reisen filtern über den Zeitraum)
+  const tripName = selEntry ? selEntry.name : "";
   const [target, setTarget] = useState(120);
   const [format, setFormat] = useState("port");
   const [music, setMusic] = useState(null);
@@ -3980,14 +4005,14 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
     const top = [...m.entries()].sort((a, b) => b[1] - a[1])[0];
     return top ? top[0] : "";
   }, [flights]);
-  const autoTitle = reise ? reise : pilotFirst ? (/[sßxz]$/i.test(pilotFirst) ? pilotFirst + "’ Saison" : pilotFirst + "s Saison") : "Meine Saison";
+  const autoTitle = tripName ? tripName : pilotFirst ? (/[sßxz]$/i.test(pilotFirst) ? pilotFirst + "’ Saison" : pilotFirst + "s Saison") : "Meine Saison";
   const autoBig = (() => {
     const p = presets.find(x => x.id === presetId);
     if (p && p.big && p.from === fromS && p.to === toS) return p.big;
     return seasonDMY(fromTs) + " – " + seasonDMY(toTs);
   })();
   const meta = { title: (titleS != null ? titleS : autoTitle).trim() || autoTitle, big: (bigS != null ? bigS : autoBig).trim() || autoBig,
-    period: seasonLong(fromTs) + " – " + seasonLong(toTs), noun: reise ? "Reise" : "Saison" };
+    period: seasonLong(fromTs) + " – " + seasonLong(toTs), noun: tripName ? "Reise" : "Saison" };
 
   // Musik dekodieren und Takt analysieren (neu bei anderem Startpunkt oder anderer Wunschlänge)
   const [mbuf, setMbuf] = useState(null), [mErr, setMErr] = useState("");
@@ -4012,7 +4037,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const musicReady = !music || !!plan;
   const D = music && plan ? plan.end : target;
   const beats = music && plan && plan.an ? seasonBeatTimes(plan.an, D) : null;
-  const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats, !!reise) : [], [stats, D, plan, reise]);
+  const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats, !!tripName) : [], [stats, D, plan, tripName]);
   const summary = (() => {
     if (!script.length) return "";
     const c = script.filter(x => x.kind === "region").length - 1, h = script.filter(x => x.kind === "flight").length, t = script.filter(x => x.kind === "thermal").length;
@@ -4029,7 +4054,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
 
-  const fileName = (reise ? "Reise_" + reise.replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_") : "Saison") + "_" + fromS + "_" + toS;
+  const fileName = (tripName ? "Reise_" + tripName.replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_") : "Saison") + "_" + fromS + "_" + toS;
   const chip = (active) => ({ flex:"1 1 auto", minHeight:40, padding:"0 10px", borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const lbl = { fontSize:12, color:"rgba(232,244,253,0.6)", marginBottom:6 };
@@ -4065,16 +4090,17 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
                 <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Von<input type="date" value={fromS} onChange={e=>{ if (e.target.value) { setFromS(e.target.value); setPresetId(""); } }} style={inp} /></label>
                 <label style={{flex:1,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Bis<input type="date" value={toS} onChange={e=>{ if (e.target.value) { setToS(e.target.value); setPresetId(""); } }} style={inp} /></label>
               </div>
-              {reisen.length > 0 && (
+              {(reisen.length > 0 || calTrips.length === 0) && (
                 <label style={{display:"block",marginTop:8,fontSize:12,color:"rgba(232,244,253,0.6)"}}>Flugreise (optional)
-                  <select value={reise} onChange={e=>{
-                    const v = e.target.value, r = reisen.find(x => x.name === v);
-                    setReise(v); setTitleS(null);
+                  <select value={sel} onChange={e=>{
+                    const v = e.target.value, r = reisen.find(x => x.key === v);
+                    setSel(v); setTitleS(null);
                     if (r) { setFromS(iso(new Date(r.first))); setToS(iso(new Date(r.last))); setPresetId(""); }   // Zeitraum auf die Reise setzen (danach anpassbar)
                   }} style={inp}>
                     <option value="">Alle Flüge im Zeitraum</option>
-                    {reisen.map(r => <option key={r.name} value={r.name}>{r.name} · {seasonDMY(r.first)}{r.last !== r.first ? " – " + seasonDMY(r.last) : ""} · {r.n} {r.n === 1 ? "Flug" : "Flüge"}</option>)}
+                    {reisen.map(r => <option key={r.key} value={r.key}>{r.name} · {seasonDMY(r.first)}{r.last !== r.first ? " – " + seasonDMY(r.last) : ""} · {r.n} {r.n === 1 ? "Flug" : "Flüge"}</option>)}
                   </select>
+                  {calTrips.length === 0 && <span style={{display:"block",marginTop:4,fontSize:11,color:"rgba(232,244,253,0.5)"}}>Reisen aus dem Kalender erscheinen hier, sobald in Statistik → Reiseanalyse einmal synchronisiert wurde.</span>}
                 </label>
               )}
               <div style={{fontSize:13,marginTop:8,color:valid&&stats&&stats.count?"#e8f4fd":"#fca5a5"}}>
