@@ -3738,7 +3738,8 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
       let timeouts = 0;
       const renderSettled = () => new Promise(res => {
         let done = false;
-        const grab = () => { try { fctx.drawImage(main.getCanvas(), 0, 0, W, H); } catch {} };
+        // frameCopy vorher leeren: der Weltraum der Kugel ist transparent und liesse sonst die vorige Karte durchscheinen
+        const grab = () => { try { fctx.clearRect(0, 0, W, H); fctx.drawImage(main.getCanvas(), 0, 0, W, H); } catch {} };
         const fin = () => { if (done) return; done = true; clearTimeout(to); main.off("render", onr); res(); };
         const onr = () => { if (main.areTilesLoaded()) { grab(); timeouts = 0; fin(); } };
         const to = setTimeout(() => { timeouts++; grab(); fin(); }, timeouts > 3 ? 250 : 3000);
