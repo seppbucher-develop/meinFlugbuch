@@ -2198,7 +2198,10 @@ async function prepareVideoAudio(file, startSec, D) {
 // NotAllowedError "Permission denied" abgelehnt. Die Bitrate wird deshalb so gewählt, dass das Video samt Ton
 // bei etwa 46 MB landet (bis 10 Mbit/s bei kurzen Videos, mindestens 2 Mbit/s).
 const SHARE_MAX_BYTES = 50 * 1024 * 1024;
-const videoBitrateFor = (D) => Math.round(Math.max(2e6, Math.min(10e6, 46e6 * 8 / Math.max(1, D) - 170000)));
+// purpose "share": Ziel ≈ 38 MB Videodaten — Handy-Encoder überschreiten die Ziel-Bitrate oft um 15 % und mehr
+// (gemessen: 2 min mit Ziel 46 MB ergaben 53 MB). "best": volle Qualität (10 Mbit/s), meist zu gross zum Teilen.
+const videoBitrateFor = (D, purpose) => purpose === "best" ? 10e6 : Math.round(Math.max(1.5e6, Math.min(10e6, 38e6 * 8 / Math.max(1, D) - 170000)));
+const videoSizeEstimateMB = (D, purpose) => Math.round((videoBitrateFor(D, purpose) / 8 * D + 20000 * D) / 1e6);
 // Teilt eine Videodatei; gibt "" bei Erfolg/Abbruch zurück, sonst eine Meldung für die Anzeige.
 async function shareVideoFile(blob, name, title) {
   if (blob.size > SHARE_MAX_BYTES) return `Das Video ist ${(blob.size / 1048576).toFixed(0)} MB gross – der Browser erlaubt „Teilen“ nur bis 50 MB. Bitte „Speichern“ verwenden.`;
@@ -2503,7 +2506,7 @@ async function loadGliderSymbol(flight) {
   } catch (e) { return null; }
 }
 
-function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manual, music, demCache, onDone, onError, onCancelRef, setStatus }) {
+function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, purpose, manual, music, demCache, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), miniDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square", narrow = format !== "land";
   const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720, M = portrait ? 270 : square ? 300 : 330;
@@ -2965,7 +2968,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, manua
 
       // ── 2) Aufnahme ──
       try { if (navigator.wakeLock) wake = await navigator.wakeLock.request("screen"); } catch {}
-      const FPS = 30, BITRATE = videoBitrateFor(D);
+      const FPS = 30, BITRATE = videoBitrateFor(D, purpose);
       const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
       let mix = null, audioNote = "";
       if (music && music.file) {
@@ -3470,7 +3473,7 @@ const seasonWaitIdle = (map, ms) => new Promise(res => {
   map.on("idle", fin); map.triggerRepaint();
 });
 
-function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D, onDone, onError, onCancelRef, setStatus }) {
+function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, music, D, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square";
   const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720;
@@ -3488,7 +3491,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
     const run = async () => {
       if (!sdk) throw new Error("MapTiler-SDK nicht geladen");
       if (!mapTilerKey) throw new Error("Kein MapTiler-Schlüssel hinterlegt (Service → API-Zugangsdaten).");
-      const FPS = 30, BITRATE = videoBitrateFor(D), scenes = script;
+      const FPS = 30, BITRATE = videoBitrateFor(D, purpose), scenes = script;
       const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
       if (!wcCfg) throw new Error("Dieser Browser kann keine MP4-Videos kodieren (WebCodecs/H.264). Bitte Chrome, Edge oder einen aktuellen Safari verwenden.");
 
@@ -3994,6 +3997,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const tripName = selEntry ? selEntry.name : "";
   const [target, setTarget] = useState(120);
   const [format, setFormat] = useState("port");
+  const [purpose, setPurpose] = useState("share");   // share: unter 50 MB (Teilen) | best: volle Qualität
   const [music, setMusic] = useState(null);
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null);
@@ -4151,6 +4155,16 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
                 <button onClick={()=>setFormat("land")} style={chip(format==="land")}>Quer 16:9</button>
               </div>
             </div>
+            <div>
+              <div style={lbl}>Verwendung</div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setPurpose("share")} style={chip(purpose==="share")}>📱 Direkt teilen</button>
+                <button onClick={()=>setPurpose("best")} style={chip(purpose==="best")}>🎞 Beste Qualität</button>
+              </div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",marginTop:6,lineHeight:1.5}}>
+                {purpose === "share" ? `Dateigrösse unter 50 MB (ca. ${videoSizeEstimateMB(D, "share")} MB), damit „Teilen“ funktioniert; die Bildqualität ist dafür etwas geringer.` : `Volle Bildqualität (ca. ${videoSizeEstimateMB(D, "best")} MB); fürs „Teilen“ meist zu gross – dann speichern.`}
+              </div>
+            </div>
             <VideoMusicPicker music={music} setMusic={setMusic} btn={btn} note="Die Datei bleibt auf deinem Gerät. Wähle den Startpunkt so, dass dort ein ruhiger Einstieg liegt; das Ende wird automatisch auf einen Takt gelegt." />
             {musicNote && <div style={{fontSize:13,color:mErr?"#fca5a5":"#7dd3fc"}}>♪ {musicNote}</div>}
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
@@ -4161,7 +4175,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
         )}
         {stage === "render" && (
           <>
-            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} D={D}
+            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} purpose={purpose} D={D}
               music={music && mbuf && plan ? { buf: mbuf, start: music.start, fade: plan.natural ? 0.5 : Math.min(3, Math.max(1.2, plan.an ? plan.an.beatSec * 4 : 2)) } : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
@@ -4177,7 +4191,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
-              {canShare && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, meta.title)); }} style={btn("#7c3aed")}>Teilen</button>}
+              {canShare && result.blob.size <= SHARE_MAX_BYTES && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, meta.title)); }} style={btn("#7c3aed")}>Teilen</button>}
               {fsOk && <button onClick={()=>saveToFolder(result, true, fileName)} style={btn("#0f766e")}>📁 In Backup-Ordner ablegen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
@@ -4327,6 +4341,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const [stage, setStage] = useState("options"); // options | render | done | error
   const [duration, setDuration] = useState(45);
   const [format, setFormat] = useState("land"); // land | port | square
+  const [purpose, setPurpose] = useState("share"); // share: unter 50 MB (Teilen) | best: volle Qualität
   const portrait = format === "port";
   const [mode, setMode] = useState("auto"); // auto | manual
   const [segs, setSegs] = useState([]);
@@ -4511,6 +4526,16 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
                 <button onClick={()=>setFormat("square")} style={chip(format==="square")}>Quadrat 1:1</button>
               </div>
             </div>
+            <div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Verwendung</div>
+              <div style={{display:"flex",gap:8}}>
+                <button onClick={()=>setPurpose("share")} style={chip(purpose==="share")}>📱 Direkt teilen</button>
+                <button onClick={()=>setPurpose("best")} style={chip(purpose==="best")}>🎞 Beste Qualität</button>
+              </div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",marginTop:6,lineHeight:1.5}}>
+                {(() => { const dd = mode === "manual" ? Math.max(1, manualSecs) : duration; return purpose === "share" ? `Dateigrösse unter 50 MB (ca. ${videoSizeEstimateMB(dd, "share")} MB), damit „Teilen“ funktioniert; die Bildqualität ist dafür etwas geringer.` : `Volle Bildqualität (ca. ${videoSizeEstimateMB(dd, "best")} MB); fürs „Teilen“ meist zu gross – dann speichern.`; })()}
+              </div>
+            </div>
             <VideoMusicPicker music={music} setMusic={setMusic} btn={btn} />
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
               Ablauf: Zuerst werden die Karten vorgeladen (ca. 20–90 s), dann wird das Video in Echtzeit aufgenommen ({mode === "manual" ? Math.round(manualSecs) : duration} s).
@@ -4521,7 +4546,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
         )}
         {stage === "render" && (
           <>
-            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} music={music} demCache={demRef} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
+            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} purpose={purpose} music={music} demCache={demRef} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
               onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setShareMsg(""); setFolderMsg(note ? "⚠ " + note : ""); if (fsOk) saveToFolder(res, false); }}
@@ -4536,7 +4561,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
-              {canShare && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, "Mein Flug")); }} style={btn("#7c3aed")}>Teilen</button>}
+              {canShare && result.blob.size <= SHARE_MAX_BYTES && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, "Mein Flug")); }} style={btn("#7c3aed")}>Teilen</button>}
               {fsOk && <button onClick={()=>saveToFolder(result, true)} style={btn("#0f766e")}>📁 In Backup-Ordner ablegen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
