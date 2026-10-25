@@ -3432,36 +3432,6 @@ function buildSeasonScript(st, D, beats, trip) {
   return sc;
 }
 
-// ── Thermik-Kamera ──
-// Verfolgerkamera: Die Kartenmitte folgt dem Steigflug (Mittel der letzten 25 s samt Höhe), zoomt auf Kreisgrösse,
-// dreht um die Spur und fährt im letzten Teil heraus, um die ganze Thermik zu zeigen.
-function seasonThermalGeo(slice) {
-  const n = slice.length; let la = 0, lo = 0, mnLa = 90, mxLa = -90, mnLo = 180, mxLo = -180, mn = 1e9, mx = -1e9;
-  slice.forEach(p => { la += p.lat; lo += p.lon; mn = Math.min(mn, p.gpsAlt); mx = Math.max(mx, p.gpsAlt); mnLa = Math.min(mnLa, p.lat); mxLa = Math.max(mxLa, p.lat); mnLo = Math.min(mnLo, p.lon); mxLo = Math.max(mxLo, p.lon); });
-  la /= n; lo /= n;
-  // typischer Kreisradius: Abstand der Punkte zum Mittel ihrer Umgebung (±10 Punkte)
-  const ds = [], mLat = 111320, mLon = 111320 * Math.cos(la * Math.PI / 180);
-  for (let i = 10; i < n - 10; i += 4) {
-    let a = 0, b = 0; for (let k = -10; k <= 10; k++) { a += slice[i + k].lat; b += slice[i + k].lon; }
-    ds.push(Math.hypot((slice[i].lat - a / 21) * mLat, (slice[i].lon - b / 21) * mLon));
-  }
-  ds.sort((x, y) => x - y);
-  return { la, lo, minAlt: mn, maxAlt: mx, hor: Math.max((mxLa - mnLa) * mLat, (mxLo - mnLo) * mLon, 120), rad: ds.length ? Math.max(15, ds[ds.length >> 1]) : 40 };
-}
-function seasonThermalCam(slice, g, prF, u, W, H) {
-  const n = slice.length, i1 = Math.max(0, Math.min(n - 1, Math.floor(prF))), t1 = slice[i1].timeSec, R = Math.PI / 180, CIRC = 40075016.686;
-  let i0 = i1; while (i0 > 0 && t1 - slice[i0 - 1].timeSec <= 25) i0--;
-  let la = 0, lo = 0, al = 0; for (let k = i0; k <= i1; k++) { la += slice[k].lat; lo += slice[k].lon; al += slice[k].gpsAlt; }
-  const c = i1 - i0 + 1; la /= c; lo /= c; al /= c;
-  const pitch = 60, sp = Math.sin(pitch * R), cp = Math.cos(pitch * R), lerp = (a, b, f) => a + (b - a) * f;
-  const viewW = Math.max(110, Math.min(450, g.rad * 6.5));                       // Bildbreite ≈ 6,5 Kreisradien: Kreise füllen etwa ein Drittel
-  const zChase = Math.min(17.4, Math.log2(CIRC * Math.cos(la * R) / (512 * (viewW / W))));
-  const need = Math.max(g.hor / (W * 0.5), (g.hor * cp + (g.maxAlt - g.minAlt + 60) * sp) / (H * 0.45));
-  const zOv = Math.min(zChase, Math.log2(CIRC * Math.cos(g.la * R) / (512 * need)));
-  const f = Math.max(0, Math.min(1, (u - 0.66) / 0.26)), ov = f * f * (3 - 2 * f);
-  return { center: [lerp(lo, g.lo, ov), lerp(la, g.la, ov)], zoom: lerp(zChase, zOv, ov), elevation: lerp(al, (g.minAlt + g.maxAlt) / 2, ov),
-    bearing: lerp(-20, 150, u), pitch };
-}
 // Anteil der Spur, der zum Zeitpunkt tl0 (s) gezeichnet ist
 const seasonThermalProg = (tl0, len) => Math.max(0, Math.min(1, (tl0 - 0.4) / (len * 0.62)));
 
@@ -3516,7 +3486,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
       const gdia = Math.min(W, H * 0.78), zg = Math.log2(gdia * Math.PI / 512);
 
       // ── Karte: Weltkugel oder Gelände, je nach Szene ──
-      let mapKind = null, isGlobe = false, altLayer = null, curtain = null, layerScene = null, freeCam = false, canElev = false;
+      let mapKind = null, isGlobe = false, altLayer = null, curtain = null, layerScene = null;
       const removeLayer = () => { try { if (main && main.getLayer("track-altitude")) main.removeLayer("track-altitude"); if (main && main.getLayer("track-curtain")) main.removeLayer("track-curtain"); } catch {} altLayer = null; curtain = null; layerScene = null; };
       const ensureMap = async (kind) => {
         if (main && mapKind === kind) return;
@@ -3532,7 +3502,6 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
         await seasonWaitLoad(main);
         if (kind === "globe") { try { if (main.enableGlobe && !isGlobeMap(main)) main.enableGlobe(); } catch {} }
         isGlobe = kind === "globe" && isGlobeMap(main);
-        freeCam = false; canElev = typeof main.setCenterClampedToGround === "function" && typeof main.setCenterElevation === "function";
         await seasonWaitIdle(main, 8000);
         mapKind = kind;
       };
@@ -3544,6 +3513,16 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
       const CIRC = 40075016.686, R2D = Math.PI / 180;
       const mpp0 = (lat, zoom) => CIRC * Math.cos(lat * R2D) / (512 * Math.pow(2, zoom));
       const groundAt = (lon, lat) => { try { const g = main.queryTerrainElevation ? main.queryTerrainElevation([lon, lat]) : null; return g != null && isFinite(g) ? g : null; } catch { return null; } };
+      // Träge Glättung (wie im Flug-Video): Werte, die aus Gelände und Flughöhe berechnet werden, schwanken sonst von Bild zu Bild
+      let lastGround = 0;
+      const SM = {};
+      const smooth = (name, target, tt, sc, tauDown, tauUp) => {
+        const q = SM[name];
+        if (!q || q.sc !== sc || Math.abs(tt - q.t) > 1.5) { SM[name] = { v: target, t: tt, sc }; return target; }
+        const tau = target < q.v ? tauDown : tauUp;
+        q.v += (target - q.v) * Math.min(1, Math.abs(tt - q.t) / tau); q.t = tt;
+        return q.v;
+      };
       // Zoom so, dass das Punktefeld in den freien Bildteil passt; die Neigung staucht Nord–Süd.
       const fitCam = (pts, o) => {
         let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
@@ -3602,7 +3581,6 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
           const pr = Math.round(seasonThermalProg(st.tl, st.len) * (sc.slice.length - 1));
           altLayer.setProgress(pr); curtain.setProgress(pr);
         } else if (layerScene) removeLayer();
-        if (canElev && freeCam !== (sc.kind === "thermal")) { freeCam = sc.kind === "thermal"; try { main.setCenterClampedToGround(!freeCam); } catch {} }
         switch (sc.kind) {
           case "intro":
             main.jumpTo({ center: [lerp(focus.lon - 40, focus.lon, e), lerp(14, 24, e)], zoom: lerp(zg + 0.3, zg + 0.62, e), bearing: 0, pitch: 0, padding: { top: 0, bottom: H * 0.3, left: 0, right: 0 } });
@@ -3611,15 +3589,22 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, music, D,
             main.jumpTo({ center: [lerp(focus.lon + 10, focus.lon - 30, u), lerp(24, 18, e)], zoom: lerp(zg + 0.55, zg + 0.35, e), bearing: 0, pitch: 0, padding: { top: 0, bottom: H * 0.3, left: 0, right: 0 } });
             break;
           case "thermal": {
-            // Verfolgerkamera (siehe seasonThermalCam); die Kartenmitte steigt mit, falls die Karte das kann
-            if (!sc._geo) sc._geo = seasonThermalGeo(sc.slice);
-            const cam = seasonThermalCam(sc.slice, sc._geo, seasonThermalProg(st.tl, st.len) * (sc.slice.length - 1), u, W, H);
-            if (canElev) main.jumpTo({ center: cam.center, zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch, elevation: cam.elevation, padding: { top: 0, bottom: H * 0.1, left: 0, right: 0 } });
-            else {   // Ersatz ohne Höhenversatz: Bildmitte um die Höhe über dem Boden verschieben
-              const gr = groundAt(cam.center[0], cam.center[1]), h = Math.max(0, cam.elevation - (gr != null ? gr : sc._geo.minAlt - 40));
-              const dy = -0.1 * H + 2 * Math.min(0.35 * H, h * Math.sin(cam.pitch * R2D) / mpp0(cam.center[1], cam.zoom));
-              main.jumpTo({ center: cam.center, zoom: cam.zoom, bearing: cam.bearing, pitch: cam.pitch, padding: { top: Math.max(0, dy), bottom: Math.max(0, -dy), left: 0, right: 0 } });
+            // Gleiche Einstellungen wie die Thermik-Szene im Flug-Video: fester Mittelpunkt (Mitte der Thermik), Umkreisen
+            // um 170°, Neigung 56°, Zoom 14.7 minus höhenabhängigem Anteil, träge geglättet; die Bildmitte weicht um die
+            // Flughöhe über Grund nach unten aus (padding), damit die steigende Spur im Bild bleibt.
+            const sl = sc.slice, tt = sc.t0 + st.tl;
+            if (!sc._c) {
+              let la = 0, lo = 0; sl.forEach(p => { la += p.lat; lo += p.lon; });
+              const h0 = videoHeadingAt(sl, sl[Math.min(sc.from, sl.length - 1)].timeSec, 20);
+              sc._c = { center: [lo / sl.length, la / sl.length], b0: h0 == null ? 0 : h0 };
             }
+            const pr = Math.round(seasonThermalProg(st.tl, st.len) * (sl.length - 1));
+            const gc = groundAt(sc._c.center[0], sc._c.center[1]);
+            if (gc != null) lastGround = gc;
+            const hCam = smooth("h", Math.max(0, sl[pr].gpsAlt - lastGround), tt, sc, 6, 6);
+            const zoom = smooth("zoom", 14.7 - clamp(Math.log2(1 + hCam / 450), 0, 1.2), tt, sc, 1.2, 1.2), pitch = 56;
+            const pad = smooth("pad", Math.min(hCam / mpp0(sc._c.center[1], zoom) * Math.sin(pitch * R2D), H * 0.12), tt, sc, 2, 2);
+            main.jumpTo({ center: sc._c.center, zoom, bearing: sc._c.b0 + 170 * u, pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
             break;
           }
           default: {
@@ -9658,39 +9643,6 @@ function FlugbuchApp() {
     if (selected?.id===updated.id) setSelected(updated);
   }, [selected, saveFlight, flights, placeMatchRadiusKm, mapTilerKey, resolveSchirmForGlider]);
 
-  // TEMPORÄR: Max.Steigen, Max.Steigen 20s, Max.Steigen (Druck) und thermalBest (Saison-Rückblick) bei allen
-  // Flügen mit IGC-Track neu berechnen — jetzt ohne Windenschlepp (siehe findTowRun). Läuft auf demselben
-  // (bodentransport-bereinigten) Track wie der Import. Kann nach dem einmaligen Nachrechnen wieder entfernt werden.
-  const [recalcBusy, setRecalcBusy] = useState(false), [recalcMsg, setRecalcMsg] = useState("");
-  const recalcClimbAll = useCallback(async () => {
-    const todo = flights.filter(f => f.track && f.track.length >= 30);
-    if (!todo.length) { setRecalcMsg("Keine Flüge mit IGC-Track vorhanden."); return; }
-    if (!window.confirm(`Max.Steigen, Max.Steigen 20s, Max.Steigen (Druck) und die Thermik-Daten für den Saison-Rückblick bei ${todo.length} Flügen mit IGC-Track neu berechnen? Windenschlepp wird dabei ausgeklammert.`)) return;
-    setRecalcBusy(true);
-    const done = new Map(); let changed = 0, tows = 0, failed = 0;
-    for (let k = 0; k < todo.length; k++) {
-      const f = todo[k];
-      try {
-        const tr = trimGroundTransportTrack(f.track), cs = computeClimbSinkStats(tr);
-        if (findTowRun(tr)) tows++;
-        const cf = { ...(f.customFields || {}) };
-        const nm = String(cs.maxClimb), n20 = String(cs.maxClimb20), nb = cs.maxClimbBaro != null ? String(cs.maxClimbBaro) : "";
-        if (cf.maxSteigen !== nm || cf.maxSteigen20 !== n20 || (cf.maxSteigenBaro || "") !== nb) changed++;
-        cf.maxSteigen = nm; cf.maxSteigen20 = n20; cf.maxSteigenBaro = nb;
-        const upd = { ...f, customFields: cf, maxClimb: cs.maxClimb, maxClimb20: cs.maxClimb20, maxClimbBaro: cs.maxClimbBaro, thermalBest: computeThermalBest(tr) };
-        const r = await saveFlight(upd);
-        if (!r.ok) throw r.error;
-        done.set(f.id, upd);
-      } catch (e) { failed++; console.error("Steigwerte nachrechnen fehlgeschlagen:", f.id, e); }
-      if (k % 5 === 4) { setRecalcMsg(`⏳ ${k + 1}/${todo.length}`); await new Promise(r => setTimeout(r, 0)); }
-    }
-    setFlights(prev => prev.map(f => done.get(f.id) || f));
-    if (selected && done.has(selected.id)) setSelected(done.get(selected.id));
-    try { window.storage.set("settings:backupDirty", "1"); } catch {}
-    setRecalcMsg(`✅ ${done.size} Flüge neu berechnet (${tows} mit Windenschlepp, bei ${changed} änderten sich die Max.Steigen-Werte)${failed ? ` · ${failed} fehlgeschlagen` : ""}`);
-    setRecalcBusy(false);
-  }, [flights, selected, saveFlight]);
-
   // Zweiter Teil des Imports (nach einer evtl. NewSchirmDialog-Bestätigung)
   // — arbeitet auf bereits geparsten Dateien, damit ein pausierter Import
   // nach der Bestätigung nicht alle Dateien erneut einlesen/parsen muss.
@@ -10269,17 +10221,6 @@ function FlugbuchApp() {
               {importProgress ? `⏳ ${importProgress.done}/${importProgress.total}` : importing ? "⏳ Importiere…" : igcDirScanning ? "⏳ Suche…" : "IGC"}
             </div>
           </div>
-        </div>
-      )}
-
-      {showImportMenu && (
-        <div style={{margin:"6px 16px 0",display:"flex",flexDirection:"column",gap:4}}>
-          <button disabled={recalcBusy} onClick={recalcClimbAll}
-            title="Temporär: Max.Steigen-Werte und Thermik-Daten aller Flüge mit IGC-Track ohne Windenschlepp neu berechnen"
-            style={{background:"rgba(255,255,255,0.05)",border:"1px dashed rgba(255,255,255,0.2)",borderRadius:8,padding:"7px 10px",color:"rgba(232,244,253,0.75)",fontSize:12,cursor:recalcBusy?"default":"pointer",textAlign:"left"}}>
-            🔧 Steigwerte neu berechnen (temporär, ohne Windenschlepp)
-          </button>
-          {recalcMsg && <div style={{fontSize:11,color:recalcMsg.startsWith("✅")?"#86efac":"rgba(232,244,253,0.6)"}}>{recalcMsg}</div>}
         </div>
       )}
 
