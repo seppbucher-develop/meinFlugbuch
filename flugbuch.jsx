@@ -3085,6 +3085,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, purpo
 
 const SEASON_MONTHS = ["Januar","Februar","März","April","Mai","Juni","Juli","August","September","Oktober","November","Dezember"];
 const SEASON_ACCENT = "#a3e635";
+const RUECKBLICK_DIR = "Rückblick";   // Ordner im Backup-Ordner für die Saison-Rückblick-Videos
 const seasonDay = (ts) => { const d = new Date(ts); return d.getDate() + ". " + SEASON_MONTHS[d.getMonth()]; };
 const seasonDMY = (ts) => { const d = new Date(ts); return d.getDate() + "." + (d.getMonth() + 1) + "." + d.getFullYear(); };
 const seasonLong = (ts) => { const d = new Date(ts); return d.getDate() + ". " + SEASON_MONTHS[d.getMonth()] + " " + d.getFullYear(); };
@@ -4004,25 +4005,63 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [err, setErr] = useState("");
   const [folderMsg, setFolderMsg] = useState(""), [shareMsg, setShareMsg] = useState("");
   const cancelRef = useRef(null);
-  // Fertiges Video im Unterordner "videos" des Backup-Ordners ablegen (wie beim Flug-Video;
-  // nur Chrome/Edge am Desktop). interactive = false: nur versuchen, wenn der Zugriff schon erlaubt ist.
+  // Ein Zielordner: "Rückblick" im Backup-Ordner (File System Access API, Chrome/Edge). Ohne Backup-Ordner oder
+  // Zugriff fällt "Speichern" auf den normalen Download des Browsers zurück. interactive = false: nur versuchen,
+  // wenn der Zugriff schon erlaubt ist (automatisches Ablegen direkt nach dem Rendern).
   const fsOk = typeof window !== "undefined" && !!window.showDirectoryPicker && !!window.fsapiHandle;
+  const getRueckblickDir = async (create, interactive) => {
+    const handle = await window.fsapiHandle.get("backupDir");
+    if (!handle) throw new Error("Kein Backup-Ordner festgelegt (Service → Backup-Ordner).");
+    let perm = await handle.queryPermission({ mode: "readwrite" });
+    if (perm !== "granted") {
+      if (!interactive) throw new Error("NOPERM");
+      perm = await handle.requestPermission({ mode: "readwrite" });
+    }
+    if (perm !== "granted") throw new Error("Zugriff auf den Backup-Ordner nicht erlaubt.");
+    return handle.getDirectoryHandle(RUECKBLICK_DIR, { create });
+  };
   const saveToFolder = async (res, interactive, nm) => {
     try {
-      const handle = await window.fsapiHandle.get("backupDir");
-      if (!handle) throw new Error("Kein Backup-Ordner festgelegt (Service → Backup-Ordner).");
-      let perm = await handle.queryPermission({ mode: "readwrite" });
-      if (perm !== "granted") {
-        if (!interactive) throw new Error("NOPERM");
-        perm = await handle.requestPermission({ mode: "readwrite" });
-      }
-      if (perm !== "granted") throw new Error("Zugriff auf den Backup-Ordner nicht erlaubt.");
-      const dir = await handle.getDirectoryHandle("videos", { create: true });
+      const dir = await getRueckblickDir(true, interactive);
       const name = `${nm}.${res.ext}`;
       const fh = await dir.getFileHandle(name, { create: true });
       const w = await fh.createWritable(); await w.write(res.blob); await w.close();
-      setFolderMsg(`✓ Gespeichert im Backup-Ordner: videos/${name}`);
-    } catch (e) { setFolderMsg(e.message === "NOPERM" ? "Noch nicht im Backup-Ordner abgelegt – „In Backup-Ordner ablegen“ tippen." : "Ablegen im Backup-Ordner fehlgeschlagen: " + e.message); }
+      setFolderMsg(`✓ Gespeichert im Backup-Ordner: ${RUECKBLICK_DIR}/${name}`);
+      return true;
+    } catch (e) { setFolderMsg(e.message === "NOPERM" ? "Noch nicht im Backup-Ordner abgelegt – „Speichern“ tippen." : "Ablegen im Backup-Ordner fehlgeschlagen: " + e.message); return false; }
+  };
+  const downloadFile = (res, nm) => { const a = document.createElement("a"); a.href = res.url; a.download = `${nm}.${res.ext}`; document.body.appendChild(a); a.click(); a.remove(); };
+  const saveVideo = async (res) => {
+    if (fsOk && await saveToFolder(res, true, fileName)) return;
+    downloadFile(res, fileName);
+    setFolderMsg(m => (fsOk && m ? m + " Das Video wurde stattdessen heruntergeladen." : "Das Video wurde heruntergeladen."));
+  };
+  // Liste der gespeicherten Rückblicke (nach Dateiname absteigend; die Namen beginnen mit dem Von-Datum): abspielen, löschen
+  const [listOpen, setListOpen] = useState(false), [items, setItems] = useState(null), [listMsg, setListMsg] = useState(""), [playItem, setPlayItem] = useState(null);
+  useEffect(() => () => { if (playItem) URL.revokeObjectURL(playItem.url); }, [playItem]);
+  const loadList = async () => {
+    setListMsg("");
+    try {
+      let dir;
+      try { dir = await getRueckblickDir(false, true); } catch (e) { if (e && e.name === "NotFoundError") { setItems([]); return; } throw e; }
+      const arr = [];
+      for await (const [name, h] of dir.entries()) {
+        if (h.kind !== "file" || !/\.(mp4|webm)$/i.test(name)) continue;
+        const f = await h.getFile(); arr.push({ name, size: f.size, mod: f.lastModified });
+      }
+      arr.sort((a, b) => b.name.localeCompare(a.name, "de"));
+      setItems(arr);
+    } catch (e) { setItems(null); setListMsg("Liste nicht lesbar: " + (e && e.message ? e.message : e)); }
+  };
+  const toggleList = async () => { if (listOpen) { setPlayItem(null); setListOpen(false); return; } setListOpen(true); await loadList(); };
+  const playFile = async (name) => {
+    try { const dir = await getRueckblickDir(false, true); const f = await (await dir.getFileHandle(name)).getFile(); setPlayItem({ name, url: URL.createObjectURL(f) }); }
+    catch (e) { setListMsg("Video nicht lesbar: " + (e && e.message ? e.message : e)); }
+  };
+  const deleteFile = async (name) => {
+    if (!window.confirm(`„${name}“ löschen?`)) return;
+    try { const dir = await getRueckblickDir(false, true); await dir.removeEntry(name); if (playItem && playItem.name === name) setPlayItem(null); await loadList(); }
+    catch (e) { setListMsg("Löschen fehlgeschlagen: " + (e && e.message ? e.message : e)); }
   };
 
   const fromTs = fromISO(fromS).getTime(), toTs = fromISO(toS).getTime() + 86399999;
@@ -4082,7 +4121,8 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   useEffect(() => () => { if (cancelRef.current) cancelRef.current(); }, []);
   useEffect(() => () => { if (result) URL.revokeObjectURL(result.url); }, [result]);
 
-  const fileName = (tripName ? "Reise_" + tripName.replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_") : "Saison") + "_" + fromS + "_" + toS;
+  // Dateiname beginnt mit dem Von-Datum: absteigend sortiert steht der jüngste Rückblick oben
+  const fileName = fromS + "_" + toS + "_" + (tripName ? tripName.replace(/[^0-9A-Za-zäöüÄÖÜ]+/g, "_") : "Saison");
   const chip = (active) => ({ flex:"1 1 auto", minHeight:40, padding:"0 10px", borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const lbl = { fontSize:12, color:"rgba(232,244,253,0.6)", marginBottom:6 };
@@ -4109,6 +4149,28 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
         </div>
         {stage === "options" && (
           <>
+            {fsOk && (
+              <div style={{border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
+                <button onClick={toggleList} style={{...btn("rgba(255,255,255,0.08)"),height:38,fontSize:14,textAlign:"left"}}>📁 Gespeicherte Rückblicke {listOpen ? "▾" : "▸"}</button>
+                {listOpen && (
+                  <>
+                    {listMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{listMsg}</div>}
+                    {items && !items.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Noch keine Rückblicke im Ordner „{RUECKBLICK_DIR}“ des Backup-Ordners.</div>}
+                    {playItem && <video src={playItem.url} controls playsInline autoPlay style={{width:"100%",maxHeight:"50vh",borderRadius:10,background:"#000"}} />}
+                    {items && items.map(it => (
+                      <div key={it.name} style={{display:"flex",alignItems:"center",gap:8,background:playItem && playItem.name === it.name ? "rgba(125,211,252,0.12)" : "rgba(255,255,255,0.04)",borderRadius:8,padding:"6px 8px"}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:13,fontWeight:700,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</div>
+                          <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{(it.size / 1048576).toFixed(0)} MB · {new Date(it.mod).toLocaleDateString("de-CH")}</div>
+                        </div>
+                        <button onClick={()=>playFile(it.name)} title="Abspielen" style={{...btn("rgba(22,163,74,0.7)"),height:34,padding:"0 12px"}}>▶</button>
+                        <button onClick={()=>deleteFile(it.name)} title="Löschen" style={{...btn("rgba(220,38,38,0.6)"),height:34,padding:"0 12px"}}>🗑</button>
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+            )}
             <div>
               <div style={lbl}>Zeitraum</div>
               <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
@@ -4190,9 +4252,8 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
           <>
             <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-              <a href={result.url} download={`${fileName}.${result.ext}`} style={{...btn("#1e40af"),textDecoration:"none",display:"flex",alignItems:"center"}}>⬇ Speichern</a>
+              <button onClick={()=>saveVideo(result)} style={btn("#1e40af")}>💾 Speichern</button>
               {canShare && result.blob.size <= SHARE_MAX_BYTES && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, meta.title)); }} style={btn("#7c3aed")}>Teilen</button>}
-              {fsOk && <button onClick={()=>saveToFolder(result, true, fileName)} style={btn("#0f766e")}>📁 In Backup-Ordner ablegen</button>}
               <button onClick={()=>{ setResult(null); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Neu erstellen</button>
             </div>
             {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
