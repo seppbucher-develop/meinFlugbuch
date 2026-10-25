@@ -2202,8 +2202,16 @@ const videoBitrateFor = (D) => Math.round(Math.max(2e6, Math.min(10e6, 46e6 * 8 
 // Teilt eine Videodatei; gibt "" bei Erfolg/Abbruch zurück, sonst eine Meldung für die Anzeige.
 async function shareVideoFile(blob, name, title) {
   if (blob.size > SHARE_MAX_BYTES) return `Das Video ist ${(blob.size / 1048576).toFixed(0)} MB gross – der Browser erlaubt „Teilen“ nur bis 50 MB. Bitte „Speichern“ verwenden.`;
-  try { await navigator.share({ files: [new File([blob], name, { type: blob.type })], title }); return ""; }
-  catch (e) { return e && e.name === "AbortError" ? "" : "Teilen nicht möglich: " + (e && e.message ? e.message : e) + " – bitte „Speichern“ verwenden."; }
+  const file = new File([blob], name, { type: blob.type });
+  const t0 = Date.now(), why = (e) => (e && e.name ? e.name + (e.message ? ": " + e.message : "") : String(e));
+  try { await navigator.share({ files: [file], title }); return ""; }
+  catch (e) {
+    // Abbruch durch die Person (Teilen-Fenster geschlossen) bleibt still — ein AbortError schon nach < 2 s ist aber kein
+    // Schliessen, sondern ein Fehlschlag (z.B. kein Ziel für die Datei): dann einmal ohne Titel versuchen und sonst melden.
+    if (e && e.name === "AbortError" && Date.now() - t0 >= 2000) return "";
+    try { await navigator.share({ files: [file] }); return ""; }
+    catch (e2) { if (e2 && e2.name === "AbortError" && Date.now() - t0 >= 2000) return ""; return "Teilen nicht möglich (" + why(e2) + ") – bitte „Speichern“ verwenden."; }
+  }
 }
 async function pickAudioConfig() {
   if (typeof AudioEncoder === "undefined" || typeof AudioData === "undefined") return null;
@@ -4175,6 +4183,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             </div>
             {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
             {shareMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{shareMsg}</div>}
+            <div style={{fontSize:11,color:"rgba(232,244,253,0.45)"}}>{(result.blob.size / 1048576).toFixed(0)} MB · {result.ext.toUpperCase()}{result.blob.size > SHARE_MAX_BYTES ? " – zu gross zum Teilen (max. 50 MB)" : ""}</div>
             {result.note && <div style={{fontSize:12,color:"#fca5a5"}}>⚠ {result.note}</div>}
           </>
         )}
@@ -4533,6 +4542,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             </div>
             {folderMsg && <div style={{fontSize:12,color:folderMsg.startsWith("✓")?"#86efac":"#fca5a5"}}>{folderMsg}</div>}
             {shareMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{shareMsg}</div>}
+            <div style={{fontSize:11,color:"rgba(232,244,253,0.45)"}}>{(result.blob.size / 1048576).toFixed(0)} MB · {result.ext.toUpperCase()}{result.blob.size > SHARE_MAX_BYTES ? " – zu gross zum Teilen (max. 50 MB)" : ""}</div>
           </>
         )}
         {stage === "error" && (
