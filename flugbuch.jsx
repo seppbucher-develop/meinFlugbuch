@@ -4630,7 +4630,7 @@ function VideoMusicPicker({ music, setMusic, btn, note }) {
                   <div style={{display:"flex",gap:8}}>
                     <label style={{...btn("rgba(255,255,255,0.12)"),flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
                       🎵 Datei wählen
-                      <input type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+                      <input type="file" accept=".mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
                     </label>
                     {musicFsOk && <button onClick={()=>scanMusic(false)} style={{...btn("rgba(255,255,255,0.12)"),flex:1,fontSize:14}}>🔍 Musikordner durchsuchen</button>}
                   </div>
