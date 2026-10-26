@@ -1729,9 +1729,8 @@ function makeDemSampler(z, tiles) {
     return a * (1 - ay) + b * ay;
   };
 }
-async function loadVideoDem(track, apiKey) {
+async function loadVideoDem(track, apiKey, pad = 0.012) {
   if (!apiKey || typeof createImageBitmap === "undefined") return null;
-  const pad = 0.012;
   const lats = track.map(p => p.lat), lons = track.map(p => p.lon);
   const bb = { s: Math.min(...lats) - pad, n: Math.max(...lats) + pad, w: Math.min(...lons) - pad, e: Math.max(...lons) + pad };
   const tileXY = (lat, lon, z) => { const n = Math.pow(2, z), s = Math.sin(lat * Math.PI / 180); return [Math.floor((lon + 180) / 360 * n), Math.floor((0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * n)]; };
@@ -3365,9 +3364,10 @@ function buildSeasonStats(flights, fromTs, toTs, reise) {
     .sort((a, b) => (b.r.dist || b.r.sec / 3600) - (a.r.dist || a.r.sec / 3600)) : [];
   const firstsFree = () => firsts.filter(x => !hl.some(h => h.r.f.id === x.r.f.id));
   addWhole(bestOf(withTrack.filter(x => x.r.dist >= 3), x => x.r.dist), "WEITESTER FLUG");
+  // Der längste Flug hat Vorrang vor "erstmals hier": "erstmals hier" nimmt nur Flüge, die noch nicht ganz gezeigt werden
+  addWhole(bestOf(withTrack, x => x.r.sec), "LÄNGSTER FLUG");
   const first1 = firstsFree()[0];
   addWhole(first1, "ZUM ERSTEN MAL HIER");
-  addWhole(bestOf(withTrack, x => x.r.sec), "LÄNGSTER FLUG");
   const high = bestOf(withTrack, x => x.r.alt);
   if (high) {
     const parent = whole(high);
@@ -3574,6 +3574,50 @@ const seasonWaitIdle = (map, ms) => new Promise(res => {
   map.on("idle", fin); map.triggerRepaint();
 });
 
+// Sehenswertes Gelände neben dem Flug: markanter Gipfel oder Felsmonolith nahe der Spur.
+// Raster über Spur + Umgebung aus dem Höhenmodell (elev), lokale Maxima werden nach Überhöhung über einem 2,5-km-Ring
+// und Steilheit bewertet. Liefert { lon, lat, elev, prom, distM } oder null.
+function findScenicPoi(dec, elev) {
+  if (!elev || !dec || dec.length < 3) return null;
+  const R2D = Math.PI / 180, mLat = 111320;
+  let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
+  dec.forEach(p => { a = Math.min(a, p.lon); b = Math.min(b, p.lat); c = Math.max(c, p.lon); d = Math.max(d, p.lat); });
+  const mar = 0.03, la0 = (b + d) / 2, mLon = mLat * Math.cos(la0 * R2D);
+  const w0 = a - mar, w1 = c + mar, s0 = b - mar, s1 = d + mar;
+  const stepM = Math.max(120, Math.max((w1 - w0) * mLon, (s1 - s0) * mLat) / 70);
+  const dLon = stepM / mLon, dLat = stepM / mLat;
+  const nx = Math.floor((w1 - w0) / dLon), ny = Math.floor((s1 - s0) / dLat);
+  const E = new Float32Array((nx + 1) * (ny + 1)).fill(NaN);
+  for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) { const v = elev(s0 + j * dLat, w0 + i * dLon); if (v != null && isFinite(v)) E[j * (nx + 1) + i] = v; }
+  const rc = Math.max(2, Math.round(600 / stepM));
+  const ringM = 2500;
+  const distToTrack = (lon, lat) => { let m = 1e12; for (const p of dec) { const dx = (p.lon - lon) * mLon, dy = (p.lat - lat) * mLat; m = Math.min(m, dx * dx + dy * dy); } return Math.sqrt(m); };
+  let best = null;
+  for (let j = rc; j <= ny - rc; j++) for (let i = rc; i <= nx - rc; i++) {
+    const e0 = E[j * (nx + 1) + i];
+    if (!isFinite(e0)) continue;
+    let isMax = true;
+    for (let dj = -rc; dj <= rc && isMax; dj++) for (let di = -rc; di <= rc; di++) { const v = E[(j + dj) * (nx + 1) + i + di]; if (isFinite(v) && v > e0) { isMax = false; break; } }
+    if (!isMax) continue;
+    const lon = w0 + i * dLon, lat = s0 + j * dLat, dist = distToTrack(lon, lat);
+    if (dist > 3500) continue;
+    let sum = 0, n = 0;
+    for (let k = 0; k < 8; k++) { const v = elev(lat + Math.sin(k * Math.PI / 4) * ringM / mLat, lon + Math.cos(k * Math.PI / 4) * ringM / mLon); if (v != null && isFinite(v)) { sum += v; n++; } }
+    if (n < 6) continue;
+    const prom = e0 - sum / n;
+    let steep = 0;
+    for (let k = 0; k < 8; k++) { const v = elev(lat + Math.sin(k * Math.PI / 4) * 250 / mLat, lon + Math.cos(k * Math.PI / 4) * 250 / mLon); if (v != null && isFinite(v)) steep = Math.max(steep, (e0 - v) / 250); }
+    if (!(prom >= 800 || (prom >= 300 && steep >= 1))) continue;
+    const score = prom * (1 + 0.3 * steep) - dist * 0.05;
+    if (!best || score > best.score) best = { lon, lat, elev: e0, prom, distM: dist, score };
+  }
+  return best;
+}
+const seasonBearing = (a, b) => {   // Himmelsrichtung von a nach b in Grad
+  const R = Math.PI / 180, dl = (b.lon - a.lon) * R * Math.cos((a.lat + b.lat) / 2 * R), dp = (b.lat - a.lat) * R;
+  return Math.atan2(dl, dp) / R;
+};
+
 function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, music, D, mapStyle, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square";
@@ -3595,6 +3639,19 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
       const FPS = 30, BITRATE = videoBitrateFor(D, purpose), scenes = script;
       const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
       if (!wcCfg) throw new Error("Dieser Browser kann keine MP4-Videos kodieren (WebCodecs/H.264). Bitte Chrome, Edge oder einen aktuellen Safari verwenden.");
+
+      // Sehenswertes Gelände (Gipfel, Felsmonolithen) neben ganzen Flügen: eigene Kameraperspektive
+      const flightScenes = scenes.filter(x => x.kind === "flight");
+      for (let k = 0; k < flightScenes.length; k++) {
+        const fs = flightScenes[k];
+        setStatus("Sehenswürdigkeiten werden gesucht …", Math.round(k / flightScenes.length * 100));
+        try {
+          const dem = await loadVideoDem(fs.track, mapTilerKey, 0.035);
+          if (cancelled) return;
+          fs.poi = dem ? findScenicPoi(fs.dec, dem.elev) : null;
+          if (fs.poi) console.info("Saison-Video: Sehenswürdigkeit bei " + fs.title + " – " + Math.round(fs.poi.elev) + " m, " + Math.round(fs.poi.prom) + " m Überhöhung, " + Math.round(fs.poi.distM) + " m neben der Spur");
+        } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
+      }
 
       const out = outRef.current; out.width = W; out.height = H;
       const ctx = out.getContext("2d");
@@ -3658,6 +3715,19 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
       };
       const sceneCam = (sc, u) => {
         const e = ease(u);
+        if (sc.kind === "flight" && sc.poi) {
+          // Kamera blickt über den Flug hinweg auf die Sehenswürdigkeit und fährt mit dem Gleitschirm mit
+          if (!sc._p) {
+            const n = sc.dec.length, cen = { lon: sc.dec.reduce((q, x) => q + x.lon, 0) / n, lat: sc.dec.reduce((q, x) => q + x.lat, 0) / n };
+            const far = Math.max(2500, ...sc.dec.map(x => Math.hypot((x.lon - sc.poi.lon) * 111320 * Math.cos(cen.lat * R2D), (x.lat - sc.poi.lat) * 111320)));
+            const mpp = far * 2 / (W * 0.8);
+            sc._p = { b: seasonBearing(cen, sc.poi), z: clamp(Math.log2(CIRC * Math.cos(cen.lat * R2D) / (512 * mpp)), 11.5, 14.3) };
+          }
+          const len = sc.t1 - sc.t0, p = clamp((u * len - 0.4) / Math.max(0.5, len - 1.3), 0, 1);
+          const tr = sc.track, cur = videoPosAt(tr, tr[0].timeSec + (tr[tr.length - 1].timeSec - tr[0].timeSec) * p);
+          return { center: [lerp(cur.lon, sc.poi.lon, 0.5), lerp(cur.lat, sc.poi.lat, 0.5)], zoom: sc._p.z + 0.2 + 0.5 * e,
+            bearing: sc._p.b + lerp(-14, 14, u), pitch: lerp(62, 68, e), top: 0.1, bottom: 0.44 };
+        }
         if (sc.kind === "flight") {
           if (!sc._f) sc._f = fitCam(sc.dec, { pitch: 40, top: 0.1, bottom: 0.44, padX: 0.1, minSpan: sc.excerpt ? 500 : 2000, maxZoom: sc.excerpt ? 16 : 14.5 });
           return { center: sc._f.center, zoom: sc._f.zoom + 0.2 * e, bearing: lerp(-8, 10, u), pitch: lerp(36, 44, e), top: 0.1, bottom: 0.44 };
