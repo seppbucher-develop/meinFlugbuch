@@ -4161,7 +4161,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const chip = (active) => ({ flex:"1 1 auto", minHeight:40, padding:"0 10px", borderRadius:10, border:active?"1px solid #7dd3fc":"1px solid rgba(255,255,255,0.15)", background:active?"rgba(125,211,252,0.2)":"transparent", color:active?"#7dd3fc":"#e8f4fd", fontSize:14, fontWeight:700, cursor:"pointer" });
   const btn = (bg) => ({ height:44, borderRadius:10, border:"none", background:bg, color:"#fff", fontSize:15, fontWeight:700, cursor:"pointer", padding:"0 16px" });
   const lbl = { fontSize:12, color:"rgba(232,244,253,0.6)", marginBottom:6 };
-  const inp = { height:40, borderRadius:8, border:"1px solid rgba(255,255,255,0.2)", background:"rgba(0,0,0,0.25)", color:"#e8f4fd", padding:"0 10px", fontSize:15, boxSizing:"border-box", width:"100%" };
+  const inp = { height:40, borderRadius:8, border:"1px solid rgba(255,255,255,0.2)", background:"rgba(0,0,0,0.25)", color:"#e8f4fd", padding:"0 10px", fontSize:15, boxSizing:"border-box", width:"100%", colorScheme:"dark" };
   const portrait = format === "port";
   const canShare = result && navigator.canShare && (() => { try { return navigator.canShare({ files: [new File([result.blob], `${fileName}.${result.ext}`, { type: result.blob.type })] }); } catch { return false; } })();
   const canStart = valid && stats && stats.count > 0 && musicReady && !mErr;
