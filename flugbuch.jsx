@@ -3513,7 +3513,8 @@ async function prepareSeasonAudio(buf, startSec, D, fadeOut) {
 // ── Drehbuch ───────────────────────────────────────────────────────────
 // Wählt anhand der Länge, wie viele Länder-/Highlight-Szenen Platz haben
 // (ca. 5 s je Einheit), und verteilt die Zeit. Schnitte rasten auf `beats` ein.
-function buildSeasonScript(st, D, beats, trip, pois) {
+function buildSeasonScript(st, D, beats, trip, pois, opts) {
+  opts = opts || {};
   const UNIT = 5.2, W = { c: 1, h: 1.5, t: 1.5 };
   const cs = st.countries.slice(0, 8), hs = st.highlights.slice(0, 5);
   const seq = [];
@@ -3525,21 +3526,21 @@ function buildSeasonScript(st, D, beats, trip, pois) {
     budget -= W[k];
     if (k === "c") nc++; else if (k === "h") nh++; else nt++;
   }
-  const sc = [{ kind: "intro", map: "globe", w: 1 }];
-  sc.push({ kind: "region", map: "terrain", w: 1, home: true,
+  const sc = [{ kind: "intro", key: "intro", map: "globe", w: 1 }];
+  sc.push({ kind: "region", key: "region:home", map: "terrain", w: 1, home: true,
     kicker: st.home ? [trip ? "DEINE FLÜGE" : "DEINE HEIMATREGION", ...st.home.countries].join(" · ").toUpperCase() : "DEINE FLÜGE", n: st.home ? st.home.n : st.count,
     sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins, plays: st.home ? st.home.plays : st.plays });
-  cs.slice(0, nc).forEach(c => sc.push({ kind: "region", map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
+  cs.slice(0, nc).forEach(c => sc.push({ kind: "region", key: "region:" + c.name, map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
     n: c.n, sec: c.sec, sites: c.sites, pins: c.pins, plays: c.plays }));
   hs.slice(0, nh).forEach((h, hi) => {
     const f = h.r.f, ex = h.excerpt, tr = ex ? h.track.slice(ex.i0, ex.i1 + 1) : h.track, step = Math.max(1, Math.ceil(tr.length / 600));
     const dec = tr.filter((_, i) => i % step === 0 || i === tr.length - 1);
     const km = h.r.dist, parts = [h.r.country, seasonDay(h.r.ts), ex ? seasonInt(ex.alt) + " m ü. M." : km >= 5 ? Math.round(km) + " km" : (h.r.sec / 3600).toFixed(1) + " h"].filter(Boolean);
     const sm = String(f.startTime || "").match(/(\d{1,2}):(\d{2})/);
-    sc.push({ kind: "flight", map: "terrain", w: ex ? 1.1 : 1.5, excerpt: !!ex, kicker: h.tags.join(" · "), title: h.r.site || "Flug", sub: parts.join(" · "),
+    sc.push({ kind: "flight", key: (ex ? "peak:" : "flight:") + hi, map: "terrain", w: ex ? 1.1 : 1.5, excerpt: !!ex, kicker: h.tags.join(" · "), title: h.r.site || "Flug", sub: parts.join(" · "),
       track: tr, dec, hi, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (tr[0].timeSec - h.track[0].timeSec) : null });
     // Bestätigte Sehenswürdigkeit dieses Flugs: eigene Szene mit dem Flugabschnitt daneben (wie "Höchster Punkt")
-    (pois || []).filter(q => q.on && q.hi === hi && !ex).forEach(q => {
+    (pois || []).filter(q => q.hi === hi && !ex).forEach(q => {
       const T = h.track, mLon = 111320 * Math.cos(q.poi.lat * Math.PI / 180);
       let ci = 0, cd = 1e18;
       T.forEach((x, i) => { const d = Math.hypot((x.lon - q.poi.lon) * mLon, (x.lat - q.poi.lat) * 111320); if (d < cd) { cd = d; ci = i; } });
@@ -3547,28 +3548,42 @@ function buildSeasonScript(st, D, beats, trip, pois) {
       while (i0 > 0 && T[ci].timeSec - T[i0 - 1].timeSec <= 150) i0--;
       while (i1 < T.length - 1 && T[i1 + 1].timeSec - T[ci].timeSec <= 150) i1++;
       const seg = T.slice(i0, i1 + 1), stp = Math.max(1, Math.ceil(seg.length / 600)), sdec = seg.filter((_, i) => i % stp === 0 || i === seg.length - 1);
-      const za = parseFloat(String(q.zoom).replace(",", "."));
-      sc.push({ kind: "flight", map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: isFinite(za) ? za : 0.8, hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
+      sc.push({ kind: "flight", key: "poi:" + hi, map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: 0.8, hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
         sub: [h.r.site, seasonInt(q.poi.elev) + " m ü. M."].filter(Boolean).join(" · "), track: seg, dec: sdec,
         clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (seg[0].timeSec - T[0].timeSec) : null });
     });
   });
   st.thermals.slice(0, nt).forEach(T => {
     const a = Math.max(0, T.i0 - 20), z = Math.min(T.track.length, T.i1 + 21), slice = T.track.slice(a, z);
-    sc.push({ kind: "thermal", map: "terrain", w: 1.5, type: T.type, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
+    sc.push({ kind: "thermal", key: "thermal:" + T.type, map: "terrain", w: 1.5, type: T.type, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
       place: [T.r.site, seasonDay(T.r.ts)].filter(Boolean).join(" · ") });
   });
-  sc.push({ kind: "outro", map: "globe", w: 1.2 });
-  // Zeiten verteilen und auf Schläge einrasten
-  const sum = sc.reduce((a, s) => a + s.w, 0), cuts = [0];
+  sc.push({ kind: "outro", key: "outro", map: "globe", w: 1.2 });
+  // Auswahl aus dem Drehbuch-Dialog: Szenen abwählen (off), feste Dauer (fixed, s) und Zoom (zoomAdd)
+  const num = (v) => { const x = parseFloat(String(v).replace(",", ".")); return isFinite(x) ? x : null; };
+  sc.forEach(x => {
+    const o = opts[x.key] || {}, z = num(o.zoom), d = num(o.dur);
+    x.off = o.on === false && x.kind !== "intro" && x.kind !== "outro";
+    if (z != null) x.zoomAdd = z;
+    x.fixed = d != null && d > 0 ? Math.max(1.5, d) : null;
+  });
+  // Zeiten verteilen: feste Dauern zuerst (höchstens 80 % von D), der Rest nach Gewicht; Schnitte rasten auf Schläge ein
+  const act = sc.filter(x => !x.off);
+  const fsum = act.reduce((a, x) => a + (x.fixed || 0), 0), fk = fsum > D * 0.8 ? D * 0.8 / fsum : 1;
+  const wsum = act.reduce((a, x) => a + (x.fixed ? 0 : x.w), 0), rest = Math.max(D - fsum * fk, D * 0.2);
+  let durs = act.map(x => x.fixed ? x.fixed * fk : (wsum ? x.w / wsum * rest : 0));
+  const dsum = durs.reduce((a, x) => a + x, 0) || 1;
+  durs = durs.map(x => x / dsum * D);
+  const cuts = [0];
   let acc = 0;
-  for (let i = 0; i < sc.length - 1; i++) { acc += sc[i].w / sum * D; cuts.push(acc); }
+  for (let i = 0; i < act.length - 1; i++) { acc += durs[i]; cuts.push(acc); }
   cuts.push(D);
   if (beats && beats.length) for (let i = 1; i < cuts.length - 1; i++) cuts[i] = beats.reduce((b, t) => Math.abs(t - cuts[i]) < Math.abs(b - cuts[i]) ? t : b, beats[0]);
-  const MIN = Math.min(2.4, D / sc.length * 0.7);
+  const MIN = Math.min(2.4, D / act.length * 0.7);
   for (let i = 1; i < cuts.length - 1; i++) if (cuts[i] < cuts[i - 1] + MIN) cuts[i] = cuts[i - 1] + MIN;
   for (let i = cuts.length - 2; i >= 1; i--) if (cuts[i] > cuts[i + 1] - MIN) cuts[i] = cuts[i + 1] - MIN;
-  sc.forEach((s, i) => { s.t0 = cuts[i]; s.t1 = cuts[i + 1]; });
+  act.forEach((x, i) => { x.t0 = cuts[i]; x.t1 = cuts[i + 1]; });
+  sc.filter(x => x.off).forEach(x => { x.t0 = x.t1 = null; });
   return sc;
 }
 
@@ -3757,7 +3772,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
         }
         if (sc.kind === "flight") {
           if (!sc._f) sc._f = fitCam(sc.dec, { pitch: 40, top: 0.1, bottom: 0.44, padX: 0.1, minSpan: sc.excerpt ? 500 : 2000, maxZoom: sc.excerpt ? 16 : 14.5 });
-          return { center: sc._f.center, zoom: sc._f.zoom + 0.2 * e, bearing: lerp(-8, 10, u), pitch: lerp(36, 44, e), top: 0.1, bottom: 0.44 };
+          return { center: sc._f.center, zoom: clamp(sc._f.zoom + (sc.zoomAdd || 0) + 0.2 * e, 3, 17.5), bearing: lerp(-8, 10, u), pitch: lerp(36, 44, e), top: 0.1, bottom: 0.44 };
         }
         if (!sc._f) {
           // Ausschnitt nicht nur nach den Startplätzen (Pins), sondern auch nach allen abgespielten Tracks, sonst laufen Flüge aus dem Bild
@@ -3827,7 +3842,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
             const gc = groundAt(sc._c.center[0], sc._c.center[1]);
             if (gc != null) lastGround = gc;
             const hCam = smooth("h", Math.max(0, sl[pr].gpsAlt - lastGround), tt, sc, 6, 6);
-            const zoom = smooth("zoom", 14.7 - clamp(Math.log2(1 + hCam / 450), 0, 1.2), tt, sc, 1.2, 1.2), pitch = 56;
+            const zoom = smooth("zoom", 14.7 + (sc.zoomAdd || 0) - clamp(Math.log2(1 + hCam / 450), 0, 1.2), tt, sc, 1.2, 1.2), pitch = 56;
             const pad = smooth("pad", Math.min(hCam / mpp0(sc._c.center[1], zoom) * Math.sin(pitch * R2D), H * 0.12), tt, sc, 2, 2);
             main.jumpTo({ center: sc._c.center, zoom, bearing: sc._c.b0 + 170 * u, pitch, padding: { top: 2 * pad, bottom: 0, left: 0, right: 0 } });
             break;
@@ -4242,6 +4257,8 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
     return () => { dead = true; };
   }, [music && music.file]);
   const [poiRows, setPoiRows] = useState([]), [poiBusy, setPoiBusy] = useState("");
+  const [sceneOpts, setSceneOpts] = useState({});   // Drehbuch: je Szene { on, dur, zoom }
+  const setOpt = (key, patch) => setSceneOpts(o => ({ ...o, [key]: { ...(o[key] || {}), ...patch } }));
   const [plan, setPlan] = useState(null);
   const mstart = music ? music.start : 0;
   useEffect(() => {
@@ -4257,7 +4274,8 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const musicReady = !music || !!plan;
   const D = music && plan ? plan.end : target;
   const beats = music && plan && plan.an ? seasonBeatTimes(plan.an, D) : null;
-  const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats, !!tripName, poiRows) : [], [stats, D, plan, tripName, poiRows]);
+  const scriptAll = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats, !!tripName, poiRows, sceneOpts) : [], [stats, D, plan, tripName, poiRows, sceneOpts]);
+  const script = useMemo(() => scriptAll.filter(x => !x.off), [scriptAll]);
   const summary = (() => {
     if (!script.length) return "";
     const c = script.filter(x => x.kind === "region").length - 1, h = script.filter(x => x.kind === "flight").length, t = script.filter(x => x.kind === "thermal").length;
@@ -4268,7 +4286,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
     const id = ++poiRun.current, found = [];
     const prm = {}; for (const k of Object.keys(SEASON_POI_DEFAULTS)) { const v = parseFloat(String(poiPrm[k]).replace(",", ".")); prm[k] = isFinite(v) ? v : SEASON_POI_DEFAULTS[k]; }
     setPoiRows([]);
-    const fl = script.filter(x => x.kind === "flight" && !x.poi && !x.excerpt);
+    const fl = scriptAll.filter(x => x.kind === "flight" && !x.poi && !x.excerpt);
     for (let k = 0; k < fl.length; k++) {
       const sc = fl[k], si = sc.hi;
       setPoiBusy("Gelände " + (k + 1) + "/" + fl.length + " wird analysiert …");
@@ -4278,15 +4296,15 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
         if (poiRun.current !== id) return;
         const poi = findScenicPoi(sc.dec, elev, prm);
         if (poi) { setPoiBusy("Name wird gesucht (" + (k + 1) + "/" + fl.length + ") …"); const name = await lookupPoiName(poi, mapTilerKey); if (poiRun.current !== id) return;
-          found.push({ hi: sc.hi, flight: sc.title, kicker: sc.kicker, poi, name, zoom: "0.8", on: true }); }
+          found.push({ hi: sc.hi, flight: sc.title, kicker: sc.kicker, poi, name }); }
       } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
     }
     if (poiRun.current !== id) return;
     setPoiRows(found); setPoiBusy("");
   };
   const startVideo = () => {
-    if (script.some(x => x.kind === "flight" && !x.excerpt)) { demsRef.current = {}; setStage("poi"); searchPois(); }
-    else { setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }
+    demsRef.current = {}; setSceneOpts({}); setPoiRows([]); setStage("poi");
+    if (scriptAll.some(x => x.kind === "flight" && !x.excerpt)) searchPois(); else setPoiBusy("");
   };
 
   const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
@@ -4398,37 +4416,58 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             <button disabled={!canStart} onClick={startVideo} style={btn(canStart ? "#16a34a" : "rgba(255,255,255,0.12)")}>🎬 Weiter ({seasonMMSS(D)} min)</button>
           </>
         )}
-        {stage === "poi" && (
+        {stage === "poi" && (() => {
+          const label = (x) => x.kind === "intro" ? "Intro · Weltkugel" : x.kind === "outro" ? "Abspann · Weltkugel"
+            : x.kind === "region" ? x.kicker : x.kind === "thermal" ? (x.type === "strong" ? "STÄRKSTE THERMIK" : "LÄNGSTE THERMIK") + " · " + x.place
+            : x.kicker + " · " + x.title;
+          const fixedSum = script.reduce((a, x) => a + (x.fixed || 0), 0), nFixed = script.filter(x => x.fixed).length;
+          const numIn = { ...inp, height:32, width:74, textAlign:"center", padding:"0 6px" };
+          return (
           <>
-            <div style={lbl}>Sehenswürdigkeiten bei den Highlight-Flügen</div>
+            <div style={{position:"sticky",top:0,zIndex:5,background:"#040e20",padding:"8px 0",borderBottom:"1px solid rgba(255,255,255,0.15)",display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:8,flexWrap:"wrap"}}>
+              <b style={{fontSize:16}}>⏱ Total ca. {seasonMMSS(D)} min</b>
+              <span style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>{script.length} von {scriptAll.length} Szenen{nFixed ? " · " + Math.round(fixedSum) + " s fest vorgegeben" : ""}</span>
+            </div>
+            <div style={lbl}>Drehbuch</div>
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
-              Markierte Orte kommen als eigene Szene direkt nach dem Flug: Die Kamera blickt mit fester Perspektive auf den Gipfel bzw. Felsen und zeigt den Flugabschnitt davor. Der Name stammt aus OpenStreetMap/Wikipedia und lässt sich ändern. Gefunden wird im Höhenmodell neben der Flugspur.
+              Szenen mit Haken kommen ins Video. Die Gesamtlänge bleibt (Länge bzw. Musik); abgewählte Szenen und feste Dauern verschieben die Zeit der übrigen Szenen. Dauer leer lassen = automatisch. Zoom: Stufen näher (− = weiter weg).
             </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
-              {[["prom","Gipfel: Überhöhung ab (m)"],["promLow","Steiler Fels: Überhöhung ab (m)"],["steep","Steiler Fels: Steilheit ab (1 = 45°)"],["dist","Max. Abstand zur Flugspur (m)"]].map(([k, t]) => (
-                <label key={k} style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>{t}<input type="text" inputMode="decimal" value={poiPrm[k]} onChange={e=>setPoiPrm(v=>({ ...v, [k]: e.target.value }))} style={inp} /></label>
-              ))}
-            </div>
-            <button disabled={!!poiBusy} onClick={searchPois} style={btn(poiBusy ? "rgba(255,255,255,0.12)" : "#2563eb")}>🔍 Neu suchen</button>
+            <details>
+              <summary style={{fontSize:13,cursor:"pointer",color:"#7dd3fc"}}>🔍 Suche nach Sehenswürdigkeiten (Parameter)</summary>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8,marginTop:8}}>
+                {[["prom","Gipfel: Überhöhung ab (m)"],["promLow","Steiler Fels: Überhöhung ab (m)"],["steep","Steiler Fels: Steilheit ab (1 = 45°)"],["dist","Max. Abstand zur Flugspur (m)"]].map(([k, t]) => (
+                  <label key={k} style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>{t}<input type="text" inputMode="decimal" value={poiPrm[k]} onChange={e=>setPoiPrm(v=>({ ...v, [k]: e.target.value }))} style={inp} /></label>
+                ))}
+              </div>
+              <button disabled={!!poiBusy} onClick={searchPois} style={{...btn(poiBusy ? "rgba(255,255,255,0.12)" : "#2563eb"),marginTop:8,width:"100%"}}>🔍 Neu suchen</button>
+            </details>
             {poiBusy && <div style={{fontSize:13,color:"#7dd3fc"}}>{poiBusy}</div>}
-            {!poiBusy && !poiRows.length && <div style={{fontSize:13,color:"rgba(232,244,253,0.7)"}}>Keine Sehenswürdigkeit gefunden. Die Schwellen oben lassen sich senken; sonst entsteht das Video ohne diese Szenen.</div>}
-            {poiRows.map(r => { const ps = r.on ? script.find(x => x.poi && x.hi === r.hi && x.poi === r.poi) : null; return (
-              <div key={r.hi} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"10px 12px",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,background:r.on?"rgba(125,211,252,0.1)":"transparent"}}>
-                <input type="checkbox" checked={r.on} onChange={e=>{ const on = e.target.checked; setPoiRows(rows => rows.map(x => x.hi === r.hi ? { ...x, on } : x)); }} style={{marginTop:3,width:18,height:18}} />
+            {!poiBusy && scriptAll.some(x => x.kind === "flight" && !x.excerpt) && !poiRows.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Keine Sehenswürdigkeit gefunden (Schwellen oben senken und neu suchen).</div>}
+            {scriptAll.map(x => {
+              const o = sceneOpts[x.key] || {}, fixedOk = x.kind === "intro" || x.kind === "outro";
+              const edit = x.kind === "thermal" || (x.kind === "flight" && x.excerpt), poiRow = x.poi ? poiRows.find(r => r.hi === x.hi) : null;
+              return (
+              <div key={x.key} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"8px 12px",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,background:x.off?"transparent":"rgba(125,211,252,0.08)",opacity:x.off?0.65:1}}>
+                <input type="checkbox" checked={!x.off} disabled={fixedOk} onChange={e=>setOpt(x.key, { on: e.target.checked })} style={{marginTop:3,width:18,height:18}} />
                 <span style={{fontSize:13,lineHeight:1.5,flex:1,minWidth:0}}>
-                  <input type="text" value={r.name} placeholder="Name der Sehenswürdigkeit" onChange={e=>{ const name = e.target.value; setPoiRows(rows => rows.map(x => x.hi === r.hi ? { ...x, name } : x)); }} style={{...inp,height:34,fontWeight:700,marginBottom:4}} />
-                  <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:4}}>Zoom (Stufen näher, − = weiter weg)
-                    <input type="text" inputMode="decimal" value={r.zoom} onChange={e=>{ const zoom = e.target.value; setPoiRows(rows => rows.map(x => x.hi === r.hi ? { ...x, zoom } : x)); }} style={{...inp,height:30,width:70}} /></label>
-                  Beim Flug <b>{r.flight}</b> <span style={{color:"rgba(232,244,253,0.55)"}}>· {r.kicker}</span><br />
-                  {ps ? <>Eigene Szene im Video ca. {seasonMMSS(ps.t0)}–{seasonMMSS(ps.t1)} min<br /></> : <>Nicht im Video<br /></>}
-                  <span style={{color:"rgba(232,244,253,0.6)"}}>{Math.round(r.poi.elev)} m ü. M. · {Math.round(r.poi.prom)} m über Umgebung · Steilheit {r.poi.steep.toFixed(1)} · {Math.round(r.poi.distM)} m neben der Spur · {r.poi.lat.toFixed(4)}°, {r.poi.lon.toFixed(4)}°</span>
+                  {poiRow ? <input type="text" value={poiRow.name} placeholder="Name der Sehenswürdigkeit" onChange={e=>{ const name = e.target.value; setPoiRows(rows => rows.map(r => r.hi === poiRow.hi ? { ...r, name } : r)); }} style={{...inp,height:32,fontWeight:700,marginBottom:4}} />
+                    : <b style={{wordBreak:"break-word"}}>{label(x)}</b>}
+                  {poiRow && <div style={{color:"rgba(232,244,253,0.7)"}}>SEHENSWÜRDIGKEIT beim Flug {poiRow.flight}</div>}
+                  <div style={{color:"rgba(232,244,253,0.6)"}}>{x.off ? "nicht im Video" : "ab " + seasonMMSS(x.t0) + " · ca. " + Math.round(x.t1 - x.t0) + " s"}</div>
+                  {poiRow && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{Math.round(poiRow.poi.elev)} m ü. M. · {Math.round(poiRow.poi.prom)} m über Umgebung · {Math.round(poiRow.poi.distM)} m neben der Spur · {poiRow.poi.lat.toFixed(4)}°, {poiRow.poi.lon.toFixed(4)}°</div>}
+                  {(edit || poiRow) && !x.off && (
+                    <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:4}}>
+                      <label style={{fontSize:12,color:"rgba(232,244,253,0.6)",display:"flex",alignItems:"center",gap:6}}>Dauer (s)<input type="text" inputMode="decimal" value={o.dur != null ? o.dur : ""} placeholder={String(Math.round(x.t1 - x.t0))} onChange={e=>setOpt(x.key, { dur: e.target.value })} style={numIn} /></label>
+                      <label style={{fontSize:12,color:"rgba(232,244,253,0.6)",display:"flex",alignItems:"center",gap:6}}>Zoom<input type="text" inputMode="decimal" value={o.zoom != null ? o.zoom : ""} placeholder={x.poi ? "0.8" : "0"} onChange={e=>setOpt(x.key, { zoom: e.target.value })} style={numIn} /></label>
+                    </div>
+                  )}
                 </span>
               </div>
             ); })}
-            <button disabled={!!poiBusy} onClick={()=>{ poiRun.current++; setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn(poiBusy ? "rgba(255,255,255,0.12)" : "#16a34a")}>🎬 Video erstellen ({poiRows.filter(r => r.on).length} Sehenswürdigkeit{poiRows.filter(r => r.on).length === 1 ? "" : "en"})</button>
+            <button disabled={!!poiBusy} onClick={()=>{ poiRun.current++; setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn(poiBusy ? "rgba(255,255,255,0.12)" : "#16a34a")}>🎬 Video erstellen ({seasonMMSS(D)} min)</button>
             <button onClick={()=>{ poiRun.current++; setPoiBusy(""); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Zurück</button>
           </>
-        )}
+          ); })()}
         {stage === "render" && (
           <>
             <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} purpose={purpose} D={D} mapStyle={mapStyle}
