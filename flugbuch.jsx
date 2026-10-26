@@ -2599,7 +2599,17 @@ async function loadGliderSymbol(flight) {
   } catch (e) { return null; }
 }
 
-function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, purpose, manual, music, demCache, onDone, onError, onCancelRef, setStatus }) {
+// Kartenstil für die Videos: "outdoor" (Geländekarte), "sat" (Satellit), "hybrid" (Satellit mit Beschriftung)
+const VIDEO_MAP_STYLES = [{ id: "outdoor", label: "🗺 Gelände" }, { id: "sat", label: "🛰 Satellit" }, { id: "hybrid", label: "🛰 Satellit + Namen" }];
+const videoMapStyle = (sdk, kind) => {
+  const M = sdk.MapStyle || {};
+  const out = M.OUTDOOR || (M.BACKDROP && M.BACKDROP.DEFAULT) || M.BACKDROP;
+  if (kind === "sat") return M.SATELLITE || out;
+  if (kind === "hybrid") return M.HYBRID || M.SATELLITE || out;
+  return out;
+};
+
+function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, purpose, manual, music, demCache, mapStyle, miniStyle, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), miniDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square", narrow = format !== "land";
   const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720, M = portrait ? 270 : square ? 300 : 330;
@@ -2673,7 +2683,7 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, purpo
       // es nur einen WebGL-Kontext und keine GeoJSON-Updates während der
       // Aufnahme (früher: zweite Live-Karte, die leer blieb und ruckelte).
       setStatus("Geländekarte wird geladen …", 0);
-      mini = new sdk.Map({ ...base, pixelRatio: 2, container: miniDivRef.current, style: sdk.MapStyle.OUTDOOR, terrain: false,
+      mini = new sdk.Map({ ...base, pixelRatio: 2, container: miniDivRef.current, style: videoMapStyle(sdk, miniStyle), terrain: false,
         bounds, fitBoundsOptions: { padding: 30 } });
       const miniBase = document.createElement("canvas"); miniBase.width = M * 2; miniBase.height = M * 2;
       const mb = miniBase.getContext("2d", { willReadFrequently: true });
@@ -2701,8 +2711,8 @@ function FlightVideoStudio({ flight, track, mapTilerKey, duration, format, purpo
       mb.restore();
       mini.remove(); mini = null;
 
-      setStatus("Satellitenkarte wird geladen …", 0);
-      main = new sdk.Map({ ...base, container: mainDivRef.current, style: sdk.MapStyle.SATELLITE, terrain: true, maxPitch: 85, maxTileCacheSize: 600,
+      setStatus(mapStyle === "outdoor" ? "Geländekarte wird geladen …" : "Satellitenkarte wird geladen …", 0);
+      main = new sdk.Map({ ...base, container: mainDivRef.current, style: videoMapStyle(sdk, mapStyle), terrain: true, maxPitch: 85, maxTileCacheSize: 600,
         center: [track[0].lon, track[0].lat], zoom: 13, pitch: 60 });
       await waitLoad(main);
       if (cancelled) return;
@@ -3552,10 +3562,6 @@ function buildSeasonScript(st, D, beats, trip) {
 // Anteil der Spur, der zum Zeitpunkt tl0 (s) gezeichnet ist
 const seasonThermalProg = (tl0, len) => Math.max(0, Math.min(1, (tl0 - 0.4) / (len * 0.62)));
 
-const seasonMapStyle = (sdk) => {
-  const M = sdk.MapStyle || {};
-  return M.OUTDOOR || (M.BACKDROP && M.BACKDROP.DEFAULT) || M.BACKDROP;
-};
 const seasonWaitLoad = (map) => new Promise((res, rej) => {
   if (map.loaded()) { res(); return; }
   const to = setTimeout(() => rej(new Error("Karte konnte nicht geladen werden (Netzwerk/MapTiler-Schlüssel?)")), 25000);
@@ -3568,7 +3574,7 @@ const seasonWaitIdle = (map, ms) => new Promise(res => {
   map.on("idle", fin); map.triggerRepaint();
 });
 
-function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, music, D, onDone, onError, onCancelRef, setStatus }) {
+function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, music, D, mapStyle, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square";
   const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720;
@@ -3612,7 +3618,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
         const o = { apiKey: mapTilerKey, language: "de", interactive: false, pixelRatio: 1, preserveDrawingBuffer: true,
           canvasContextAttributes: { preserveDrawingBuffer: true }, fadeDuration: 0, attributionControl: false, navigationControl: false,
           geolocateControl: false, scaleControl: false, fullscreenControl: false, terrainControl: false,
-          container: mainDivRef.current, style: seasonMapStyle(sdk), center: [focus.lon, focus.lat], zoom: kind === "globe" ? zg : 6, pitch: 0 };
+          container: mainDivRef.current, style: videoMapStyle(sdk, mapStyle), center: [focus.lon, focus.lat], zoom: kind === "globe" ? zg : 6, pitch: 0 };
         if (kind === "globe") { o.projection = "globe"; o.terrain = false; }
         else { o.terrain = true; o.maxPitch = 85; o.maxTileCacheSize = 600; }
         main = new sdk.Map(o);
@@ -4094,6 +4100,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [target, setTarget] = useState(120);
   const [format, setFormat] = useState("port");
   const [purpose, setPurpose] = useState("share");   // share: unter 50 MB (Teilen) | best: volle Qualität
+  const [mapStyle, setMapStyle] = useState("outdoor");   // outdoor | sat | hybrid
   const [music, setMusic] = useState(null);
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null);
@@ -4235,6 +4242,12 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
               </div>
             </div>
             <div>
+              <div style={lbl}>Kartenstil</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {VIDEO_MAP_STYLES.map(m => <button key={m.id} onClick={()=>setMapStyle(m.id)} style={chip(mapStyle===m.id)}>{m.label}</button>)}
+              </div>
+            </div>
+            <div>
               <div style={lbl}>Verwendung</div>
               <div style={{display:"flex",gap:8}}>
                 <button onClick={()=>setPurpose("share")} style={chip(purpose==="share")}>📱 Direkt teilen</button>
@@ -4247,14 +4260,14 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             <VideoMusicPicker music={music} setMusic={setMusic} btn={btn} note="Die Datei bleibt auf deinem Gerät. Wähle den Startpunkt so, dass dort ein ruhiger Einstieg liegt; das Ende wird automatisch auf einen Takt gelegt." />
             {musicNote && <div style={{fontSize:13,color:mErr?"#fca5a5":"#7dd3fc"}}>♪ {musicNote}</div>}
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
-              Das Video wird Bild für Bild berechnet (feste 30 fps). Das dauert je nach Gerät und Länge einige Minuten — die App dabei im Vordergrund und den Bildschirm eingeschaltet lassen. Karten kommen von MapTiler (Internet nötig).
+              Das Video wird Bild für Bild berechnet (feste 30 fps). Das dauert je nach Gerät und Länge einige Minuten — die App dabei im Vordergrund und den Bildschirm eingeschaltet lassen. Karten (Gelände oder Satellit) kommen von MapTiler (Internet nötig).
             </div>
             <button disabled={!canStart} onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn(canStart ? "#16a34a" : "rgba(255,255,255,0.12)")}>🎬 Video erstellen ({seasonMMSS(D)} min)</button>
           </>
         )}
         {stage === "render" && (
           <>
-            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} purpose={purpose} D={D}
+            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} purpose={purpose} D={D} mapStyle={mapStyle}
               music={music && mbuf && plan ? { buf: mbuf, start: music.start, fade: plan.natural ? 0.5 : Math.min(3, Math.max(1.2, plan.an ? plan.an.beatSec * 4 : 2)) } : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
@@ -4420,6 +4433,8 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const [duration, setDuration] = useState(45);
   const [format, setFormat] = useState("land"); // land | port | square
   const [purpose, setPurpose] = useState("share"); // share: unter 50 MB (Teilen) | best: volle Qualität
+  const [mapStyle, setMapStyle] = useState("sat"); // Hauptkarte: outdoor | sat | hybrid
+  const [miniStyle, setMiniStyle] = useState("outdoor"); // Minikarte: outdoor | sat | hybrid
   const portrait = format === "port";
   const [mode, setMode] = useState("auto"); // auto | manual
   const [segs, setSegs] = useState([]);
@@ -4555,6 +4570,16 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
               </div>
             </div>
             <div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Kartenstil</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {VIDEO_MAP_STYLES.map(m => <button key={m.id} onClick={()=>setMapStyle(m.id)} style={chip(mapStyle===m.id)}>{m.label}</button>)}
+              </div>
+              <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",margin:"10px 0 6px"}}>Minikarte</div>
+              <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                {VIDEO_MAP_STYLES.map(m => <button key={m.id} onClick={()=>setMiniStyle(m.id)} style={chip(miniStyle===m.id)}>{m.label}</button>)}
+              </div>
+            </div>
+            <div>
               <div style={{fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:6}}>Verwendung</div>
               <div style={{display:"flex",gap:8}}>
                 <button onClick={()=>setPurpose("share")} style={chip(purpose==="share")}>📱 Direkt teilen</button>
@@ -4574,7 +4599,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
         )}
         {stage === "render" && (
           <>
-            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} purpose={purpose} music={music} demCache={demRef} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
+            <FlightVideoStudio flight={flight} track={track} mapTilerKey={mapTilerKey} duration={duration} format={format} purpose={purpose} music={music} demCache={demRef} mapStyle={mapStyle} miniStyle={miniStyle} manual={mode === "manual" ? [...segs].sort((x, y) => x.f0 - y.f0) : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
               onDone={(blob, ext, note) => { const res = { url: URL.createObjectURL(blob), ext, blob }; setResult(res); setStage("done"); setShareMsg(""); vf.setMsg(note ? "⚠ " + note : ""); if (vf.fsOk) vf.save(res, false, fileName); }}
