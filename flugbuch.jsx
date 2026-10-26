@@ -4095,6 +4095,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [music, setMusic] = useState(null);
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null);
+  const [loopVid, setLoopVid] = useState(false);   // Wiedergabe wiederholen (Standard: aus)
   const [err, setErr] = useState("");
   const [shareMsg, setShareMsg] = useState("");
   const vf = useVideoFolder(RUECKBLICK_DIR);   // Zielordner "Rückblick" im Backup-Ordner
@@ -4264,7 +4265,8 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
         )}
         {stage === "done" && result && (
           <>
-            <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
+            <video src={result.url} controls playsInline loop={loopVid} style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
+            <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:"rgba(232,244,253,0.8)"}}><input type="checkbox" checked={loopVid} onChange={e=>setLoopVid(e.target.checked)} />🔁 Wiederholen</label>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <button onClick={()=>vf.saveVideo(result, fileName)} style={btn("#1e40af")}>💾 Speichern</button>
               {canShare && result.blob.size <= SHARE_MAX_BYTES && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, meta.title)); }} style={btn("#7c3aed")}>Teilen</button>}
@@ -4469,6 +4471,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   };
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null); // { url, ext, blob }
+  const [loopVid, setLoopVid] = useState(false);   // Wiedergabe wiederholen (Standard: aus)
   const [err, setErr] = useState("");
   const cancelRef = useRef(null);
   // Musik (optional): eigene Audiodatei, wird beim Erstellen in das Video gemischt
@@ -4581,7 +4584,8 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
         )}
         {stage === "done" && result && (
           <>
-            <video src={result.url} controls playsInline loop style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
+            <video src={result.url} controls playsInline loop={loopVid} style={{width:"100%",maxWidth:portrait?340:format==="square"?480:760,maxHeight:"62vh",margin:"0 auto",display:"block",borderRadius:12,background:"#000"}} />
+            <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:"rgba(232,244,253,0.8)"}}><input type="checkbox" checked={loopVid} onChange={e=>setLoopVid(e.target.checked)} />🔁 Wiederholen</label>
             <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
               <button onClick={()=>vf.saveVideo(result, fileName)} style={btn("#1e40af")}>💾 Speichern</button>
               {canShare && result.blob.size <= SHARE_MAX_BYTES && <button onClick={async()=>{ setShareMsg(await shareVideoFile(result.blob, `${fileName}.${result.ext}`, "Mein Flug")); }} style={btn("#7c3aed")}>Teilen</button>}
