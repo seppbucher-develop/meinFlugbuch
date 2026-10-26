@@ -3513,7 +3513,7 @@ async function prepareSeasonAudio(buf, startSec, D, fadeOut) {
 // ── Drehbuch ───────────────────────────────────────────────────────────
 // Wählt anhand der Länge, wie viele Länder-/Highlight-Szenen Platz haben
 // (ca. 5 s je Einheit), und verteilt die Zeit. Schnitte rasten auf `beats` ein.
-function buildSeasonScript(st, D, beats, trip) {
+function buildSeasonScript(st, D, beats, trip, pois) {
   const UNIT = 5.2, W = { c: 1, h: 1.5, t: 1.5 };
   const cs = st.countries.slice(0, 8), hs = st.highlights.slice(0, 5);
   const seq = [];
@@ -3531,13 +3531,26 @@ function buildSeasonScript(st, D, beats, trip) {
     sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins, plays: st.home ? st.home.plays : st.plays });
   cs.slice(0, nc).forEach(c => sc.push({ kind: "region", map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
     n: c.n, sec: c.sec, sites: c.sites, pins: c.pins, plays: c.plays }));
-  hs.slice(0, nh).forEach(h => {
+  hs.slice(0, nh).forEach((h, hi) => {
     const f = h.r.f, ex = h.excerpt, tr = ex ? h.track.slice(ex.i0, ex.i1 + 1) : h.track, step = Math.max(1, Math.ceil(tr.length / 600));
     const dec = tr.filter((_, i) => i % step === 0 || i === tr.length - 1);
     const km = h.r.dist, parts = [h.r.country, seasonDay(h.r.ts), ex ? seasonInt(ex.alt) + " m ü. M." : km >= 5 ? Math.round(km) + " km" : (h.r.sec / 3600).toFixed(1) + " h"].filter(Boolean);
     const sm = String(f.startTime || "").match(/(\d{1,2}):(\d{2})/);
     sc.push({ kind: "flight", map: "terrain", w: ex ? 1.1 : 1.5, excerpt: !!ex, kicker: h.tags.join(" · "), title: h.r.site || "Flug", sub: parts.join(" · "),
-      track: tr, dec, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (tr[0].timeSec - h.track[0].timeSec) : null });
+      track: tr, dec, hi, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (tr[0].timeSec - h.track[0].timeSec) : null });
+    // Bestätigte Sehenswürdigkeit dieses Flugs: eigene Szene mit dem Flugabschnitt daneben (wie "Höchster Punkt")
+    (pois || []).filter(q => q.on && q.hi === hi && !ex).forEach(q => {
+      const T = h.track, mLon = 111320 * Math.cos(q.poi.lat * Math.PI / 180);
+      let ci = 0, cd = 1e18;
+      T.forEach((x, i) => { const d = Math.hypot((x.lon - q.poi.lon) * mLon, (x.lat - q.poi.lat) * 111320); if (d < cd) { cd = d; ci = i; } });
+      let i0 = ci, i1 = ci;
+      while (i0 > 0 && T[ci].timeSec - T[i0 - 1].timeSec <= 150) i0--;
+      while (i1 < T.length - 1 && T[i1 + 1].timeSec - T[ci].timeSec <= 150) i1++;
+      const seg = T.slice(i0, i1 + 1), stp = Math.max(1, Math.ceil(seg.length / 600)), sdec = seg.filter((_, i) => i % stp === 0 || i === seg.length - 1);
+      sc.push({ kind: "flight", map: "terrain", w: 1.2, excerpt: true, poi: q.poi, hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
+        sub: [h.r.site, seasonInt(q.poi.elev) + " m ü. M."].filter(Boolean).join(" · "), track: seg, dec: sdec,
+        clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (seg[0].timeSec - T[0].timeSec) : null });
+    });
   });
   st.thermals.slice(0, nt).forEach(T => {
     const a = Math.max(0, T.i0 - 20), z = Math.min(T.track.length, T.i1 + 21), slice = T.track.slice(a, z);
@@ -3614,12 +3627,37 @@ function findScenicPoi(dec, elev, prm) {
   }
   return best;
 }
+// Name einer Sehenswürdigkeit: OpenStreetMap (benannte Gipfel/Felsen in 800 m), sonst Wikipedia (Artikel in 1,5 km),
+// sonst MapTiler-Geokodierung. Liefert "" wenn nichts gefunden wird (im Dialog von Hand änderbar).
+async function lookupPoiName(poi, apiKey) {
+  const get = async (url, ms) => {
+    const ac = new AbortController(), to = setTimeout(() => ac.abort(), ms);
+    try { const r = await fetch(url, { signal: ac.signal }); return r.ok ? await r.json() : null; } catch { return null; } finally { clearTimeout(to); }
+  };
+  const mLon = 111320 * Math.cos(poi.lat * Math.PI / 180);
+  const dist = (la, lo) => Math.hypot((lo - poi.lon) * mLon, (la - poi.lat) * 111320);
+  const q = `[out:json][timeout:12];nwr(around:800,${poi.lat},${poi.lon})[natural~"^(peak|rock|bare_rock|cliff|volcano|ridge|hill)$"][name];out center tags 20;`;
+  const o = await get("https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(q), 14000);
+  if (o && o.elements && o.elements.length) {
+    const c = o.elements.map(e => ({ n: e.tags.name, d: dist(e.lat != null ? e.lat : e.center && e.center.lat, e.lon != null ? e.lon : e.center && e.center.lon), peak: e.tags.natural === "peak" ? 0 : 1 }))
+      .filter(e => isFinite(e.d)).sort((a, b) => a.peak - b.peak || a.d - b.d);
+    if (c.length) return c[0].n;
+  }
+  const w = await get(`https://de.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${poi.lat}%7C${poi.lon}&gsradius=1500&gslimit=5&format=json&origin=*`, 8000);
+  const ws = w && w.query && w.query.geosearch;
+  if (ws && ws.length) return ws[0].title;
+  if (apiKey) {
+    const g = await get(`https://api.maptiler.com/geocoding/${poi.lon},${poi.lat}.json?key=${apiKey}&language=de&limit=1`, 8000);
+    if (g && g.features && g.features[0] && g.features[0].text) return g.features[0].text;
+  }
+  return "";
+}
 const seasonBearing = (a, b) => {   // Himmelsrichtung von a nach b in Grad
   const R = Math.PI / 180, dl = (b.lon - a.lon) * R * Math.cos((a.lat + b.lat) / 2 * R), dp = (b.lat - a.lat) * R;
   return Math.atan2(dl, dp) / R;
 };
 
-function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, music, D, mapStyle, pois, onDone, onError, onCancelRef, setStatus }) {
+function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, music, D, mapStyle, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square";
   const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720;
@@ -3640,9 +3678,6 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
       const FPS = 30, BITRATE = videoBitrateFor(D, purpose), scenes = script;
       const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
       if (!wcCfg) throw new Error("Dieser Browser kann keine MP4-Videos kodieren (WebCodecs/H.264). Bitte Chrome, Edge oder einen aktuellen Safari verwenden.");
-
-      // Im Dialog bestätigte Sehenswürdigkeiten (Szenenindex → Ort) übernehmen: eigene Kameraperspektive
-      scenes.forEach((sc, i) => { sc.poi = pois && pois[i] ? pois[i] : null; delete sc._p; delete sc._f; });
 
       const out = outRef.current; out.width = W; out.height = H;
       const ctx = out.getContext("2d");
@@ -4120,7 +4155,6 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const [stage, setStage] = useState("options"); // options | poi | render | done | error
   // Sehenswürdigkeiten: Suchparameter (editierbar), Fundliste mit Auswahl, Höhenmodelle je Szene zwischengespeichert
   const [poiPrm, setPoiPrm] = useState({ prom: String(SEASON_POI_DEFAULTS.prom), promLow: String(SEASON_POI_DEFAULTS.promLow), steep: String(SEASON_POI_DEFAULTS.steep), dist: String(SEASON_POI_DEFAULTS.dist) });
-  const [poiRows, setPoiRows] = useState([]), [poiBusy, setPoiBusy] = useState("");
   const demsRef = useRef({}), poiRun = useRef(0);
   const [presetId, setPresetId] = useState(presets[0].id);
   const [fromS, setFromS] = useState(presets[0].from);
@@ -4199,6 +4233,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
     decodeMusicFile(music.file).then(b => { if (!dead) setMbuf(b); }).catch(e => { if (!dead) setMErr(e.message || String(e)); });
     return () => { dead = true; };
   }, [music && music.file]);
+  const [poiRows, setPoiRows] = useState([]), [poiBusy, setPoiBusy] = useState("");
   const [plan, setPlan] = useState(null);
   const mstart = music ? music.start : 0;
   useEffect(() => {
@@ -4214,7 +4249,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const musicReady = !music || !!plan;
   const D = music && plan ? plan.end : target;
   const beats = music && plan && plan.an ? seasonBeatTimes(plan.an, D) : null;
-  const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats, !!tripName) : [], [stats, D, plan, tripName]);
+  const script = useMemo(() => stats && stats.count ? buildSeasonScript(stats, D, beats, !!tripName, poiRows) : [], [stats, D, plan, tripName, poiRows]);
   const summary = (() => {
     if (!script.length) return "";
     const c = script.filter(x => x.kind === "region").length - 1, h = script.filter(x => x.kind === "flight").length, t = script.filter(x => x.kind === "thermal").length;
@@ -4225,26 +4260,26 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
     const id = ++poiRun.current, found = [];
     const prm = {}; for (const k of Object.keys(SEASON_POI_DEFAULTS)) { const v = parseFloat(String(poiPrm[k]).replace(",", ".")); prm[k] = isFinite(v) ? v : SEASON_POI_DEFAULTS[k]; }
     setPoiRows([]);
-    const fl = script.map((sc, si) => ({ sc, si })).filter(x => x.sc.kind === "flight");
+    const fl = script.filter(x => x.kind === "flight" && !x.poi && !x.excerpt);
     for (let k = 0; k < fl.length; k++) {
-      const { sc, si } = fl[k];
+      const sc = fl[k], si = sc.hi;
       setPoiBusy("Gelände " + (k + 1) + "/" + fl.length + " wird analysiert …");
       try {
         let elev = demsRef.current[si];
         if (elev === undefined) { const dem = await loadVideoDem(sc.track, mapTilerKey, 0.035); elev = demsRef.current[si] = dem ? dem.elev : null; }
         if (poiRun.current !== id) return;
         const poi = findScenicPoi(sc.dec, elev, prm);
-        if (poi) found.push({ si, title: sc.title, kicker: sc.kicker, t0: sc.t0, t1: sc.t1, poi, on: true });
+        if (poi) { setPoiBusy("Name wird gesucht (" + (k + 1) + "/" + fl.length + ") …"); const name = await lookupPoiName(poi, mapTilerKey); if (poiRun.current !== id) return;
+          found.push({ hi: sc.hi, flight: sc.title, kicker: sc.kicker, poi, name, on: true }); }
       } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
     }
     if (poiRun.current !== id) return;
     setPoiRows(found); setPoiBusy("");
   };
   const startVideo = () => {
-    if (script.some(x => x.kind === "flight")) { demsRef.current = {}; setStage("poi"); searchPois(); }
+    if (script.some(x => x.kind === "flight" && !x.excerpt)) { demsRef.current = {}; setStage("poi"); searchPois(); }
     else { setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }
   };
-  const poisSel = {}; poiRows.forEach(r => { if (r.on) poisSel[r.si] = r.poi; });
 
   const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
   useEffect(() => {
@@ -4359,7 +4394,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
           <>
             <div style={lbl}>Sehenswürdigkeiten bei den Highlight-Flügen</div>
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
-              Bei markierten Orten blickt die Kamera mit fester Perspektive auf den Gipfel bzw. Felsen und zeigt den Flug davor. Gefunden wird im Höhenmodell neben der Flugspur.
+              Markierte Orte kommen als eigene Szene direkt nach dem Flug: Die Kamera blickt mit fester Perspektive auf den Gipfel bzw. Felsen und zeigt den Flugabschnitt davor. Der Name stammt aus OpenStreetMap/Wikipedia und lässt sich ändern. Gefunden wird im Höhenmodell neben der Flugspur.
             </div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
               {[["prom","Gipfel: Überhöhung ab (m)"],["promLow","Steiler Fels: Überhöhung ab (m)"],["steep","Steiler Fels: Steilheit ab (1 = 45°)"],["dist","Max. Abstand zur Flugspur (m)"]].map(([k, t]) => (
@@ -4368,24 +4403,25 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             </div>
             <button disabled={!!poiBusy} onClick={searchPois} style={btn(poiBusy ? "rgba(255,255,255,0.12)" : "#2563eb")}>🔍 Neu suchen</button>
             {poiBusy && <div style={{fontSize:13,color:"#7dd3fc"}}>{poiBusy}</div>}
-            {!poiBusy && !poiRows.length && <div style={{fontSize:13,color:"rgba(232,244,253,0.7)"}}>Keine Sehenswürdigkeit gefunden. Die Schwellen oben lassen sich senken; sonst entsteht das Video mit der normalen Kamera.</div>}
-            {poiRows.map(r => (
-              <label key={r.si} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"10px 12px",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,cursor:"pointer",background:r.on?"rgba(125,211,252,0.1)":"transparent"}}>
-                <input type="checkbox" checked={r.on} onChange={e=>{ const on = e.target.checked; setPoiRows(rows => rows.map(x => x.si === r.si ? { ...x, on } : x)); }} style={{marginTop:3,width:18,height:18}} />
-                <span style={{fontSize:13,lineHeight:1.5}}>
-                  <b>{r.title}</b> <span style={{color:"rgba(232,244,253,0.55)"}}>· {r.kicker}</span><br />
-                  Im Video ca. {seasonMMSS(r.t0)}–{seasonMMSS(r.t1)} min<br />
-                  <span style={{color:"rgba(232,244,253,0.6)"}}>Gipfel {Math.round(r.poi.elev)} m ü. M. · {Math.round(r.poi.prom)} m über Umgebung · Steilheit {r.poi.steep.toFixed(1)} · {Math.round(r.poi.distM)} m neben der Spur · {r.poi.lat.toFixed(4)}°, {r.poi.lon.toFixed(4)}°</span>
+            {!poiBusy && !poiRows.length && <div style={{fontSize:13,color:"rgba(232,244,253,0.7)"}}>Keine Sehenswürdigkeit gefunden. Die Schwellen oben lassen sich senken; sonst entsteht das Video ohne diese Szenen.</div>}
+            {poiRows.map(r => { const ps = r.on ? script.find(x => x.poi && x.hi === r.hi && x.poi === r.poi) : null; return (
+              <div key={r.hi} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"10px 12px",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,background:r.on?"rgba(125,211,252,0.1)":"transparent"}}>
+                <input type="checkbox" checked={r.on} onChange={e=>{ const on = e.target.checked; setPoiRows(rows => rows.map(x => x.hi === r.hi ? { ...x, on } : x)); }} style={{marginTop:3,width:18,height:18}} />
+                <span style={{fontSize:13,lineHeight:1.5,flex:1,minWidth:0}}>
+                  <input type="text" value={r.name} placeholder="Name der Sehenswürdigkeit" onChange={e=>{ const name = e.target.value; setPoiRows(rows => rows.map(x => x.hi === r.hi ? { ...x, name } : x)); }} style={{...inp,height:34,fontWeight:700,marginBottom:4}} />
+                  Beim Flug <b>{r.flight}</b> <span style={{color:"rgba(232,244,253,0.55)"}}>· {r.kicker}</span><br />
+                  {ps ? <>Eigene Szene im Video ca. {seasonMMSS(ps.t0)}–{seasonMMSS(ps.t1)} min<br /></> : <>Nicht im Video<br /></>}
+                  <span style={{color:"rgba(232,244,253,0.6)"}}>{Math.round(r.poi.elev)} m ü. M. · {Math.round(r.poi.prom)} m über Umgebung · Steilheit {r.poi.steep.toFixed(1)} · {Math.round(r.poi.distM)} m neben der Spur · {r.poi.lat.toFixed(4)}°, {r.poi.lon.toFixed(4)}°</span>
                 </span>
-              </label>
-            ))}
+              </div>
+            ); })}
             <button disabled={!!poiBusy} onClick={()=>{ poiRun.current++; setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn(poiBusy ? "rgba(255,255,255,0.12)" : "#16a34a")}>🎬 Video erstellen ({poiRows.filter(r => r.on).length} Sehenswürdigkeit{poiRows.filter(r => r.on).length === 1 ? "" : "en"})</button>
             <button onClick={()=>{ poiRun.current++; setPoiBusy(""); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Zurück</button>
           </>
         )}
         {stage === "render" && (
           <>
-            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} purpose={purpose} D={D} mapStyle={mapStyle} pois={poisSel}
+            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} purpose={purpose} D={D} mapStyle={mapStyle}
               music={music && mbuf && plan ? { buf: mbuf, start: music.start, fade: plan.natural ? 0.5 : Math.min(3, Math.max(1.2, plan.an ? plan.an.beatSec * 4 : 2)) } : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
