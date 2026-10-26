@@ -4629,9 +4629,14 @@ function VideoMusicPicker({ music, setMusic, btn, note }) {
               {!music ? (
                 <div data-no-swipe="1" style={{display:"flex",flexDirection:"column",gap:8}}>
                   <div style={{display:"flex",gap:8}}>
-                    <label style={{...btn("rgba(255,255,255,0.12)"),flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
+                    {/* showOpenFilePicker (wo vorhanden) zeigt nur die Dateiauswahl; das <input> bietet auf Android je nach Filter Diktiergerät/Kamera mit an */}
+                    <label onClick={async (e) => {
+                      if (!window.showOpenFilePicker) return;
+                      e.preventDefault();
+                      try { const [h] = await window.showOpenFilePicker({ types: [{ description: "Audio", accept: { "audio/*": [".mp3", ".m4a", ".aac", ".wav", ".ogg", ".flac"] } }] }); pickMusic(await h.getFile()); } catch (err) { /* abgebrochen */ }
+                    }} style={{...btn("rgba(255,255,255,0.12)"),flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
                       🎵 Datei wählen
-                      <input type="file" accept="*/*" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+                      <input type="file" accept=".mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
                     </label>
                   </div>
                   {lib && (
