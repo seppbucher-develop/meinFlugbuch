@@ -4565,6 +4565,7 @@ function VideoMusicPicker({ music, setMusic, btn, note }) {
   const pickMusic = (file) => {
     stopPreview();
     if (!file) return;
+    if (!/^audio\//.test(file.type) && !/\.(mp3|m4a|aac|wav|ogg|oga|opus|flac)$/i.test(file.name)) { window.alert("Bitte eine Audiodatei wählen (MP3, M4A, AAC, WAV, OGG, FLAC)."); return; }
     const url = URL.createObjectURL(file), a = new Audio(url);
     a.onloadedmetadata = () => { setMusic({ file, name: file.name.replace(/\.[^.]+$/, ""), dur: isFinite(a.duration) ? a.duration : 0, start: 0 }); URL.revokeObjectURL(url); };
     a.onerror = () => { URL.revokeObjectURL(url); setMusic({ file, name: file.name.replace(/\.[^.]+$/, ""), dur: 0, start: 0 }); };
@@ -4630,9 +4631,8 @@ function VideoMusicPicker({ music, setMusic, btn, note }) {
                   <div style={{display:"flex",gap:8}}>
                     <label style={{...btn("rgba(255,255,255,0.12)"),flex:1,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",fontSize:14}}>
                       🎵 Datei wählen
-                      <input type="file" accept=".mp3,.m4a,.aac,.wav,.ogg,.flac" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
+                      <input type="file" accept="*/*" style={{display:"none"}} onChange={e=>{ pickMusic(e.target.files && e.target.files[0]); e.target.value = ""; }} />
                     </label>
-                    {musicFsOk && <button onClick={()=>scanMusic(false)} style={{...btn("rgba(255,255,255,0.12)"),flex:1,fontSize:14}}>🔍 Musikordner durchsuchen</button>}
                   </div>
                   {lib && (
                     <div style={{border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
