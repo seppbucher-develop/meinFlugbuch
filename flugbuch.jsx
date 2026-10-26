@@ -3547,7 +3547,8 @@ function buildSeasonScript(st, D, beats, trip, pois) {
       while (i0 > 0 && T[ci].timeSec - T[i0 - 1].timeSec <= 150) i0--;
       while (i1 < T.length - 1 && T[i1 + 1].timeSec - T[ci].timeSec <= 150) i1++;
       const seg = T.slice(i0, i1 + 1), stp = Math.max(1, Math.ceil(seg.length / 600)), sdec = seg.filter((_, i) => i % stp === 0 || i === seg.length - 1);
-      sc.push({ kind: "flight", map: "terrain", w: 1.2, excerpt: true, poi: q.poi, hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
+      const za = parseFloat(String(q.zoom).replace(",", "."));
+      sc.push({ kind: "flight", map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: isFinite(za) ? za : 0.8, hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
         sub: [h.r.site, seasonInt(q.poi.elev) + " m ü. M."].filter(Boolean).join(" · "), track: seg, dec: sdec,
         clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (seg[0].timeSec - T[0].timeSec) : null });
     });
@@ -3752,7 +3753,7 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
             const mpp = far * 2.4 / (W * 0.8);
             sc._p = { center: [mid.lon, mid.lat], b: seasonBearing(cen, sc.poi), z: clamp(Math.log2(CIRC * Math.cos(mid.lat * R2D) / (512 * mpp)), 11, 14.3) };
           }
-          return { center: sc._p.center, zoom: sc._p.z + 0.3 * e, bearing: sc._p.b + lerp(-4, 4, u), pitch: 62, top: 0.1, bottom: 0.44 };
+          return { center: sc._p.center, zoom: clamp(sc._p.z + (sc.zoomAdd || 0) + 0.3 * e, 11, 16.5), bearing: sc._p.b + lerp(-4, 4, u), pitch: 62, top: 0.1, bottom: 0.44 };
         }
         if (sc.kind === "flight") {
           if (!sc._f) sc._f = fitCam(sc.dec, { pitch: 40, top: 0.1, bottom: 0.44, padX: 0.1, minSpan: sc.excerpt ? 500 : 2000, maxZoom: sc.excerpt ? 16 : 14.5 });
@@ -4021,6 +4022,13 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
             ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 10 * s; ctx.strokeStyle = "#e4f9b5"; ctx.lineWidth = 3.2 * s; ctx.stroke();
             ctx.restore();
             dot(cp.x, cp.y, 9 * s, 1);
+            if (sc.poi) {   // Sehenswürdigkeit mit Pin und Namen markieren
+              const pq = main.project([sc.poi.lon, sc.poi.lat]), pk = easeOut(clamp((tl - 0.3) / 0.45, 0, 1));
+              if (pk > 0 && pq.x > -40 && pq.x < W + 40 && pq.y > 0 && pq.y < H + 40) {
+                pin(pq.x, pq.y, pk * 1.15);
+                if (sc.title && sc.title !== "Sehenswürdigkeit") { ctx.save(); ctx.globalAlpha = pk * curOutA; T(sc.title, pq.x, pq.y - 52 * s, 26 * s, 700, "#fff", "center"); ctx.restore(); }
+              }
+            }
             const yS = bot, yL = yS - 56 * s * 0.9 - 12 * s, ySub = yL - 36 * s, yT = ySub - 40 * s - 8 * s * 0, yK = yT - 84 * s * 0.72 - 14 * s;
             kicker(sc.kicker, yK, tl, 0.2);
             reveal(tl, 0.4); T(sc.title, mg, yT + 4 * s, fitSize(sc.title, 84 * s, 800, W - 2 * mg), 800, "#fff"); endReveal();
@@ -4270,7 +4278,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
         if (poiRun.current !== id) return;
         const poi = findScenicPoi(sc.dec, elev, prm);
         if (poi) { setPoiBusy("Name wird gesucht (" + (k + 1) + "/" + fl.length + ") …"); const name = await lookupPoiName(poi, mapTilerKey); if (poiRun.current !== id) return;
-          found.push({ hi: sc.hi, flight: sc.title, kicker: sc.kicker, poi, name, on: true }); }
+          found.push({ hi: sc.hi, flight: sc.title, kicker: sc.kicker, poi, name, zoom: "0.8", on: true }); }
       } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
     }
     if (poiRun.current !== id) return;
@@ -4409,6 +4417,8 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
                 <input type="checkbox" checked={r.on} onChange={e=>{ const on = e.target.checked; setPoiRows(rows => rows.map(x => x.hi === r.hi ? { ...x, on } : x)); }} style={{marginTop:3,width:18,height:18}} />
                 <span style={{fontSize:13,lineHeight:1.5,flex:1,minWidth:0}}>
                   <input type="text" value={r.name} placeholder="Name der Sehenswürdigkeit" onChange={e=>{ const name = e.target.value; setPoiRows(rows => rows.map(x => x.hi === r.hi ? { ...x, name } : x)); }} style={{...inp,height:34,fontWeight:700,marginBottom:4}} />
+                  <label style={{display:"flex",alignItems:"center",gap:8,fontSize:12,color:"rgba(232,244,253,0.6)",marginBottom:4}}>Zoom (Stufen näher, − = weiter weg)
+                    <input type="text" inputMode="decimal" value={r.zoom} onChange={e=>{ const zoom = e.target.value; setPoiRows(rows => rows.map(x => x.hi === r.hi ? { ...x, zoom } : x)); }} style={{...inp,height:30,width:70}} /></label>
                   Beim Flug <b>{r.flight}</b> <span style={{color:"rgba(232,244,253,0.55)"}}>· {r.kicker}</span><br />
                   {ps ? <>Eigene Szene im Video ca. {seasonMMSS(ps.t0)}–{seasonMMSS(ps.t1)} min<br /></> : <>Nicht im Video<br /></>}
                   <span style={{color:"rgba(232,244,253,0.6)"}}>{Math.round(r.poi.elev)} m ü. M. · {Math.round(r.poi.prom)} m über Umgebung · Steilheit {r.poi.steep.toFixed(1)} · {Math.round(r.poi.distM)} m neben der Spur · {r.poi.lat.toFixed(4)}°, {r.poi.lon.toFixed(4)}°</span>
