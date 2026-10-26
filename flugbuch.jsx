@@ -2258,6 +2258,7 @@ function useVideoFolder(dirName) {
 }
 // isMine(name): optional — markiert das zum aktuellen Flug gehörende Video (Rahmen, Hinweis) und rollt es beim Öffnen ins Bild
 function VideoFolderPanel({ vf, title, btn, isMine }) {
+  const [loopVid, setLoopVid] = useState(false);   // Wiedergabe wiederholen (Standard: aus)
   useEffect(() => { const el = document.querySelector("[data-mine=\"1\"]"); if (el && el.scrollIntoView) el.scrollIntoView({ block: "nearest" }); }, [vf.items]);
   return (
     <div style={{border:"1px solid rgba(255,255,255,0.12)",borderRadius:10,padding:10,display:"flex",flexDirection:"column",gap:8}}>
@@ -2266,7 +2267,8 @@ function VideoFolderPanel({ vf, title, btn, isMine }) {
         <>
           {vf.listMsg && <div style={{fontSize:12,color:"#fca5a5"}}>{vf.listMsg}</div>}
           {vf.items && !vf.items.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Noch keine Videos im Ordner „{vf.dirName}“ des Backup-Ordners.</div>}
-          {vf.playItem && <video src={vf.playItem.url} controls playsInline autoPlay style={{width:"100%",maxHeight:"50vh",borderRadius:10,background:"#000"}} />}
+          {vf.playItem && <video src={vf.playItem.url} controls playsInline autoPlay loop={loopVid} style={{width:"100%",maxHeight:"50vh",borderRadius:10,background:"#000"}} />}
+          {vf.playItem && <label style={{display:"flex",alignItems:"center",gap:8,fontSize:13,color:"rgba(232,244,253,0.8)"}}><input type="checkbox" checked={loopVid} onChange={e=>setLoopVid(e.target.checked)} />🔁 Wiederholen</label>}
           {vf.items && vf.items.map(it => {
             const mine = !!isMine && isMine(it.name);
             return (
