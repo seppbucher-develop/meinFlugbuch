@@ -3519,7 +3519,7 @@ function buildSeasonScript(st, D, beats, trip) {
   const seq = [];
   if (cs.length) seq.push("c"); if (hs.length) seq.push("h"); st.thermals.forEach(() => seq.push("t"));
   for (let r = 1; r < Math.max(cs.length, hs.length); r++) { if (r < cs.length) seq.push("c"); if (r < hs.length) seq.push("h"); }
-  let budget = D / UNIT - 4.4, nc = 0, nh = 0, nt = 0;
+  let budget = D / UNIT - 3.2, nc = 0, nh = 0, nt = 0;
   for (const k of seq) {
     if (budget < W[k] - 0.01) continue;
     budget -= W[k];
@@ -3544,7 +3544,6 @@ function buildSeasonScript(st, D, beats, trip) {
     sc.push({ kind: "thermal", map: "terrain", w: 1.5, type: T.type, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
       place: [T.r.site, seasonDay(T.r.ts)].filter(Boolean).join(" · ") });
   });
-  sc.push({ kind: "totals", map: "terrain", w: 1.2, pins: st.pins });
   sc.push({ kind: "outro", map: "globe", w: 1.2 });
   // Zeiten verteilen und auf Schläge einrasten
   const sum = sc.reduce((a, s) => a + s.w, 0), cuts = [0];
@@ -3577,8 +3576,10 @@ const seasonWaitIdle = (map, ms) => new Promise(res => {
 // Sehenswertes Gelände neben dem Flug: markanter Gipfel oder Felsmonolith nahe der Spur.
 // Raster über Spur + Umgebung aus dem Höhenmodell (elev), lokale Maxima werden nach Überhöhung über einem 2,5-km-Ring
 // und Steilheit bewertet. Liefert { lon, lat, elev, prom, distM } oder null.
-function findScenicPoi(dec, elev) {
+const SEASON_POI_DEFAULTS = { prom: 800, promLow: 300, steep: 1, dist: 3500 };
+function findScenicPoi(dec, elev, prm) {
   if (!elev || !dec || dec.length < 3) return null;
+  const P = { ...SEASON_POI_DEFAULTS, ...(prm || {}) };
   const R2D = Math.PI / 180, mLat = 111320;
   let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
   dec.forEach(p => { a = Math.min(a, p.lon); b = Math.min(b, p.lat); c = Math.max(c, p.lon); d = Math.max(d, p.lat); });
@@ -3600,16 +3601,16 @@ function findScenicPoi(dec, elev) {
     for (let dj = -rc; dj <= rc && isMax; dj++) for (let di = -rc; di <= rc; di++) { const v = E[(j + dj) * (nx + 1) + i + di]; if (isFinite(v) && v > e0) { isMax = false; break; } }
     if (!isMax) continue;
     const lon = w0 + i * dLon, lat = s0 + j * dLat, dist = distToTrack(lon, lat);
-    if (dist > 3500) continue;
+    if (dist > P.dist) continue;
     let sum = 0, n = 0;
     for (let k = 0; k < 8; k++) { const v = elev(lat + Math.sin(k * Math.PI / 4) * ringM / mLat, lon + Math.cos(k * Math.PI / 4) * ringM / mLon); if (v != null && isFinite(v)) { sum += v; n++; } }
     if (n < 6) continue;
     const prom = e0 - sum / n;
     let steep = 0;
     for (let k = 0; k < 8; k++) { const v = elev(lat + Math.sin(k * Math.PI / 4) * 250 / mLat, lon + Math.cos(k * Math.PI / 4) * 250 / mLon); if (v != null && isFinite(v)) steep = Math.max(steep, (e0 - v) / 250); }
-    if (!(prom >= 800 || (prom >= 300 && steep >= 1))) continue;
+    if (!(prom >= P.prom || (prom >= P.promLow && steep >= P.steep))) continue;
     const score = prom * (1 + 0.3 * steep) - dist * 0.05;
-    if (!best || score > best.score) best = { lon, lat, elev: e0, prom, distM: dist, score };
+    if (!best || score > best.score) best = { lon, lat, elev: e0, prom, steep, distM: dist, score };
   }
   return best;
 }
@@ -3618,7 +3619,7 @@ const seasonBearing = (a, b) => {   // Himmelsrichtung von a nach b in Grad
   return Math.atan2(dl, dp) / R;
 };
 
-function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, music, D, mapStyle, onDone, onError, onCancelRef, setStatus }) {
+function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, music, D, mapStyle, pois, onDone, onError, onCancelRef, setStatus }) {
   const mainDivRef = useRef(null), outRef = useRef(null);
   const portrait = format === "port", square = format === "square";
   const W = portrait ? 720 : square ? 1080 : 1280, H = portrait ? 1280 : square ? 1080 : 720;
@@ -3640,18 +3641,8 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
       const wcCfg = await pickWebCodecsConfig(W, H, FPS, BITRATE);
       if (!wcCfg) throw new Error("Dieser Browser kann keine MP4-Videos kodieren (WebCodecs/H.264). Bitte Chrome, Edge oder einen aktuellen Safari verwenden.");
 
-      // Sehenswertes Gelände (Gipfel, Felsmonolithen) neben ganzen Flügen: eigene Kameraperspektive
-      const flightScenes = scenes.filter(x => x.kind === "flight");
-      for (let k = 0; k < flightScenes.length; k++) {
-        const fs = flightScenes[k];
-        setStatus("Sehenswürdigkeiten werden gesucht …", Math.round(k / flightScenes.length * 100));
-        try {
-          const dem = await loadVideoDem(fs.track, mapTilerKey, 0.035);
-          if (cancelled) return;
-          fs.poi = dem ? findScenicPoi(fs.dec, dem.elev) : null;
-          if (fs.poi) console.info("Saison-Video: Sehenswürdigkeit bei " + fs.title + " – " + Math.round(fs.poi.elev) + " m, " + Math.round(fs.poi.prom) + " m Überhöhung, " + Math.round(fs.poi.distM) + " m neben der Spur");
-        } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
-      }
+      // Im Dialog bestätigte Sehenswürdigkeiten (Szenenindex → Ort) übernehmen: eigene Kameraperspektive
+      scenes.forEach((sc, i) => { sc.poi = pois && pois[i] ? pois[i] : null; delete sc._p; delete sc._f; });
 
       const out = outRef.current; out.width = W; out.height = H;
       const ctx = out.getContext("2d");
@@ -3716,17 +3707,17 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
       const sceneCam = (sc, u) => {
         const e = ease(u);
         if (sc.kind === "flight" && sc.poi) {
-          // Kamera blickt über den Flug hinweg auf die Sehenswürdigkeit und fährt mit dem Gleitschirm mit
+          // Feste Kamera: blickt über den Flug hinweg auf die Sehenswürdigkeit, ohne der Flugspur zu folgen;
+          // nur ein sehr langsamer Anflug (Zoom) und eine leichte Drehung
           if (!sc._p) {
             const n = sc.dec.length, cen = { lon: sc.dec.reduce((q, x) => q + x.lon, 0) / n, lat: sc.dec.reduce((q, x) => q + x.lat, 0) / n };
-            const far = Math.max(2500, ...sc.dec.map(x => Math.hypot((x.lon - sc.poi.lon) * 111320 * Math.cos(cen.lat * R2D), (x.lat - sc.poi.lat) * 111320)));
-            const mpp = far * 2 / (W * 0.8);
-            sc._p = { b: seasonBearing(cen, sc.poi), z: clamp(Math.log2(CIRC * Math.cos(cen.lat * R2D) / (512 * mpp)), 11.5, 14.3) };
+            const mid = { lon: (cen.lon + sc.poi.lon) / 2, lat: (cen.lat + sc.poi.lat) / 2 };
+            const far = Math.max(2500, Math.hypot((sc.poi.lon - mid.lon) * 111320 * Math.cos(mid.lat * R2D), (sc.poi.lat - mid.lat) * 111320),
+              ...sc.dec.map(x => Math.hypot((x.lon - mid.lon) * 111320 * Math.cos(mid.lat * R2D), (x.lat - mid.lat) * 111320)));
+            const mpp = far * 2.4 / (W * 0.8);
+            sc._p = { center: [mid.lon, mid.lat], b: seasonBearing(cen, sc.poi), z: clamp(Math.log2(CIRC * Math.cos(mid.lat * R2D) / (512 * mpp)), 11, 14.3) };
           }
-          const len = sc.t1 - sc.t0, p = clamp((u * len - 0.4) / Math.max(0.5, len - 1.3), 0, 1);
-          const tr = sc.track, cur = videoPosAt(tr, tr[0].timeSec + (tr[tr.length - 1].timeSec - tr[0].timeSec) * p);
-          return { center: [lerp(cur.lon, sc.poi.lon, 0.5), lerp(cur.lat, sc.poi.lat, 0.5)], zoom: sc._p.z + 0.2 + 0.5 * e,
-            bearing: sc._p.b + lerp(-14, 14, u), pitch: lerp(62, 68, e), top: 0.1, bottom: 0.44 };
+          return { center: sc._p.center, zoom: sc._p.z + 0.3 * e, bearing: sc._p.b + lerp(-4, 4, u), pitch: 62, top: 0.1, bottom: 0.44 };
         }
         if (sc.kind === "flight") {
           if (!sc._f) sc._f = fitCam(sc.dec, { pitch: 40, top: 0.1, bottom: 0.44, padX: 0.1, minSpan: sc.excerpt ? 500 : 2000, maxZoom: sc.excerpt ? 16 : 14.5 });
@@ -4126,7 +4117,11 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
     const has = (p) => flights.some(f => { const ts = parseDateToTs(f.date || f.rawDate); return ts >= fromISO(p.from).getTime() && ts <= fromISO(p.to).getTime() + 86399999; });
     return list.filter((p, i) => i === 0 || has(p));
   }, [flights]);
-  const [stage, setStage] = useState("options"); // options | render | done | error
+  const [stage, setStage] = useState("options"); // options | poi | render | done | error
+  // Sehenswürdigkeiten: Suchparameter (editierbar), Fundliste mit Auswahl, Höhenmodelle je Szene zwischengespeichert
+  const [poiPrm, setPoiPrm] = useState({ prom: String(SEASON_POI_DEFAULTS.prom), promLow: String(SEASON_POI_DEFAULTS.promLow), steep: String(SEASON_POI_DEFAULTS.steep), dist: String(SEASON_POI_DEFAULTS.dist) });
+  const [poiRows, setPoiRows] = useState([]), [poiBusy, setPoiBusy] = useState("");
+  const demsRef = useRef({}), poiRun = useRef(0);
   const [presetId, setPresetId] = useState(presets[0].id);
   const [fromS, setFromS] = useState(presets[0].from);
   const [toS, setToS] = useState(presets[0].to);
@@ -4223,8 +4218,33 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   const summary = (() => {
     if (!script.length) return "";
     const c = script.filter(x => x.kind === "region").length - 1, h = script.filter(x => x.kind === "flight").length, t = script.filter(x => x.kind === "thermal").length;
-    return ["Intro", stats.home ? "Heimatregion" : "Karte", c > 0 ? c + (c === 1 ? " Land" : " Länder") : "", h ? h + (h === 1 ? " Highlight-Flug" : " Highlight-Flüge") : "", t ? (t === 1 ? "Thermik in 3D" : t + " Thermik-Szenen in 3D") : "", "Bilanz", "Abspann"].filter(Boolean).join(" · ");
+    return ["Intro", stats.home ? "Heimatregion" : "Karte", c > 0 ? c + (c === 1 ? " Land" : " Länder") : "", h ? h + (h === 1 ? " Highlight-Flug" : " Highlight-Flüge") : "", t ? (t === 1 ? "Thermik in 3D" : t + " Thermik-Szenen in 3D") : "", "Abspann"].filter(Boolean).join(" · ");
   })();
+
+  const searchPois = async () => {
+    const id = ++poiRun.current, found = [];
+    const prm = {}; for (const k of Object.keys(SEASON_POI_DEFAULTS)) { const v = parseFloat(String(poiPrm[k]).replace(",", ".")); prm[k] = isFinite(v) ? v : SEASON_POI_DEFAULTS[k]; }
+    setPoiRows([]);
+    const fl = script.map((sc, si) => ({ sc, si })).filter(x => x.sc.kind === "flight");
+    for (let k = 0; k < fl.length; k++) {
+      const { sc, si } = fl[k];
+      setPoiBusy("Gelände " + (k + 1) + "/" + fl.length + " wird analysiert …");
+      try {
+        let elev = demsRef.current[si];
+        if (elev === undefined) { const dem = await loadVideoDem(sc.track, mapTilerKey, 0.035); elev = demsRef.current[si] = dem ? dem.elev : null; }
+        if (poiRun.current !== id) return;
+        const poi = findScenicPoi(sc.dec, elev, prm);
+        if (poi) found.push({ si, title: sc.title, kicker: sc.kicker, t0: sc.t0, t1: sc.t1, poi, on: true });
+      } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
+    }
+    if (poiRun.current !== id) return;
+    setPoiRows(found); setPoiBusy("");
+  };
+  const startVideo = () => {
+    if (script.some(x => x.kind === "flight")) { demsRef.current = {}; setStage("poi"); searchPois(); }
+    else { setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }
+  };
+  const poisSel = {}; poiRows.forEach(r => { if (r.on) poisSel[r.si] = r.poi; });
 
   const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
   useEffect(() => {
@@ -4332,12 +4352,40 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
               Das Video wird Bild für Bild berechnet (feste 30 fps). Das dauert je nach Gerät und Länge einige Minuten — die App dabei im Vordergrund und den Bildschirm eingeschaltet lassen. Karten (Gelände oder Satellit) kommen von MapTiler (Internet nötig).
             </div>
-            <button disabled={!canStart} onClick={()=>{ setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn(canStart ? "#16a34a" : "rgba(255,255,255,0.12)")}>🎬 Video erstellen ({seasonMMSS(D)} min)</button>
+            <button disabled={!canStart} onClick={startVideo} style={btn(canStart ? "#16a34a" : "rgba(255,255,255,0.12)")}>🎬 Weiter ({seasonMMSS(D)} min)</button>
+          </>
+        )}
+        {stage === "poi" && (
+          <>
+            <div style={lbl}>Sehenswürdigkeiten bei den Highlight-Flügen</div>
+            <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
+              Bei markierten Orten blickt die Kamera mit fester Perspektive auf den Gipfel bzw. Felsen und zeigt den Flug davor. Gefunden wird im Höhenmodell neben der Flugspur.
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {[["prom","Gipfel: Überhöhung ab (m)"],["promLow","Steiler Fels: Überhöhung ab (m)"],["steep","Steiler Fels: Steilheit ab (1 = 45°)"],["dist","Max. Abstand zur Flugspur (m)"]].map(([k, t]) => (
+                <label key={k} style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>{t}<input type="text" inputMode="decimal" value={poiPrm[k]} onChange={e=>setPoiPrm(v=>({ ...v, [k]: e.target.value }))} style={inp} /></label>
+              ))}
+            </div>
+            <button disabled={!!poiBusy} onClick={searchPois} style={btn(poiBusy ? "rgba(255,255,255,0.12)" : "#2563eb")}>🔍 Neu suchen</button>
+            {poiBusy && <div style={{fontSize:13,color:"#7dd3fc"}}>{poiBusy}</div>}
+            {!poiBusy && !poiRows.length && <div style={{fontSize:13,color:"rgba(232,244,253,0.7)"}}>Keine Sehenswürdigkeit gefunden. Die Schwellen oben lassen sich senken; sonst entsteht das Video mit der normalen Kamera.</div>}
+            {poiRows.map(r => (
+              <label key={r.si} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"10px 12px",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,cursor:"pointer",background:r.on?"rgba(125,211,252,0.1)":"transparent"}}>
+                <input type="checkbox" checked={r.on} onChange={e=>{ const on = e.target.checked; setPoiRows(rows => rows.map(x => x.si === r.si ? { ...x, on } : x)); }} style={{marginTop:3,width:18,height:18}} />
+                <span style={{fontSize:13,lineHeight:1.5}}>
+                  <b>{r.title}</b> <span style={{color:"rgba(232,244,253,0.55)"}}>· {r.kicker}</span><br />
+                  Im Video ca. {seasonMMSS(r.t0)}–{seasonMMSS(r.t1)} min<br />
+                  <span style={{color:"rgba(232,244,253,0.6)"}}>Gipfel {Math.round(r.poi.elev)} m ü. M. · {Math.round(r.poi.prom)} m über Umgebung · Steilheit {r.poi.steep.toFixed(1)} · {Math.round(r.poi.distM)} m neben der Spur · {r.poi.lat.toFixed(4)}°, {r.poi.lon.toFixed(4)}°</span>
+                </span>
+              </label>
+            ))}
+            <button disabled={!!poiBusy} onClick={()=>{ poiRun.current++; setProgress({ text: "Starte …", pct: 0 }); setStage("render"); }} style={btn(poiBusy ? "rgba(255,255,255,0.12)" : "#16a34a")}>🎬 Video erstellen ({poiRows.filter(r => r.on).length} Sehenswürdigkeit{poiRows.filter(r => r.on).length === 1 ? "" : "en"})</button>
+            <button onClick={()=>{ poiRun.current++; setPoiBusy(""); setStage("options"); }} style={btn("rgba(255,255,255,0.12)")}>Zurück</button>
           </>
         )}
         {stage === "render" && (
           <>
-            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} purpose={purpose} D={D} mapStyle={mapStyle}
+            <SeasonVideoStudio script={script} stats={stats} meta={meta} mapTilerKey={mapTilerKey} format={format} purpose={purpose} D={D} mapStyle={mapStyle} pois={poisSel}
               music={music && mbuf && plan ? { buf: mbuf, start: music.start, fade: plan.natural ? 0.5 : Math.min(3, Math.max(1.2, plan.an ? plan.an.beatSec * 4 : 2)) } : null}
               onCancelRef={cancelRef}
               setStatus={(text, pct) => setProgress({ text, pct })}
