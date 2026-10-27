@@ -1657,8 +1657,8 @@ function createAltitudeCurtainLayer(pts, groundAt, warm = false) {
   const vtx = (v, c, a) => data.push(v[0] - cx, v[1] - cy, v[2], c[0], c[1], c[2], a);
   for (let k = 0; k < idx.length - 1; k++) {
     const c = col[k + 1];
-    vtx(top[k], c, 0.3); vtx(bot[k], c, 0.04); vtx(top[k + 1], c, 0.3);
-    vtx(top[k + 1], c, 0.3); vtx(bot[k], c, 0.04); vtx(bot[k + 1], c, 0.04);
+    vtx(top[k], c, 0.1); vtx(bot[k], c, 0.01); vtx(top[k + 1], c, 0.1);
+    vtx(top[k + 1], c, 0.1); vtx(bot[k], c, 0.01); vtx(bot[k + 1], c, 0.01);
   }
   let prog = null, buf = null, drawSegs = idx.length - 1;
   return {
@@ -3595,7 +3595,7 @@ function buildSeasonScript(st, D, beats, trip, pois, opts) {
       while (i0 > 0 && T[ci].timeSec - T[i0 - 1].timeSec <= 150) i0--;
       while (i1 < T.length - 1 && T[i1 + 1].timeSec - T[ci].timeSec <= 150) i1++;
       const seg = T.slice(i0, i1 + 1), stp = Math.max(1, Math.ceil(seg.length / 600)), sdec = seg.filter((_, i) => i % stp === 0 || i === seg.length - 1);
-      sc.push({ kind: "flight", key: "poi:" + hi, map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: 0.8, hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
+      sc.push({ kind: "flight", key: "poi:" + q.id, pid: q.id, defOff: !q.rec, map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: 0.8, hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
         sub: [h.r.site, seasonInt(q.poi.elev) + " m ü. M."].filter(Boolean).join(" · "), track: seg, dec: sdec,
         clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (seg[0].timeSec - T[0].timeSec) : null });
     });
@@ -3610,7 +3610,7 @@ function buildSeasonScript(st, D, beats, trip, pois, opts) {
   const num = (v) => { const x = parseFloat(String(v).replace(",", ".")); return isFinite(x) ? x : null; };
   sc.forEach(x => {
     const o = opts[x.key] || {}, z = num(o.zoom), d = num(o.dur);
-    x.off = o.on === false && x.kind !== "intro" && x.kind !== "outro";
+    x.off = (o.on != null ? o.on === false : !!x.defOff) && x.kind !== "intro" && x.kind !== "outro";
     if (z != null) x.zoomAdd = z;
     x.fixed = d != null && d > 0 ? Math.max(1.5, d) : null;
   });
@@ -3651,10 +3651,10 @@ const seasonWaitIdle = (map, ms) => new Promise(res => {
 
 // Sehenswertes Gelände neben dem Flug: markanter Gipfel oder Felsmonolith nahe der Spur.
 // Raster über Spur + Umgebung aus dem Höhenmodell (elev), lokale Maxima werden nach Überhöhung über einem 2,5-km-Ring
-// und Steilheit bewertet. Liefert { lon, lat, elev, prom, distM } oder null.
+// und Steilheit bewertet. Liefert alle Funde (beste zuerst, höchstens `max`) als [{ lon, lat, elev, prom, distM }].
 const SEASON_POI_DEFAULTS = { prom: 800, promLow: 300, steep: 1, dist: 3500 };
-function findScenicPoi(dec, elev, prm) {
-  if (!elev || !dec || dec.length < 3) return null;
+function findScenicPois(dec, elev, prm, max) {
+  if (!elev || !dec || dec.length < 3) return [];
   const P = { ...SEASON_POI_DEFAULTS, ...(prm || {}) };
   const R2D = Math.PI / 180, mLat = 111320;
   let a = 1e9, b = 1e9, c = -1e9, d = -1e9;
@@ -3669,7 +3669,7 @@ function findScenicPoi(dec, elev, prm) {
   const rc = Math.max(2, Math.round(600 / stepM));
   const ringM = 2500;
   const distToTrack = (lon, lat) => { let m = 1e12; for (const p of dec) { const dx = (p.lon - lon) * mLon, dy = (p.lat - lat) * mLat; m = Math.min(m, dx * dx + dy * dy); } return Math.sqrt(m); };
-  let best = null;
+  const cands = [];
   for (let j = rc; j <= ny - rc; j++) for (let i = rc; i <= nx - rc; i++) {
     const e0 = E[j * (nx + 1) + i];
     if (!isFinite(e0)) continue;
@@ -3686,9 +3686,17 @@ function findScenicPoi(dec, elev, prm) {
     for (let k = 0; k < 8; k++) { const v = elev(lat + Math.sin(k * Math.PI / 4) * 250 / mLat, lon + Math.cos(k * Math.PI / 4) * 250 / mLon); if (v != null && isFinite(v)) steep = Math.max(steep, (e0 - v) / 250); }
     if (!(prom >= P.prom || (prom >= P.promLow && steep >= P.steep))) continue;
     const score = prom * (1 + 0.3 * steep) - dist * 0.05;
-    if (!best || score > best.score) best = { lon, lat, elev: e0, prom, steep, distM: dist, score };
+    cands.push({ lon, lat, elev: e0, prom, steep, distM: dist, score });
   }
-  return best;
+  // beste zuerst; Funde näher als 1,2 km beim bereits gewählten zählen als derselbe Berg
+  cands.sort((x, y) => y.score - x.score);
+  const out = [];
+  for (const q of cands) {
+    if (out.some(o => Math.hypot((o.lon - q.lon) * mLon, (o.lat - q.lat) * mLat) < 1200)) continue;
+    out.push(q);
+    if (out.length >= (max || 5)) break;
+  }
+  return out;
 }
 // Name einer Sehenswürdigkeit: OpenStreetMap (benannte Gipfel/Felsen in 800 m), sonst Wikipedia (Artikel in 1,5 km),
 // sonst MapTiler-Geokodierung. Liefert "" wenn nichts gefunden wird (im Dialog von Hand änderbar).
@@ -4341,9 +4349,13 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
         let elev = demsRef.current[si];
         if (elev === undefined) { const dem = await loadVideoDem(sc.track, mapTilerKey, 0.035); elev = demsRef.current[si] = dem ? dem.elev : null; }
         if (poiRun.current !== id) return;
-        const poi = findScenicPoi(sc.dec, elev, prm);
-        if (poi) { setPoiBusy("Name wird gesucht (" + (k + 1) + "/" + fl.length + ") …"); const name = await lookupPoiName(poi, mapTilerKey); if (poiRun.current !== id) return;
-          found.push({ hi: sc.hi, flight: sc.title, kicker: sc.kicker, poi, name }); }
+        const pois = findScenicPois(sc.dec, elev, prm, 5);
+        for (let m = 0; m < pois.length; m++) {
+          const poi = pois[m];
+          setPoiBusy("Name wird gesucht (" + (k + 1) + "/" + fl.length + ") …"); const name = await lookupPoiName(poi, mapTilerKey); if (poiRun.current !== id) return;
+          // Empfehlung: der beste Fund je Flug ist aktiviert, die übrigen stehen zur Auswahl im Drehbuch
+          found.push({ id: sc.hi + ":" + m, rec: m === 0, hi: sc.hi, flight: sc.title, kicker: sc.kicker, poi, name });
+        }
       } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
     }
     if (poiRun.current !== id) return;
@@ -4477,7 +4489,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             </div>
             <div style={lbl}>Drehbuch</div>
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
-              Szenen mit Haken kommen ins Video. Die Gesamtlänge bleibt (Länge bzw. Musik); abgewählte Szenen und feste Dauern verschieben die Zeit der übrigen Szenen. Dauer leer lassen = automatisch. Zoom: Stufen näher (− = weiter weg).
+              Szenen mit Haken kommen ins Video. Die Gesamtlänge bleibt (Länge bzw. Musik); abgewählte Szenen und feste Dauern verschieben die Zeit der übrigen Szenen. Die Zahlen in Intro und Abspann zählen auch bei abgewählten Länder-Szenen alle Flüge. Alle gefundenen Sehenswürdigkeiten sind aufgelistet, vorgewählt ist nur die empfohlene (beste je Flug). Dauer leer lassen = automatisch. Zoom: Stufen näher (− = weiter weg).
             </div>
             <details>
               <summary style={{fontSize:13,cursor:"pointer",color:"#7dd3fc"}}>🔍 Suche nach Sehenswürdigkeiten (Parameter)</summary>
@@ -4492,14 +4504,14 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             {!poiBusy && scriptAll.some(x => x.kind === "flight" && !x.excerpt) && !poiRows.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Keine Sehenswürdigkeit gefunden (Schwellen oben senken und neu suchen).</div>}
             {scriptAll.map(x => {
               const o = sceneOpts[x.key] || {}, fixedOk = x.kind === "intro" || x.kind === "outro";
-              const edit = x.kind === "thermal" || (x.kind === "flight" && x.excerpt), poiRow = x.poi ? poiRows.find(r => r.hi === x.hi) : null;
+              const edit = x.kind === "thermal" || (x.kind === "flight" && x.excerpt), poiRow = x.poi ? poiRows.find(r => r.id === x.pid) : null;
               return (
               <div key={x.key} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"8px 12px",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,background:x.off?"transparent":"rgba(125,211,252,0.08)",opacity:x.off?0.65:1}}>
                 <input type="checkbox" checked={!x.off} disabled={fixedOk} onChange={e=>setOpt(x.key, { on: e.target.checked })} style={{marginTop:3,width:18,height:18}} />
                 <span style={{fontSize:13,lineHeight:1.5,flex:1,minWidth:0}}>
-                  {poiRow ? <input type="text" value={poiRow.name} placeholder="Name der Sehenswürdigkeit" onChange={e=>{ const name = e.target.value; setPoiRows(rows => rows.map(r => r.hi === poiRow.hi ? { ...r, name } : r)); }} style={{...inp,height:32,fontWeight:700,marginBottom:4}} />
+                  {poiRow ? <input type="text" value={poiRow.name} placeholder="Name der Sehenswürdigkeit" onChange={e=>{ const name = e.target.value; setPoiRows(rows => rows.map(r => r.id === poiRow.id ? { ...r, name } : r)); }} style={{...inp,height:32,fontWeight:700,marginBottom:4}} />
                     : <b style={{wordBreak:"break-word"}}>{label(x)}</b>}
-                  {poiRow && <div style={{color:"rgba(232,244,253,0.7)"}}>SEHENSWÜRDIGKEIT beim Flug {poiRow.flight}</div>}
+                  {poiRow && <div style={{color:"rgba(232,244,253,0.7)"}}>SEHENSWÜRDIGKEIT beim Flug {poiRow.flight}{poiRow.rec ? " · empfohlen" : ""}</div>}
                   <div style={{color:"rgba(232,244,253,0.6)"}}>{x.off ? "nicht im Video" : "ab " + seasonMMSS(x.t0) + " · ca. " + Math.round(x.t1 - x.t0) + " s"}</div>
                   {poiRow && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{Math.round(poiRow.poi.elev)} m ü. M. · {Math.round(poiRow.poi.prom)} m über Umgebung · {Math.round(poiRow.poi.distM)} m neben der Spur · {poiRow.poi.lat.toFixed(4)}°, {poiRow.poi.lon.toFixed(4)}°</div>}
                   {(edit || poiRow) && !x.off && (
@@ -4745,24 +4757,28 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const [fOpts, setFOpts] = useState({});   // je Szene { on, dur, zoom }
   const setFOpt = (key, patch) => setFOpts(o => ({ ...o, [key]: { ...(o[key] || {}), ...patch } }));
   const [fEv, setFEv] = useState(null);     // { list: Kandidaten, autoIds }
-  const [fPoi, setFPoi] = useState(null);   // { poi, name } oder null
+  const [fPois, setFPois] = useState([]);   // Funde [{ poi, name }], bester zuerst (empfohlen)
   const [fBusy, setFBusy] = useState("");
   const [fPrm, setFPrm] = useState({ prom: String(SEASON_POI_DEFAULTS.prom), promLow: String(SEASON_POI_DEFAULTS.promLow), steep: String(SEASON_POI_DEFAULTS.steep), dist: String(SEASON_POI_DEFAULTS.dist) });
   const fRun = useRef(0), demWideRef = useRef(null);
   const searchFPoi = async (elev, id) => {
     const prm = {}; for (const k of Object.keys(SEASON_POI_DEFAULTS)) { const v = parseFloat(String(fPrm[k]).replace(",", ".")); prm[k] = isFinite(v) ? v : SEASON_POI_DEFAULTS[k]; }
-    setFPoi(null);
+    setFPois([]);
     const step = Math.max(1, Math.ceil(track.length / 600)), dec = track.filter((_, i) => i % step === 0 || i === track.length - 1);
-    const poi = elev ? findScenicPoi(dec, elev, prm) : null;
-    if (!poi) return;
-    setFBusy("Name wird gesucht …");
-    const name = await lookupPoiName(poi, mapTilerKey);
-    if (fRun.current !== id) return;
-    setFPoi({ poi, name });
+    const pois = elev ? findScenicPois(dec, elev, prm, 5) : [];
+    if (!pois.length) return;
+    setFBusy("Namen werden gesucht …");
+    const found = [];
+    for (const poi of pois) {
+      const name = await lookupPoiName(poi, mapTilerKey);
+      if (fRun.current !== id) return;
+      found.push({ poi, name });
+    }
+    setFPois(found);
   };
   const prepScript = async () => {
     const id = ++fRun.current;
-    setStage("script"); setFOpts({}); setFEv(null); setFPoi(null); setFBusy("Gelände wird analysiert …");
+    setStage("script"); setFOpts({}); setFEv(null); setFPois([]); setFBusy("Gelände wird analysiert …");
     try {
       if (!demWideRef.current) {
         let dem = null;
@@ -4784,16 +4800,16 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
   const fEvents = useMemo(() => {
     if (!fEv) return null;
     const ev = fEv.list.map(c => ({ ...c, key: "ev:" + c.id, defOn: fEv.autoIds.includes(c.id) }));
-    if (fPoi) {
-      const q = fPoi.poi, mLon = 111320 * Math.cos(q.lat * Math.PI / 180);
+    fPois.forEach((fp, k) => {
+      const q = fp.poi, mLon = 111320 * Math.cos(q.lat * Math.PI / 180);
       let ci = 0, cd = 1e18;
       track.forEach((x, i) => { const d = Math.hypot((x.lon - q.lon) * mLon, (x.lat - q.lat) * 111320); if (d < cd) { cd = d; ci = i; } });
       const tc = track[ci].timeSec;
-      ev.push({ kind: "poi", key: "poi", defOn: true, score: 5, center: tc, f0: Math.max(track[0].timeSec, tc - 150), f1: Math.min(track[track.length - 1].timeSec, tc + 150),
-        lat: q.lat, lon: q.lon, poi: q, name: fPoi.name, label: "SEHENSWÜRDIGKEIT" + (fPoi.name ? " · " + fPoi.name : "") });
-    }
+      ev.push({ kind: "poi", key: "poi:" + k, pk: k, defOn: k === 0, score: 5, center: tc, f0: Math.max(track[0].timeSec, tc - 150), f1: Math.min(track[track.length - 1].timeSec, tc + 150),
+        lat: q.lat, lon: q.lon, poi: q, name: fp.name, label: "SEHENSWÜRDIGKEIT" + (fp.name ? " · " + fp.name : "") });
+    });
     return ev.sort((a, b) => a.center - b.center);
-  }, [fEv, fPoi, track]);
+  }, [fEv, fPois, track]);
   const fScript = useMemo(() => fEvents ? buildVideoScript(track, fEvents, duration, flight, fOpts) : null, [fEvents, fOpts, duration, track, flight]);
   const [progress, setProgress] = useState({ text: "", pct: 0 });
   const [result, setResult] = useState(null); // { url, ext, blob }
@@ -4918,7 +4934,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
             </div>
             <div style={{fontSize:13,fontWeight:700}}>Drehbuch</div>
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
-              Szenen mit Haken kommen ins Video. Die Gesamtlänge bleibt wie gewählt; abgewählte Szenen und feste Dauern verschieben die Zeit der übrigen Szenen. Dauer leer lassen = automatisch. Zoom: Stufen näher (− = weiter weg).
+              Szenen mit Haken kommen ins Video. Die Gesamtlänge bleibt wie gewählt; abgewählte Szenen und feste Dauern verschieben die Zeit der übrigen Szenen. Alle gefundenen Sehenswürdigkeiten sind aufgelistet, vorgewählt ist nur die empfohlene. Dauer leer lassen = automatisch. Zoom: Stufen näher (− = weiter weg).
             </div>
             <details>
               <summary style={{fontSize:13,cursor:"pointer",color:"#7dd3fc"}}>🔍 Suche nach Sehenswürdigkeiten (Parameter)</summary>
@@ -4930,7 +4946,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
               <button disabled={!!fBusy || !fEv} onClick={async ()=>{ const id = ++fRun.current; setFBusy("Suche läuft …"); await searchFPoi(demWideRef.current && demWideRef.current.elev, id); if (fRun.current === id) setFBusy(""); }} style={{...btn(fBusy || !fEv ? "rgba(255,255,255,0.12)" : "#2563eb"),marginTop:8,width:"100%"}}>🔍 Neu suchen</button>
             </details>
             {fBusy && <div style={{fontSize:13,color:"#7dd3fc"}}>{fBusy}</div>}
-            {!fBusy && fEv && !fPoi && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Keine Sehenswürdigkeit gefunden (Schwellen oben senken und neu suchen).</div>}
+            {!fBusy && fEv && !fPois.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Keine Sehenswürdigkeit gefunden (Schwellen oben senken und neu suchen).</div>}
             {!fBusy && fEv && !fEv.list.length && <div style={{fontSize:12,color:"rgba(232,244,253,0.6)"}}>Keine weiteren Highlights erkannt{demWideRef.current && demWideRef.current.elev ? "" : " (ohne Geländedaten nur eingeschränkt)"}.</div>}
             {all.map(x => {
               const o = (fOpts[x.key] || {}), fixedOk = x.kind === "start" || x.kind === "land" || x.kind === "outro";
@@ -4939,11 +4955,11 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
               <div key={x.key} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"8px 12px",border:"1px solid rgba(255,255,255,0.15)",borderRadius:10,background:x.off?"transparent":"rgba(125,211,252,0.08)",opacity:x.off?0.65:1}}>
                 <input type="checkbox" checked={!x.off} disabled={fixedOk} onChange={e=>setFOpt(x.key, { on: e.target.checked })} style={{marginTop:3,width:18,height:18}} />
                 <span style={{fontSize:13,lineHeight:1.5,flex:1,minWidth:0}}>
-                  {isPoi ? <input type="text" value={fPoi ? fPoi.name : ""} placeholder="Name der Sehenswürdigkeit" onChange={e=>{ const name = e.target.value; setFPoi(v => v ? { ...v, name } : v); }} style={{width:"100%",height:32,borderRadius:8,border:"1px solid rgba(255,255,255,0.2)",background:"rgba(0,0,0,0.25)",color:"#e8f4fd",padding:"0 10px",fontSize:15,fontWeight:700,boxSizing:"border-box",marginBottom:4}} />
+                  {isPoi ? <input type="text" value={fPois[x.pk] ? fPois[x.pk].name : ""} placeholder="Name der Sehenswürdigkeit" onChange={e=>{ const name = e.target.value; setFPois(v => v.map((q, j) => j === x.pk ? { ...q, name } : q)); }} style={{width:"100%",height:32,borderRadius:8,border:"1px solid rgba(255,255,255,0.2)",background:"rgba(0,0,0,0.25)",color:"#e8f4fd",padding:"0 10px",fontSize:15,fontWeight:700,boxSizing:"border-box",marginBottom:4}} />
                     : <b style={{wordBreak:"break-word"}}>{x.label}</b>}
-                  {isPoi && <div style={{color:"rgba(232,244,253,0.7)"}}>SEHENSWÜRDIGKEIT</div>}
+                  {isPoi && <div style={{color:"rgba(232,244,253,0.7)"}}>SEHENSWÜRDIGKEIT{x.pk === 0 ? " · empfohlen" : ""}</div>}
                   <div style={{color:"rgba(232,244,253,0.6)"}}>{x.off ? "nicht im Video" : "ab " + seasonMMSS(x.t0) + " · ca. " + Math.round(x.d) + " s"}</div>
-                  {isPoi && fPoi && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{Math.round(fPoi.poi.elev)} m ü. M. · {Math.round(fPoi.poi.prom)} m über Umgebung · {Math.round(fPoi.poi.distM)} m neben der Spur · {fPoi.poi.lat.toFixed(4)}°, {fPoi.poi.lon.toFixed(4)}°</div>}
+                  {isPoi && fPois[x.pk] && <div style={{fontSize:11,color:"rgba(232,244,253,0.5)"}}>{Math.round(fPois[x.pk].poi.elev)} m ü. M. · {Math.round(fPois[x.pk].poi.prom)} m über Umgebung · {Math.round(fPois[x.pk].poi.distM)} m neben der Spur · {fPois[x.pk].poi.lat.toFixed(4)}°, {fPois[x.pk].poi.lon.toFixed(4)}°</div>}
                   {edit && !x.off && (
                     <div style={{display:"flex",gap:12,flexWrap:"wrap",marginTop:4}}>
                       <label style={{fontSize:12,color:"rgba(232,244,253,0.6)",display:"flex",alignItems:"center",gap:6}}>Dauer (s)<input type="text" inputMode="decimal" value={o.dur != null ? o.dur : ""} placeholder={String(Math.round(x.d))} onChange={e=>setFOpt(x.key, { dur: e.target.value })} style={{...numIn,width:74,height:32,borderRadius:8,border:"1px solid rgba(255,255,255,0.2)",background:"rgba(0,0,0,0.25)",color:"#e8f4fd",fontSize:15,boxSizing:"border-box"}} /></label>
