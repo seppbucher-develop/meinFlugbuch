@@ -4376,14 +4376,20 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
         findScenicPois(sr.dec, elev, prm, 5).forEach((poi, m) => cands.push({ sr, poi, m }));
       } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
     }
-    // 2. Beste zuerst; derselbe Berg von mehreren Flügen nur einmal; Liste begrenzen
+    // 2. Derselbe Berg von mehreren Flügen (< 1,2 km Abstand) nur einmal: der Flug mit dem kleinsten Abstand zum Gipfel;
+    //    bei ähnlichem Abstand (+300 m) die grössere Flughöhe über dem Gipfel, dann die längere Flugdauer. Beste Berge zuerst.
     cands.sort((x, y) => y.poi.score - x.poi.score);
-    const list = [];
+    const groups = [];
     for (const c of cands) {
-      if (list.some(o => Math.hypot((o.poi.lon - c.poi.lon) * 111320 * Math.cos(c.poi.lat * Math.PI / 180), (o.poi.lat - c.poi.lat) * 111320) < 1200)) continue;
-      list.push(c);
-      if (list.length >= SEASON_POI_MAX_LIST) break;
+      const g = groups.find(o => Math.hypot((o[0].poi.lon - c.poi.lon) * 111320 * Math.cos(c.poi.lat * Math.PI / 180), (o[0].poi.lat - c.poi.lat) * 111320) < 1200);
+      if (g) g.push(c); else groups.push([c]);
     }
+    const rOf = (c) => (c.sr.src && c.sr.src.r) || {};
+    const list = groups.map(g => {
+      const dmin = Math.min(...g.map(c => c.poi.distM));
+      return g.filter(c => c.poi.distM <= dmin + 300)
+        .sort((x, y) => ((rOf(y).alt || 0) - y.poi.elev) - ((rOf(x).alt || 0) - x.poi.elev) || (rOf(y).sec || 0) - (rOf(x).sec || 0))[0];
+    }).slice(0, SEASON_POI_MAX_LIST);
     // Empfehlung: die besten, höchstens einer je Flug und zwei je Land, damit nicht alle aus demselben Flug stammen
     const recFlights = new Set(), recCountries = {};
     let recN = 0;
