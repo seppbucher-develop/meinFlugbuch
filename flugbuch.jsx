@@ -1999,7 +1999,7 @@ function buildVideoScript(track, highlights, D, flight, opts) {
   hlAll.forEach(h => {
     const on = isOn(h);
     push({ kind: h.kind, key: h.key, off: !on, label: h.label, f0: h.f0, f1: h.f1, d: on ? Math.min(avail * wOf(h) / wSum, D * 0.26) : 0, warp: 0.6, b0: b0(h.f0),
-      center: h.orbit ? [h.lon, h.lat] : null, pin: [h.lon, h.lat], bSide: h.bSide, heading: h.heading, poi: h.poi, poiName: h.name });
+      center: h.orbit ? [h.lon, h.lat] : null, pin: [h.lon, h.lat], bSide: h.bSide, heading: h.heading, poi: h.poi, poiName: h.name, pk: h.pk });
   });
   push({ kind: "land", key: "land", label: "LANDUNG", f0: t1 - landLen, f1: t1, d: dLand, warp: 0 });
   const land = all[all.length-1];
@@ -3718,14 +3718,16 @@ function findScenicPois(dec, elev, prm, max) {
 }
 // Name einer Sehenswürdigkeit: OpenStreetMap (benannte Gipfel/Felsen in 800 m), sonst Wikipedia (Artikel in 1,5 km),
 // sonst MapTiler-Geokodierung. Liefert je Fund einen Namen, "" wenn nichts gefunden wird (im Dialog von Hand änderbar).
-async function lookupPoiNames(pois, apiKey) {
+async function lookupPoiNames(pois, apiKey, onProgress) {
   const get = async (url, ms) => {
     const ac = new AbortController(), to = setTimeout(() => ac.abort(), ms);
     try { const r = await fetch(url, { signal: ac.signal }); return r.ok ? await r.json() : null; } catch { return null; } finally { clearTimeout(to); }
   };
   const dist = (poi, la, lo) => Math.hypot((lo - poi.lon) * 111320 * Math.cos(poi.lat * Math.PI / 180), (la - poi.lat) * 111320);
   const names = pois.map(() => "");
+  const prog = (k) => { if (onProgress) onProgress(k, pois.length); };   // k von n Funden bearbeitet
   if (!pois.length) return names;
+  prog(0);
   // 1. OpenStreetMap: eine einzige Abfrage für alle Funde (viele Einzelabfragen werden von Overpass abgewiesen), mit Ausweichserver
   const sel = `[natural~"^(peak|rock|bare_rock|cliff|volcano|ridge|hill)$"][name]`;
   const q = `[out:json][timeout:25];(${pois.map(p => `nwr(around:800,${p.lat},${p.lon})${sel};`).join("")});out center tags 400;`;
@@ -3740,10 +3742,12 @@ async function lookupPoiNames(pois, apiKey) {
       .filter(e => isFinite(e.d) && e.d <= 800).sort((x, y) => x.peak - y.peak || x.d - y.d);
     if (c.length) names[i] = c[0].n;
   });
+  prog(names.filter(Boolean).length);
   // 2. Rest: Wikipedia (Artikel in 1,5 km), sonst MapTiler-Geokodierung
   for (let i = 0; i < pois.length; i++) {
     if (names[i]) continue;
     const poi = pois[i];
+    prog(names.filter(Boolean).length);
     const w = await get(`https://de.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${poi.lat}%7C${poi.lon}&gsradius=1500&gslimit=5&format=json&origin=*`, 8000);
     const ws = w && w.query && w.query.geosearch;
     if (ws && ws.length) { names[i] = ws[0].title; continue; }
@@ -3752,6 +3756,7 @@ async function lookupPoiNames(pois, apiKey) {
       if (g && g.features && g.features[0] && g.features[0].text) names[i] = g.features[0].text;
     }
   }
+  prog(pois.length);
   return names;
 }
 const seasonBearing = (a, b) => {   // Himmelsrichtung von a nach b in Grad
@@ -4422,8 +4427,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
       c.rec = true; recN++; recFlights.add(c.sr.key); recCountries[co] = (recCountries[co] || 0) + 1;
     });
     // 3. Namen nur für die Liste suchen
-    setPoiBusy("Namen werden gesucht (" + list.length + ") …");
-    const nameList = await lookupPoiNames(list.map(c => c.poi), mapTilerKey); if (poiRun.current !== id) return;
+    const nameList = await lookupPoiNames(list.map(c => c.poi), mapTilerKey, (k, n) => setPoiBusy("Namen werden gesucht (" + k + "/" + n + ") …")); if (poiRun.current !== id) return;
     const found = [];
     for (let k = 0; k < list.length; k++) {
       const c = list[k], name = nameList[k];
@@ -4839,8 +4843,7 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
     const step = Math.max(1, Math.ceil(track.length / 600)), dec = track.filter((_, i) => i % step === 0 || i === track.length - 1);
     const pois = elev ? findScenicPois(dec, elev, prm, 5) : [];
     if (!pois.length) return;
-    setFBusy("Namen werden gesucht …");
-    const names = await lookupPoiNames(pois, mapTilerKey);
+    const names = await lookupPoiNames(pois, mapTilerKey, (k, n) => setFBusy("Namen werden gesucht (" + k + "/" + n + ") …"));
     if (fRun.current !== id) return;
     setFPois(pois.map((poi, i) => ({ poi, name: names[i] })));
   };
