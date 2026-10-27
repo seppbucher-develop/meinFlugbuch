@@ -3707,29 +3707,42 @@ function findScenicPois(dec, elev, prm, max) {
   return out;
 }
 // Name einer Sehenswürdigkeit: OpenStreetMap (benannte Gipfel/Felsen in 800 m), sonst Wikipedia (Artikel in 1,5 km),
-// sonst MapTiler-Geokodierung. Liefert "" wenn nichts gefunden wird (im Dialog von Hand änderbar).
-async function lookupPoiName(poi, apiKey) {
+// sonst MapTiler-Geokodierung. Liefert je Fund einen Namen, "" wenn nichts gefunden wird (im Dialog von Hand änderbar).
+async function lookupPoiNames(pois, apiKey) {
   const get = async (url, ms) => {
     const ac = new AbortController(), to = setTimeout(() => ac.abort(), ms);
     try { const r = await fetch(url, { signal: ac.signal }); return r.ok ? await r.json() : null; } catch { return null; } finally { clearTimeout(to); }
   };
-  const mLon = 111320 * Math.cos(poi.lat * Math.PI / 180);
-  const dist = (la, lo) => Math.hypot((lo - poi.lon) * mLon, (la - poi.lat) * 111320);
-  const q = `[out:json][timeout:12];nwr(around:800,${poi.lat},${poi.lon})[natural~"^(peak|rock|bare_rock|cliff|volcano|ridge|hill)$"][name];out center tags 20;`;
-  const o = await get("https://overpass-api.de/api/interpreter?data=" + encodeURIComponent(q), 14000);
-  if (o && o.elements && o.elements.length) {
-    const c = o.elements.map(e => ({ n: e.tags.name, d: dist(e.lat != null ? e.lat : e.center && e.center.lat, e.lon != null ? e.lon : e.center && e.center.lon), peak: e.tags.natural === "peak" ? 0 : 1 }))
-      .filter(e => isFinite(e.d)).sort((a, b) => a.peak - b.peak || a.d - b.d);
-    if (c.length) return c[0].n;
+  const dist = (poi, la, lo) => Math.hypot((lo - poi.lon) * 111320 * Math.cos(poi.lat * Math.PI / 180), (la - poi.lat) * 111320);
+  const names = pois.map(() => "");
+  if (!pois.length) return names;
+  // 1. OpenStreetMap: eine einzige Abfrage für alle Funde (viele Einzelabfragen werden von Overpass abgewiesen), mit Ausweichserver
+  const sel = `[natural~"^(peak|rock|bare_rock|cliff|volcano|ridge|hill)$"][name]`;
+  const q = `[out:json][timeout:25];(${pois.map(p => `nwr(around:800,${p.lat},${p.lon})${sel};`).join("")});out center tags 400;`;
+  let els = null;
+  for (const ep of ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]) {
+    const o = await get(ep + "?data=" + encodeURIComponent(q), 30000);
+    if (o && o.elements) { els = o.elements; break; }
   }
-  const w = await get(`https://de.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${poi.lat}%7C${poi.lon}&gsradius=1500&gslimit=5&format=json&origin=*`, 8000);
-  const ws = w && w.query && w.query.geosearch;
-  if (ws && ws.length) return ws[0].title;
-  if (apiKey) {
-    const g = await get(`https://api.maptiler.com/geocoding/${poi.lon},${poi.lat}.json?key=${apiKey}&language=de&limit=1`, 8000);
-    if (g && g.features && g.features[0] && g.features[0].text) return g.features[0].text;
+  (els || []).forEach(e => { e._la = e.lat != null ? e.lat : e.center && e.center.lat; e._lo = e.lon != null ? e.lon : e.center && e.center.lon; });
+  pois.forEach((poi, i) => {
+    const c = (els || []).filter(e => e.tags && e.tags.name).map(e => ({ n: e.tags.name, d: dist(poi, e._la, e._lo), peak: e.tags.natural === "peak" ? 0 : 1 }))
+      .filter(e => isFinite(e.d) && e.d <= 800).sort((x, y) => x.peak - y.peak || x.d - y.d);
+    if (c.length) names[i] = c[0].n;
+  });
+  // 2. Rest: Wikipedia (Artikel in 1,5 km), sonst MapTiler-Geokodierung
+  for (let i = 0; i < pois.length; i++) {
+    if (names[i]) continue;
+    const poi = pois[i];
+    const w = await get(`https://de.wikipedia.org/w/api.php?action=query&list=geosearch&gscoord=${poi.lat}%7C${poi.lon}&gsradius=1500&gslimit=5&format=json&origin=*`, 8000);
+    const ws = w && w.query && w.query.geosearch;
+    if (ws && ws.length) { names[i] = ws[0].title; continue; }
+    if (apiKey) {
+      const g = await get(`https://api.maptiler.com/geocoding/${poi.lon},${poi.lat}.json?key=${apiKey}&language=de&limit=1`, 8000);
+      if (g && g.features && g.features[0] && g.features[0].text) names[i] = g.features[0].text;
+    }
   }
-  return "";
+  return names;
 }
 const seasonBearing = (a, b) => {   // Himmelsrichtung von a nach b in Grad
   const R = Math.PI / 180, dl = (b.lon - a.lon) * R * Math.cos((a.lat + b.lat) / 2 * R), dp = (b.lat - a.lat) * R;
@@ -4399,11 +4412,11 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
       c.rec = true; recN++; recFlights.add(c.sr.key); recCountries[co] = (recCountries[co] || 0) + 1;
     });
     // 3. Namen nur für die Liste suchen
+    setPoiBusy("Namen werden gesucht (" + list.length + ") …");
+    const nameList = await lookupPoiNames(list.map(c => c.poi), mapTilerKey); if (poiRun.current !== id) return;
     const found = [];
     for (let k = 0; k < list.length; k++) {
-      const c = list[k];
-      setPoiBusy("Name wird gesucht (" + (k + 1) + "/" + list.length + ") …");
-      const name = await lookupPoiName(c.poi, mapTilerKey); if (poiRun.current !== id) return;
+      const c = list[k], name = nameList[k];
       found.push({ id: c.sr.key + ":" + c.m, rec: !!c.rec, hi: c.sr.hi, extra: !!c.sr.extra, src: c.sr.extra ? c.sr.src : null,
         flight: c.sr.title + (c.sr.country ? " (" + c.sr.country + ")" : ""), kicker: c.sr.kicker, poi: c.poi, name });
     }
@@ -4817,13 +4830,9 @@ function FlightVideoDialog({ flight, track, mapTilerKey, onClose }) {
     const pois = elev ? findScenicPois(dec, elev, prm, 5) : [];
     if (!pois.length) return;
     setFBusy("Namen werden gesucht …");
-    const found = [];
-    for (const poi of pois) {
-      const name = await lookupPoiName(poi, mapTilerKey);
-      if (fRun.current !== id) return;
-      found.push({ poi, name });
-    }
-    setFPois(found);
+    const names = await lookupPoiNames(pois, mapTilerKey);
+    if (fRun.current !== id) return;
+    setFPois(pois.map((poi, i) => ({ poi, name: names[i] })));
   };
   const prepScript = async () => {
     const id = ++fRun.current;
