@@ -3448,6 +3448,7 @@ function buildSeasonStats(flights, fromTs, toTs, reise) {
   return { rows, count: rows.length, sec: rows.reduce((a, r) => a + r.sec, 0),
     days: new Set(rows.map(r => r.f.date || r.f.rawDate)).size, sites: siteSet.size,
     countries, countriesN, home, events, plays: playsOf(rows), pins: pinsOf(rows), topSites: topSites(rows),
+    trackFlights: withTrack,   // ALLE FLÜGE
     highlights: hl, thermals, bestDist: Math.max(0, ...rows.map(r => r.dist)), maxAlt: Math.max(0, ...rows.map(r => r.alt)) };
 }
 
@@ -3656,6 +3657,10 @@ const seasonWaitIdle = (map, ms) => new Promise(res => {
 // Raster über Spur + Umgebung aus dem Höhenmodell (elev), lokale Maxima werden nach Überhöhung über einem 2,5-km-Ring
 // und Steilheit bewertet. Liefert alle Funde (beste zuerst, höchstens `max`) als [{ lon, lat, elev, prom, distM }].
 const SEASON_POI_DEFAULTS = { prom: 800, promLow: 300, steep: 1, dist: 3500 };
+// ALLE FLÜGE: Sehenswürdigkeiten auch bei Flügen suchen, die kein Highlight sind (höchstens MAX_FLIGHTS Flüge, längste/höchste
+// zuerst; in der Liste höchstens MAX_LIST Funde, davon REC vorgewählt). Zum Entfernen: ALL_FLIGHTS = false setzen
+// oder alle mit "ALLE FLÜGE" markierten Stellen löschen.
+const SEASON_POI_ALL_FLIGHTS = true, SEASON_POI_MAX_FLIGHTS = 30, SEASON_POI_MAX_LIST = 15, SEASON_POI_REC = 4;
 function findScenicPois(dec, elev, prm, max) {
   if (!elev || !dec || dec.length < 3) return [];
   const P = { ...SEASON_POI_DEFAULTS, ...(prm || {}) };
