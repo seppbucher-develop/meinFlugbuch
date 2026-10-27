@@ -3579,6 +3579,18 @@ function buildSeasonScript(st, D, beats, trip, pois, opts) {
     sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins, plays: st.home ? st.home.plays : st.plays });
   cs.slice(0, nc).forEach(c => sc.push({ kind: "region", key: "region:" + c.name, map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
     n: c.n, sec: c.sec, sites: c.sites, pins: c.pins, plays: c.plays }));
+  const addPoi = (q, h) => {
+    const T = h.track, mLon = 111320 * Math.cos(q.poi.lat * Math.PI / 180), sm = String(h.r.f.startTime || "").match(/(\d{1,2}):(\d{2})/);
+    let ci = 0, cd = 1e18;
+    T.forEach((x, i) => { const d = Math.hypot((x.lon - q.poi.lon) * mLon, (x.lat - q.poi.lat) * 111320); if (d < cd) { cd = d; ci = i; } });
+    let i0 = ci, i1 = ci;
+    while (i0 > 0 && T[ci].timeSec - T[i0 - 1].timeSec <= 150) i0--;
+    while (i1 < T.length - 1 && T[i1 + 1].timeSec - T[ci].timeSec <= 150) i1++;
+    const seg = T.slice(i0, i1 + 1), stp = Math.max(1, Math.ceil(seg.length / 600)), sdec = seg.filter((_, i) => i % stp === 0 || i === seg.length - 1);
+    sc.push({ kind: "flight", key: "poi:" + q.id, pid: q.id, defOff: !q.rec, map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: 0.8, hi: q.hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
+      sub: [h.r.site, seasonInt(q.poi.elev) + " m ü. M."].filter(Boolean).join(" · "), track: seg, dec: sdec,
+      clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (seg[0].timeSec - T[0].timeSec) : null });
+  };
   hs.slice(0, nh).forEach((h, hi) => {
     const f = h.r.f, ex = h.excerpt, tr = ex ? h.track.slice(ex.i0, ex.i1 + 1) : h.track, step = Math.max(1, Math.ceil(tr.length / 600));
     const dec = tr.filter((_, i) => i % step === 0 || i === tr.length - 1);
@@ -3587,19 +3599,10 @@ function buildSeasonScript(st, D, beats, trip, pois, opts) {
     sc.push({ kind: "flight", key: (ex ? "peak:" : "flight:") + hi, map: "terrain", w: ex ? 1.1 : 1.5, excerpt: !!ex, kicker: h.tags.join(" · "), title: h.r.site || "Flug", sub: parts.join(" · "),
       track: tr, dec, hi, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (tr[0].timeSec - h.track[0].timeSec) : null });
     // Bestätigte Sehenswürdigkeit dieses Flugs: eigene Szene mit dem Flugabschnitt daneben (wie "Höchster Punkt")
-    (pois || []).filter(q => q.hi === hi && !ex).forEach(q => {
-      const T = h.track, mLon = 111320 * Math.cos(q.poi.lat * Math.PI / 180);
-      let ci = 0, cd = 1e18;
-      T.forEach((x, i) => { const d = Math.hypot((x.lon - q.poi.lon) * mLon, (x.lat - q.poi.lat) * 111320); if (d < cd) { cd = d; ci = i; } });
-      let i0 = ci, i1 = ci;
-      while (i0 > 0 && T[ci].timeSec - T[i0 - 1].timeSec <= 150) i0--;
-      while (i1 < T.length - 1 && T[i1 + 1].timeSec - T[ci].timeSec <= 150) i1++;
-      const seg = T.slice(i0, i1 + 1), stp = Math.max(1, Math.ceil(seg.length / 600)), sdec = seg.filter((_, i) => i % stp === 0 || i === seg.length - 1);
-      sc.push({ kind: "flight", key: "poi:" + q.id, pid: q.id, defOff: !q.rec, map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: 0.8, hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
-        sub: [h.r.site, seasonInt(q.poi.elev) + " m ü. M."].filter(Boolean).join(" · "), track: seg, dec: sdec,
-        clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (seg[0].timeSec - T[0].timeSec) : null });
-    });
+    (pois || []).filter(q => q.hi === hi && !ex).forEach(q => addPoi(q, h));
   });
+  // ALLE FLÜGE: Sehenswürdigkeiten von Flügen, die kein Highlight sind (chronologisch)
+  (pois || []).filter(q => q.extra).sort((x, y) => x.src.r.ts - y.src.r.ts).forEach(q => addPoi(q, q.src));
   st.thermals.slice(0, nt).forEach(T => {
     const a = Math.max(0, T.i0 - 20), z = Math.min(T.track.length, T.i1 + 21), slice = T.track.slice(a, z);
     sc.push({ kind: "thermal", key: "thermal:" + T.type, map: "terrain", w: 1.5, type: T.type, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
@@ -4338,32 +4341,67 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
   })();
 
   const searchPois = async () => {
-    const id = ++poiRun.current, found = [];
+    const id = ++poiRun.current;
     const prm = {}; for (const k of Object.keys(SEASON_POI_DEFAULTS)) { const v = parseFloat(String(poiPrm[k]).replace(",", ".")); prm[k] = isFinite(v) ? v : SEASON_POI_DEFAULTS[k]; }
     setPoiRows([]);
-    const fl = scriptAll.filter(x => x.kind === "flight" && !x.poi && !x.excerpt);
-    for (let k = 0; k < fl.length; k++) {
-      const sc = fl[k], si = sc.hi;
-      setPoiBusy("Gelände " + (k + 1) + "/" + fl.length + " wird analysiert …");
+    // Quellen: die Highlight-Flüge des Drehbuchs, dazu (ALLE FLÜGE) die längsten/höchsten übrigen Flüge mit Track
+    const srcs = scriptAll.filter(x => x.kind === "flight" && !x.poi && !x.excerpt).map(sc => {
+      const h = stats.highlights[sc.hi];
+      return { key: sc.hi, hi: sc.hi, track: sc.track, dec: sc.dec, title: sc.title, kicker: sc.kicker, country: h ? h.r.country : "", cache: true, src: h };
+    });
+    if (SEASON_POI_ALL_FLIGHTS) {
+      const hlIds = new Set(stats.highlights.map(h => h.r.f.id));
+      (stats.trackFlights || []).filter(x => !hlIds.has(x.r.f.id))
+        .sort((x, y) => (y.r.sec / 3600 + y.r.alt / 1500) - (x.r.sec / 3600 + x.r.alt / 1500)).slice(0, SEASON_POI_MAX_FLIGHTS)
+        .forEach((x, i) => {
+          const step = Math.max(1, Math.ceil(x.track.length / 600));
+          srcs.push({ key: "x" + i, hi: "x" + i, extra: true, track: x.track, dec: x.track.filter((_, j) => j % step === 0 || j === x.track.length - 1),
+            title: x.r.site || "Flug", kicker: seasonDay(x.r.ts), country: x.r.country, src: x });
+        });
+    }
+    // 1. Gelände je Flug analysieren
+    const cands = [];
+    for (let k = 0; k < srcs.length; k++) {
+      const sr = srcs[k];
+      setPoiBusy("Gelände " + (k + 1) + "/" + srcs.length + " wird analysiert …");
       try {
-        let elev = demsRef.current[si];
-        if (elev === undefined) { const dem = await loadVideoDem(sc.track, mapTilerKey, 0.035); elev = demsRef.current[si] = dem ? dem.elev : null; }
+        let elev = sr.cache ? demsRef.current[sr.key] : undefined;
+        if (elev === undefined) { const dem = await loadVideoDem(sr.track, mapTilerKey, 0.035); elev = dem ? dem.elev : null; if (sr.cache) demsRef.current[sr.key] = elev; }
         if (poiRun.current !== id) return;
-        const pois = findScenicPois(sc.dec, elev, prm, 5);
-        for (let m = 0; m < pois.length; m++) {
-          const poi = pois[m];
-          setPoiBusy("Name wird gesucht (" + (k + 1) + "/" + fl.length + ") …"); const name = await lookupPoiName(poi, mapTilerKey); if (poiRun.current !== id) return;
-          // Empfehlung: der beste Fund je Flug ist aktiviert, die übrigen stehen zur Auswahl im Drehbuch
-          found.push({ id: sc.hi + ":" + m, rec: m === 0, hi: sc.hi, flight: sc.title, kicker: sc.kicker, poi, name });
-        }
+        findScenicPois(sr.dec, elev, prm, 5).forEach((poi, m) => cands.push({ sr, poi, m }));
       } catch (e) { console.warn("Saison-Video: Sehenswürdigkeit nicht ermittelt", e); }
+    }
+    // 2. Beste zuerst; derselbe Berg von mehreren Flügen nur einmal; Liste begrenzen
+    cands.sort((x, y) => y.poi.score - x.poi.score);
+    const list = [];
+    for (const c of cands) {
+      if (list.some(o => Math.hypot((o.poi.lon - c.poi.lon) * 111320 * Math.cos(c.poi.lat * Math.PI / 180), (o.poi.lat - c.poi.lat) * 111320) < 1200)) continue;
+      list.push(c);
+      if (list.length >= SEASON_POI_MAX_LIST) break;
+    }
+    // Empfehlung: die besten, höchstens einer je Flug und zwei je Land, damit nicht alle aus demselben Flug stammen
+    const recFlights = new Set(), recCountries = {};
+    let recN = 0;
+    list.forEach(c => {
+      const co = c.sr.country || "";
+      if (recN >= SEASON_POI_REC || recFlights.has(c.sr.key) || (recCountries[co] || 0) >= 2) return;
+      c.rec = true; recN++; recFlights.add(c.sr.key); recCountries[co] = (recCountries[co] || 0) + 1;
+    });
+    // 3. Namen nur für die Liste suchen
+    const found = [];
+    for (let k = 0; k < list.length; k++) {
+      const c = list[k];
+      setPoiBusy("Name wird gesucht (" + (k + 1) + "/" + list.length + ") …");
+      const name = await lookupPoiName(c.poi, mapTilerKey); if (poiRun.current !== id) return;
+      found.push({ id: c.sr.key + ":" + c.m, rec: !!c.rec, hi: c.sr.hi, extra: !!c.sr.extra, src: c.sr.extra ? c.sr.src : null,
+        flight: c.sr.title + (c.sr.country ? " (" + c.sr.country + ")" : ""), kicker: c.sr.kicker, poi: c.poi, name });
     }
     if (poiRun.current !== id) return;
     setPoiRows(found); setPoiBusy("");
   };
   const startVideo = () => {
     demsRef.current = {}; setSceneOpts({}); setPoiRows([]); setStage("poi");
-    if (scriptAll.some(x => x.kind === "flight" && !x.excerpt)) searchPois(); else setPoiBusy("");
+    if (scriptAll.some(x => x.kind === "flight" && !x.excerpt) || (SEASON_POI_ALL_FLIGHTS && stats.trackFlights && stats.trackFlights.length)) searchPois(); else setPoiBusy("");
   };
 
   const onCloseRef = useRef(onClose); onCloseRef.current = onClose;
@@ -4489,7 +4527,7 @@ function SeasonVideoDialog({ flights, mapTilerKey, onClose }) {
             </div>
             <div style={lbl}>Drehbuch</div>
             <div style={{fontSize:12,color:"rgba(232,244,253,0.55)",lineHeight:1.5}}>
-              Szenen mit Haken kommen ins Video. Die Gesamtlänge bleibt (Länge bzw. Musik); abgewählte Szenen und feste Dauern verschieben die Zeit der übrigen Szenen. Die Zahlen in Intro und Abspann zählen auch bei abgewählten Länder-Szenen alle Flüge. Alle gefundenen Sehenswürdigkeiten sind aufgelistet, vorgewählt ist nur die empfohlene (beste je Flug). Dauer leer lassen = automatisch. Zoom: Stufen näher (− = weiter weg).
+              Szenen mit Haken kommen ins Video. Die Gesamtlänge bleibt (Länge bzw. Musik); abgewählte Szenen und feste Dauern verschieben die Zeit der übrigen Szenen. Die Zahlen in Intro und Abspann zählen auch bei abgewählten Länder-Szenen alle Flüge. Gesucht wird bei den Highlight-Flügen und den längsten/höchsten übrigen Flügen des Zeitraums (bis 30). Die besten Funde (max. 15) sind aufgelistet, vorgewählt sind nur die empfohlenen (höchstens einer je Flug, zwei je Land). Dauer leer lassen = automatisch. Zoom: Stufen näher (− = weiter weg).
             </div>
             <details>
               <summary style={{fontSize:13,cursor:"pointer",color:"#7dd3fc"}}>🔍 Suche nach Sehenswürdigkeiten (Parameter)</summary>
