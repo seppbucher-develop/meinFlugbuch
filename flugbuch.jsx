@@ -3368,6 +3368,8 @@ function buildSeasonStats(flights, fromTs, toTs, reise) {
     const inHome = (r) => r.pt && center ? kmBetween(center, r.pt) <= 300 : r.country.toLowerCase() === homeKey[0];
     homeRows = rows.filter(inHome); rest = rows.filter(r => !inHome(r) && r.country);
   }
+  // Region je Flug ("home" oder Land): das Drehbuch spielt Highlights/Thermik direkt nach der passenden Region
+  homeRows.forEach(r => { r.reg = "home"; }); rest.forEach(r => { r.reg = r.country.toLowerCase(); });
   const groupOf = (rs) => {
     const m = new Map();
     for (const r of rs) { if (!r.country) continue; const k = r.country.toLowerCase(); const g = m.get(k) || { name: r.country, n: 0 }; g.n++; m.set(k, g); }
@@ -3575,10 +3577,10 @@ function buildSeasonScript(st, D, beats, trip, pois, opts) {
     if (k === "c") nc++; else if (k === "h") nh++; else nt++;
   }
   const sc = [{ kind: "intro", key: "intro", map: "globe", w: 1 }];
-  sc.push({ kind: "region", key: "region:home", map: "terrain", w: 1, home: true,
+  sc.push({ kind: "region", key: "region:home", reg: "home", map: "terrain", w: 1, home: true,
     kicker: st.home ? [trip ? "DEINE FLÜGE" : "DEINE HEIMATREGION", ...st.home.countries].join(" · ").toUpperCase() : "DEINE FLÜGE", n: st.home ? st.home.n : st.count,
     sec: st.home ? st.home.sec : st.sec, sites: st.home ? st.home.sites : st.topSites, pins: st.home ? st.home.pins : st.pins, plays: st.home ? st.home.plays : st.plays });
-  cs.slice(0, nc).forEach(c => sc.push({ kind: "region", key: "region:" + c.name, map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
+  cs.slice(0, nc).forEach(c => sc.push({ kind: "region", key: "region:" + c.name, reg: c.name.toLowerCase(), map: "terrain", w: 1, name: c.name, kicker: "UNTERWEGS · " + c.name.toUpperCase(),
     n: c.n, sec: c.sec, sites: c.sites, pins: c.pins, plays: c.plays }));
   const addPoi = (q, h) => {
     const T = h.track, mLon = 111320 * Math.cos(q.poi.lat * Math.PI / 180), sm = String(h.r.f.startTime || "").match(/(\d{1,2}):(\d{2})/);
@@ -3588,7 +3590,7 @@ function buildSeasonScript(st, D, beats, trip, pois, opts) {
     while (i0 > 0 && T[ci].timeSec - T[i0 - 1].timeSec <= 150) i0--;
     while (i1 < T.length - 1 && T[i1 + 1].timeSec - T[ci].timeSec <= 150) i1++;
     const seg = T.slice(i0, i1 + 1), stp = Math.max(1, Math.ceil(seg.length / 600)), sdec = seg.filter((_, i) => i % stp === 0 || i === seg.length - 1);
-    sc.push({ kind: "flight", key: "poi:" + q.id, pid: q.id, defOff: !q.rec, map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: 0.8, hi: q.hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
+    sc.push({ kind: "flight", key: "poi:" + q.id, reg: h.r.reg, pid: q.id, defOff: !q.rec, map: "terrain", w: 1.2, excerpt: true, poi: q.poi, zoomAdd: 0.8, hi: q.hi, kicker: "SEHENSWÜRDIGKEIT", title: q.name || "Sehenswürdigkeit",
       sub: [h.r.site, seasonInt(q.poi.elev) + " m ü. M."].filter(Boolean).join(" · "), track: seg, dec: sdec,
       clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (seg[0].timeSec - T[0].timeSec) : null });
   };
@@ -3597,7 +3599,7 @@ function buildSeasonScript(st, D, beats, trip, pois, opts) {
     const dec = tr.filter((_, i) => i % step === 0 || i === tr.length - 1);
     const km = h.r.dist, parts = [h.r.country, seasonDay(h.r.ts), ex ? seasonInt(ex.alt) + " m ü. M." : km >= 5 ? Math.round(km) + " km" : (h.r.sec / 3600).toFixed(1) + " h"].filter(Boolean);
     const sm = String(f.startTime || "").match(/(\d{1,2}):(\d{2})/);
-    sc.push({ kind: "flight", key: (ex ? "peak:" : "flight:") + hi, map: "terrain", w: ex ? 1.1 : 1.5, excerpt: !!ex, kicker: h.tags.join(" · "), title: h.r.site || "Flug", sub: parts.join(" · "),
+    sc.push({ kind: "flight", key: (ex ? "peak:" : "flight:") + hi, reg: h.r.reg, map: "terrain", w: ex ? 1.1 : 1.5, excerpt: !!ex, kicker: h.tags.join(" · "), title: h.r.site || "Flug", sub: parts.join(" · "),
       track: tr, dec, hi, clock0: sm ? +sm[1] * 3600 + +sm[2] * 60 + (tr[0].timeSec - h.track[0].timeSec) : null });
     // Bestätigte Sehenswürdigkeit dieses Flugs: eigene Szene mit dem Flugabschnitt daneben (wie "Höchster Punkt")
     (pois || []).filter(q => q.hi === hi && !ex).forEach(q => addPoi(q, h));
@@ -3606,9 +3608,17 @@ function buildSeasonScript(st, D, beats, trip, pois, opts) {
   (pois || []).filter(q => q.extra).sort((x, y) => x.src.r.ts - y.src.r.ts).forEach(q => addPoi(q, q.src));
   st.thermals.slice(0, nt).forEach(T => {
     const a = Math.max(0, T.i0 - 20), z = Math.min(T.track.length, T.i1 + 21), slice = T.track.slice(a, z);
-    sc.push({ kind: "thermal", key: "thermal:" + T.type, map: "terrain", w: 1.5, type: T.type, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
+    sc.push({ kind: "thermal", key: "thermal:" + T.type, reg: T.r.reg, map: "terrain", w: 1.5, type: T.type, gain: T.gain, secs: T.secs, avg: T.avg, slice, from: T.i0 - a, to: T.i1 - a,
       place: [T.r.site, seasonDay(T.r.ts)].filter(Boolean).join(" · ") });
   });
+  // Reihenfolge: je Region zuerst die Regions-Szene, dann ihre Highlight-Flüge/Sehenswürdigkeiten, dann ihre Thermik
+  // (weniger Sprünge auf der Karte); Szenen ohne gezeigte Region folgen am Schluss
+  {
+    const regs = ["home", ...cs.slice(0, nc).map(c => c.name.toLowerCase())], pri = { region: 0, flight: 1, thermal: 2 };
+    const ri = (x) => { const i = regs.indexOf(x.reg || "home"); return i < 0 ? 999 : i; };
+    const mid = sc.slice(1).sort((a, b) => ri(a) - ri(b) || pri[a.kind] - pri[b.kind]);
+    sc.length = 1; sc.push(...mid);
+  }
   sc.push({ kind: "outro", key: "outro", map: "globe", w: 1.2 });
   // Auswahl aus dem Drehbuch-Dialog: Szenen abwählen (off), feste Dauer (fixed, s) und Zoom (zoomAdd)
   const num = (v) => { const x = parseFloat(String(v).replace(",", ".")); return isFinite(x) ? x : null; };
@@ -3988,9 +3998,9 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
         ctx.restore();
       };
       const dot = (x, y, r, k) => {
-        ctx.save(); ctx.globalAlpha = curOutA; ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 16 * s; ctx.fillStyle = SEASON_ACCENT;
+        ctx.save(); ctx.globalAlpha = curOutA * 0.55; ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 6 * s; ctx.fillStyle = SEASON_ACCENT;
         ctx.beginPath(); ctx.arc(x, y, r * k, 0, Math.PI * 2); ctx.fill();
-        ctx.shadowBlur = 0; ctx.strokeStyle = "rgba(255,255,255,0.9)"; ctx.lineWidth = 2.2 * s; ctx.stroke(); ctx.restore();
+        ctx.shadowBlur = 0; ctx.strokeStyle = "rgba(255,255,255,0.6)"; ctx.lineWidth = 1.4 * s; ctx.stroke(); ctx.restore();
       };
       const pinsOn = (pins, tl, kind) => {
         const n = pins.length;
@@ -3999,27 +4009,27 @@ function SeasonVideoStudio({ script, stats, meta, mapTilerKey, format, purpose, 
           if (k <= 0 || !front(p.lon, p.lat)) return;
           const q = main.project([p.lon, p.lat]);
           if (q.x < -40 || q.x > W + 40 || q.y < -60 || q.y > H + 40) return;
-          if (kind === "pin") pin(q.x, q.y, k * (0.9 + Math.min(0.5, p.n / 40))); else dot(q.x, q.y, 8 * s * (0.9 + Math.min(0.6, p.n / 30)), k);
+          if (kind === "pin") pin(q.x, q.y, k * (0.9 + Math.min(0.5, p.n / 40))); else dot(q.x, q.y, 5 * s * (0.9 + Math.min(0.5, p.n / 40)), k);
         });
       };
       // Regions-Szenen: jeder Flug spielt kurz seinen Track ab (Start- und Landeort), der Zähler zählt die gestarteten
       // Flüge. Bringt vor allem etwas, wenn es wenige Flüge von einem Ort gibt (Pins allein wären nur Punkte).
       const drawPlays = (plays, tl, cdur) => {
         const N = plays.length; if (!N) return;
-        const L = clamp(cdur / N * 3, 0.5, 1.1), started = clamp(Math.floor((tl - 0.3) / cdur * N) + 1, 0, N);
+        const L = clamp(cdur / N * 3, 0.7, 1.4), started = clamp(Math.floor((tl - 0.3) / cdur * N) + 1, 0, N);
         ctx.save(); ctx.globalAlpha = curOutA; ctx.lineJoin = "round"; ctx.lineCap = "round";
         for (let i = started - 1; i >= 0; i--) {
           const age = tl - (0.3 + i / N * cdur);
-          if (age > L + 0.5) break;
+          if (age > L + 0.9) break;
           const pl = plays[i]; if (!pl.path || age < 0) continue;
-          const m = ease(clamp(age / L, 0, 1)) * (pl.path.length - 1), full = Math.floor(m), fr = m - full, a = age > L ? 1 - (age - L) / 0.5 : 1;
+          const m = ease(clamp(age / L, 0, 1)) * (pl.path.length - 1), full = Math.floor(m), fr = m - full, a = age > L ? 1 - (age - L) / 0.9 : 1;
           const pts = [];
           for (let q = 0; q <= full; q++) pts.push(main.project(pl.path[q]));
           if (full < pl.path.length - 1) { const A = pl.path[full], B = pl.path[full + 1]; pts.push(main.project([A[0] + (B[0] - A[0]) * fr, A[1] + (B[1] - A[1]) * fr])); }
           ctx.globalAlpha = curOutA * a;
           ctx.beginPath(); pts.forEach((q, k) => k ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y));
-          ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 8 * s; ctx.strokeStyle = "#e4f9b5"; ctx.lineWidth = 2.8 * s; ctx.stroke();
-          const h = pts[pts.length - 1]; ctx.shadowBlur = 0; ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(h.x, h.y, 4 * s, 0, Math.PI * 2); ctx.fill();
+          ctx.shadowColor = SEASON_ACCENT; ctx.shadowBlur = 14 * s; ctx.strokeStyle = "#f2ffd0"; ctx.lineWidth = 4.6 * s; ctx.stroke();
+          const h = pts[pts.length - 1]; ctx.shadowBlur = 0; ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(h.x, h.y, 5.5 * s, 0, Math.PI * 2); ctx.fill();
         }
         ctx.restore();
       };
