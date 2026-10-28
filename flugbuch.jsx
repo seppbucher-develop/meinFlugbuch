@@ -2015,6 +2015,18 @@ function buildVideoScript(track, highlights, D, flight, opts) {
     sh.fixed = !sh.off && d != null && d > 0 && sh.key !== "start" && sh.key !== "land" && sh.key !== "outro" ? Math.max(1.5, d) : null;
   });
   const shots = all.filter(sh => !sh.off);
+  // Feste Dauer = mehr/weniger Strecke bei gleicher Abspielgeschwindigkeit (nicht schneller/langsamer):
+  // Geschwindigkeit der Szene ohne feste Dauer bestimmen, den Flugzeitbereich um die Mitte anpassen
+  const nomSum = shots.reduce((a, sh) => a + sh.d, 0) || 1;
+  shots.forEach(sh => {
+    if (!sh.fixed) return;
+    const nomD = sh.d * D / nomSum, spd = (sh.f1 - sh.f0) / Math.max(1e-6, nomD);
+    const len = Math.min(total, sh.fixed * spd), mid = (sh.f0 + sh.f1) / 2;
+    let a = mid - len / 2, b = mid + len / 2;
+    if (a < t0) { b += t0 - a; a = t0; }
+    if (b > t1) { a -= b - t1; b = t1; }
+    sh.f0 = Math.max(t0, a); sh.f1 = Math.min(t1, b);
+  });
   // feste Dauern zuerst (höchstens 80 % von D), der Rest wird auf die übrige Zeit gestreckt
   const fsum = shots.reduce((a, sh) => a + (sh.fixed || 0), 0), fk = fsum > D * 0.8 ? D * 0.8 / fsum : 1;
   const flexSum = shots.reduce((a, sh) => a + (sh.fixed ? 0 : sh.d), 0) || 1, target = Math.max(D - fsum * fk, D * 0.2);
