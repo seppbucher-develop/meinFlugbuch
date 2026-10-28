@@ -2018,14 +2018,19 @@ function buildVideoScript(track, highlights, D, flight, opts) {
   // Feste Dauer = mehr/weniger Strecke bei gleicher Abspielgeschwindigkeit (nicht schneller/langsamer):
   // Geschwindigkeit der Szene ohne feste Dauer bestimmen, den Flugzeitbereich um die Mitte anpassen
   const nomSum = shots.reduce((a, sh) => a + sh.d, 0) || 1;
-  shots.forEach(sh => {
+  // Grenzen: Ende der vorigen bzw. Anfang der nächsten Szene (keine Überschneidung mit Nachbarn);
+  // der Rest wird auf die freie Seite verschoben, ist dort auch nichts frei, läuft die Szene etwas schneller
+  shots.forEach((sh, k) => {
     if (!sh.fixed) return;
     const nomD = sh.d * D / nomSum, spd = (sh.f1 - sh.f0) / Math.max(1e-6, nomD);
-    const len = Math.min(total, sh.fixed * spd), mid = (sh.f0 + sh.f1) / 2;
+    const len = sh.fixed * spd, mid = (sh.f0 + sh.f1) / 2;
+    const prev = k > 0 ? shots[k-1] : null, next = k < shots.length - 1 ? shots[k+1] : null;
+    const lo = Math.min(sh.f0, Math.max(t0, prev ? prev.f1 : t0));
+    const hi = Math.max(sh.f1, Math.min(t1, next && next.kind !== "outro" ? next.f0 : t1));
     let a = mid - len / 2, b = mid + len / 2;
-    if (a < t0) { b += t0 - a; a = t0; }
-    if (b > t1) { a -= b - t1; b = t1; }
-    sh.f0 = Math.max(t0, a); sh.f1 = Math.min(t1, b);
+    if (a < lo) { b += lo - a; a = lo; }
+    if (b > hi) { a -= b - hi; b = hi; }
+    sh.f0 = Math.max(lo, a); sh.f1 = Math.min(hi, b);
   });
   // feste Dauern zuerst (höchstens 80 % von D), der Rest wird auf die übrige Zeit gestreckt
   const fsum = shots.reduce((a, sh) => a + (sh.fixed || 0), 0), fk = fsum > D * 0.8 ? D * 0.8 / fsum : 1;
