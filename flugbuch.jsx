@@ -1350,8 +1350,11 @@ function removeStrayMapTilerWarnings() {
 }
 
 
-function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
+function WorldMapView({ flights, selectedIds, onBack, mapTilerKey, allFlights, setFlights, saveFlight }) {
   const mapDivRef = useRef(null);
+  // "Orte zuordnen": Flüge mit Platznamen aber ohne Koordinaten (siehe PlaceAssignDialog)
+  const [showAssign, setShowAssign] = useState(false);
+  const missingPlaces = useMemo(() => allFlights ? paCollectGroups(allFlights) : [], [allFlights]);
   const mapRef = useRef(null);
   const [showSP, setShowSP] = useState(true);
   const [showLP, setShowLP] = useState(true);
@@ -1463,7 +1466,14 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
           style={{background:showLP?"rgba(248,113,113,0.18)":"rgba(255,255,255,0.05)",border:`1px solid ${showLP?"rgba(248,113,113,0.4)":"rgba(255,255,255,0.1)"}`,borderRadius:20,padding:"7px 14px",color:showLP?"#f87171":"rgba(232,244,253,0.5)",fontSize:13,fontWeight:700,cursor:"pointer"}}>
           🛬 Landeplätze
         </button>
+        {allFlights && (
+          <button onClick={()=>setShowAssign(true)} title="Start-/Landeplätze ohne Koordinaten zuordnen"
+            style={{background:missingPlaces.length?"rgba(251,191,36,0.15)":"rgba(255,255,255,0.05)",border:`1px solid ${missingPlaces.length?"rgba(251,191,36,0.45)":"rgba(255,255,255,0.1)"}`,borderRadius:20,padding:"7px 14px",color:missingPlaces.length?"#fbbf24":"rgba(232,244,253,0.5)",fontSize:13,fontWeight:700,cursor:"pointer",whiteSpace:"nowrap"}}>
+            📌 Orte zuordnen{missingPlaces.length?` (${missingPlaces.length})`:""}
+          </button>
+        )}
       </div>
+      {showAssign && <PlaceAssignDialog flights={allFlights} setFlights={setFlights} saveFlight={saveFlight} mapTilerKey={mapTilerKey} onClose={()=>setShowAssign(false)} />}
       <div style={{padding:"0 16px 12px"}}>
         <SearchBar filterText={search} setFilterText={setSearch} knownGliders={[...new Set(flights.map(f=>f.glider).filter(Boolean))].sort()} />
       </div>
@@ -1487,6 +1497,505 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey }) {
   );
 }
 
+
+// ── ORTE ZUORDNEN (Koordinaten für Flüge ohne Start-/Landekoordinaten) ─────
+// Flüge ohne IGC-Track (aus Excel/CSV importiert oder von Hand erfasst)
+// haben zwar einen Startplatz-/Landeplatz-NAMEN, aber keine Koordinaten und
+// erscheinen daher nicht auf der Weltkarte. Dieser Dialog gruppiert sie nach
+// Platzname (Gross-/Kleinschreibung und Akzente egal), schlägt je Name
+// Koordinaten aus mehreren Quellen vor (eigene Flüge mit gleichem/ähnlichem
+// Namen, MapTiler-Geocoding, OpenStreetMap/Nominatim, ParaglidingEarth) und
+// lässt sie in der Liste prüfen, anpassen (Koordinaten tippen, Pin ziehen
+// oder in die Karte klicken) und bestätigen. Eine Bestätigung gilt für ALLE
+// Flüge mit demselben Platznamen. Gespeichert wird erst beim Bestätigen
+// (und lässt sich dort wieder rückgängig machen).
+const PA_hasPt = p => !!p && typeof p.lat === "number" && typeof p.lon === "number" && isFinite(p.lat) && isFinite(p.lon);
+function paNorm(s) {
+  return String(s || "").toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/ß/g, "ss").replace(/[^a-z0-9]+/g, " ").trim();
+}
+function paCleanQuery(s) {
+  return String(s || "").replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+}
+// Gruppiert alle Flüge, bei denen ein Platzname, aber keine Koordinate vorliegt.
+function paCollectGroups(flights) {
+  const m = new Map();
+  for (const f of flights) {
+    for (const kind of ["start", "end"]) {
+      const name = String((kind === "start" ? f.site : f.customFields?.landung) || "").trim();
+      const norm = paNorm(name);
+      if (!norm) continue;
+      if (PA_hasPt(kind === "start" ? f.startPt : f.endPt)) continue;
+      const key = kind + ":" + norm;
+      let g = m.get(key);
+      if (!g) { g = { key, kind, norm, name, flights: [], variants: new Map() }; m.set(key, g); }
+      g.flights.push(f);
+      g.variants.set(name, (g.variants.get(name) || 0) + 1);
+    }
+  }
+  return [...m.values()].map(g => {
+    let best = g.name, bc = 0;
+    for (const [v, c] of g.variants) if (c > bc) { best = v; bc = c; }
+    return { ...g, name: best };
+  }).sort((a, b) => b.flights.length - a.flights.length || a.name.localeCompare(b.name, "de"));
+}
+// Alle bereits bekannten Plätze (Name + Koordinate), zusammengefasst auf ~110 m.
+function paBuildKnown(flights) {
+  const m = new Map();
+  for (const f of flights) {
+    for (const kind of ["start", "end"]) {
+      const pt = kind === "start" ? f.startPt : f.endPt;
+      if (!PA_hasPt(pt)) continue;
+      const name = String((kind === "start" ? f.site : f.customFields?.landung) || "").trim();
+      const alt = kind === "start" ? f.startAlt : f.endAlt;
+      const key = kind + ":" + paNorm(name) + ":" + pt.lat.toFixed(3) + "," + pt.lon.toFixed(3);
+      let e = m.get(key);
+      if (!e) { e = { kind, name, norm: paNorm(name), lat: 0, lon: 0, n: 0, alt: 0 }; m.set(key, e); }
+      e.lat += pt.lat; e.lon += pt.lon; e.n++;
+      if (alt > 0) e.alt = alt;
+    }
+  }
+  return [...m.values()].map(e => ({ ...e, lat: e.lat / e.n, lon: e.lon / e.n }));
+}
+// Vorschläge aus den eigenen Flügen: gleicher Name (exakt) bzw. ähnlicher Name
+// (einer enthält den anderen). Standorte näher als 300 m werden vereint.
+function paOwnCandidates(group, known) {
+  const out = [];
+  const add = (k, exact) => {
+    const near = out.find(c => c.exact === exact && haversineDistKm(c, k) < 0.3);
+    if (near) {
+      const t = near.n + k.n;
+      near.lat = (near.lat * near.n + k.lat * k.n) / t; near.lon = (near.lon * near.n + k.lon * k.n) / t;
+      near.n = t; if (k.alt > 0) near.alt = k.alt;
+      return;
+    }
+    out.push({ id: "own:" + (exact ? "x" : "f") + ":" + out.length, source: "own", exact, lat: k.lat, lon: k.lon, alt: k.alt || 0, n: k.n, srcName: k.name });
+  };
+  for (const k of known) {
+    if (!k.norm) continue;
+    if (k.norm === group.norm) add(k, true);
+    else if (group.norm.length >= 4 && k.norm.length >= 4 && (k.norm.includes(group.norm) || group.norm.includes(k.norm))) add(k, false);
+  }
+  return out.map(c => ({
+    ...c,
+    label: c.exact ? "Eigene Flüge: gleicher Name" : "Eigene Flüge: ähnlicher Name «" + c.srcName + "»",
+    detail: c.n + " Flug-Eintrag" + (c.n === 1 ? "" : "e") + " mit Koordinaten",
+  }));
+}
+async function paFetchJson(url, ms = 12000) {
+  const ac = new AbortController(); const to = setTimeout(() => ac.abort(), ms);
+  try { const r = await fetch(url, { signal: ac.signal }); return r.ok ? await r.json() : null; }
+  catch { return null; } finally { clearTimeout(to); }
+}
+// "Umfeld" eines Platzes: Mittelpunkt der Flüge MIT Koordinaten, die zeitlich
+// nahe liegen (±5 Tage), sonst derselben Reise bzw. demselben Land angehören.
+// Dient nur als Ortshinweis (Bevorzugung/Entfernungsangabe), nicht als Vorschlag.
+function paAnchor(group, flights) {
+  const withPt = flights.filter(f => PA_hasPt(f.startPt));
+  if (!withPt.length) return null;
+  const mid = arr => { const s = [...arr].sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; };
+  const center = list => list.length ? { lat: mid(list.map(f => f.startPt.lat)), lon: mid(list.map(f => f.startPt.lon)) } : null;
+  const ts = group.flights.map(f => parseDateToTs(f.date || f.rawDate)).filter(t => isFinite(t) && t > 0);
+  if (ts.length) {
+    const DAY = 86400000;
+    const near = withPt.filter(f => { const t = parseDateToTs(f.date || f.rawDate); return ts.some(x => Math.abs(x - t) <= 5 * DAY); });
+    if (near.length) return center(near);
+  }
+  const reisen = new Set(group.flights.map(f => f.customFields?.reise).filter(Boolean));
+  if (reisen.size) { const l = withPt.filter(f => reisen.has(f.customFields?.reise)); if (l.length) return center(l); }
+  const laender = new Set(group.flights.map(f => f.customFields?.land).filter(Boolean));
+  if (laender.size) { const l = withPt.filter(f => laender.has(f.customFields?.land)); if (l.length) return center(l); }
+  return null;
+}
+// Online-Suche: MapTiler-Geocoding + Nominatim (OSM) + ParaglidingEarth.
+// Jede Quelle darf einzeln ausfallen (fehlender Schlüssel, offline, CORS …).
+async function paSearchOnline(group, anchor, apiKey) {
+  const base = paCleanQuery(group.name) || group.name;
+  const land = group.flights.map(f => f.customFields?.land).find(Boolean) || "";
+  const queries = [base];
+  if (land) queries.push(base + ", " + land);
+  const seg = base.split(/\s+[-–\/]\s+/)[0];
+  if (seg && seg !== base) queries.push(seg);
+  const out = [];
+  const push = (c) => { if (isFinite(c.lat) && isFinite(c.lon)) out.push(c); };
+
+  if (apiKey) {
+    for (const q of queries) {
+      const data = await paFetchJson(`https://api.maptiler.com/geocoding/${encodeURIComponent(q)}.json?key=${apiKey}&language=de&limit=5${anchor ? `&proximity=${anchor.lon},${anchor.lat}` : ""}`);
+      const feats = data?.features || [];
+      feats.forEach((ft, i) => { const c = ft.center || ft.geometry?.coordinates; if (c) push({ source: "maptiler", lat: c[1], lon: c[0], alt: 0, label: "MapTiler: " + (ft.place_name_de || ft.place_name || ft.text || q), q }); });
+      if (feats.length) break;
+    }
+  }
+  for (const q of queries) {
+    const vb = anchor ? `&viewbox=${anchor.lon - 1.5},${anchor.lat + 1.5},${anchor.lon + 1.5},${anchor.lat - 1.5}` : "";
+    const data = await paFetchJson(`https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&accept-language=de&q=${encodeURIComponent(q)}${vb}`);
+    const arr = Array.isArray(data) ? data : [];
+    arr.forEach(r => push({ source: "osm", lat: parseFloat(r.lat), lon: parseFloat(r.lon), alt: 0, label: "OpenStreetMap: " + (r.display_name || r.name || q), q }));
+    if (arr.length) break;
+    await new Promise(r => setTimeout(r, 1100)); // Nominatim-Nutzungsregel: max. 1 Anfrage/Sekunde
+  }
+  if (anchor && group.kind === "start") {
+    const data = await paFetchJson(`https://www.paraglidingearth.com/api/geojson/getAroundLatLngSites.php?lat=${anchor.lat}&lng=${anchor.lon}&distance=150&limit=300&style=detailed`, 15000);
+    const tokens = paNorm(base).split(" ").filter(t => t.length >= 4);
+    (data?.features || []).forEach(ft => {
+      const nm = paNorm(ft.properties?.name); const c = ft.geometry?.coordinates;
+      if (!nm || !c) return;
+      if (nm === paNorm(base) || nm.includes(paNorm(seg || base)) || paNorm(base).includes(nm) || tokens.some(t => nm.includes(t))) {
+        push({ source: "pge", lat: c[1], lon: c[0], alt: parseFloat(ft.properties?.takeoff_altitude) || 0, label: "ParaglidingEarth: " + ft.properties.name });
+      }
+    });
+  }
+  // Doppelte (< 150 m) zusammenfassen, nach Entfernung zum Umfeld sortieren, max. 8
+  const merged = [];
+  for (const c of out) {
+    const dup = merged.find(m => haversineDistKm(m, c) < 0.15);
+    if (dup) { if (c.alt > 0 && !(dup.alt > 0)) dup.alt = c.alt; if (!dup.label.includes(c.label.split(":")[0])) dup.label += " · " + c.label.split(":")[0]; continue; }
+    merged.push({ ...c });
+  }
+  merged.forEach((c, i) => {
+    const d = anchor ? haversineDistKm(anchor, c) : null;
+    c.dist = d; c.detail = d != null ? `${d < 10 ? d.toFixed(1) : Math.round(d)} km vom Umfeld ähnlicher Flüge` : "";
+  });
+  merged.sort((a, b) => anchor ? (a.dist ?? 1e9) - (b.dist ?? 1e9) : 0);
+  return merged.slice(0, 8).map((c, i) => ({ ...c, id: "ext:" + i + ":" + c.source }));
+}
+
+function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, onClose }) {
+  const isWide = useIsWide();
+  const flightsRef = useRef(flights); flightsRef.current = flights;
+  const groups = useMemo(() => paCollectGroups(flights), [flights]);
+  const known = useMemo(() => paBuildKnown(flights), [flights]);
+  const [ext, setExt] = useState({});          // key -> { busy, cands }
+  const [choice, setChoice] = useState({});    // key -> { id, lat, lon, alt }
+  const [selKey, setSelKey] = useState(null);
+  const [skipped, setSkipped] = useState(() => new Set());
+  const [done, setDone] = useState([]);        // bestätigte Zuordnungen (für Rückgängig)
+  const [kindFilter, setKindFilter] = useState("all");
+  const [showSkipped, setShowSkipped] = useState(false);
+  const [busyMsg, setBusyMsg] = useState("");
+  const [mapReady, setMapReady] = useState(false);
+  const cancelRef = useRef(false);
+  useEffect(() => () => { cancelRef.current = true; }, []);
+
+  const candsFor = (g) => {
+    const own = paOwnCandidates(g, known);
+    const exact = own.filter(c => c.exact), fuzzy = own.filter(c => !c.exact);
+    return [...exact, ...(ext[g.key]?.cands || []), ...fuzzy];
+  };
+  // Aktuelle Position einer Zeile: manuelle Wahl, sonst bester Vorschlag
+  const posFor = (g) => {
+    const ch = choice[g.key];
+    if (ch) return ch;
+    const c = candsFor(g)[0];
+    return c ? { id: c.id, lat: c.lat, lon: c.lon, alt: c.alt || 0 } : null;
+  };
+
+  // Live-Zugriff für die Karten-Callbacks (werden nur einmal registriert)
+  const live = useRef({});
+  live.current.setPos = (lat, lon, id) => {
+    if (!live.current.selKey) return;
+    const k = live.current.selKey;
+    setChoice(c => ({ ...c, [k]: { id: id || "manual", lat, lon, alt: id && id !== "manual" ? (live.current.altOf?.(id) || 0) : 0 } }));
+  };
+  live.current.selKey = selKey;
+
+  const visible = groups.filter(g => (kindFilter === "all" || g.kind === kindFilter) && (showSkipped || !skipped.has(g.key)));
+  const selGroup = groups.find(g => g.key === selKey) || null;
+  const selCands = selGroup ? candsFor(selGroup) : [];
+  const selPos = selGroup ? posFor(selGroup) : null;
+  live.current.altOf = (id) => selCands.find(c => c.id === id)?.alt || 0;
+
+  const searchOne = async (g) => {
+    setExt(e => ({ ...e, [g.key]: { ...(e[g.key] || {}), busy: true } }));
+    const anchor = paAnchor(g, flightsRef.current);
+    const cands = await paSearchOnline(g, anchor, mapTilerKey);
+    setExt(e => ({ ...e, [g.key]: { busy: false, done: true, cands, anchor } }));
+  };
+  const searchAll = async () => {
+    const todo = visible.filter(g => !ext[g.key]?.done);
+    cancelRef.current = false;
+    for (let i = 0; i < todo.length; i++) {
+      if (cancelRef.current) break;
+      setBusyMsg(`Online-Suche ${i + 1}/${todo.length}: ${todo[i].name}`);
+      await searchOne(todo[i]);
+      await new Promise(r => setTimeout(r, 1100));
+    }
+    setBusyMsg("");
+  };
+
+  // Eine Zuordnung speichern → gilt für ALLE Flüge dieses Platznamens
+  const confirmGroup = async (g, pos) => {
+    if (!pos || !PA_hasPt(pos)) return false;
+    const ids = new Set(g.flights.map(f => f.id));
+    const pt = { lat: pos.lat, lon: pos.lon, gpsAlt: pos.alt || 0 };
+    const targets = flightsRef.current.filter(f => ids.has(f.id));
+    const updated = new Map(), prevAlt = {};
+    for (const f of targets) {
+      const upd = g.kind === "start"
+        ? { ...f, startPt: pt, ...(pos.alt > 0 && !(f.startAlt > 0) ? { startAlt: pos.alt } : {}) }
+        : { ...f, endPt: pt, ...(pos.alt > 0 && !(f.endAlt > 0) ? { endAlt: pos.alt } : {}) };
+      const r = await saveFlight(upd);
+      if (!r.ok) { alert("Speichern fehlgeschlagen für Flug " + (f.name || f.id) + " — Vorgang abgebrochen."); break; }
+      updated.set(f.id, upd); prevAlt[f.id] = g.kind === "start" ? f.startAlt : f.endAlt;
+    }
+    if (updated.size) {
+      setFlights(prev => prev.map(f => updated.get(f.id) || f));
+      setDone(d => [{ key: g.key, kind: g.kind, name: g.name, pos: pt, prevAlt, ids: [...updated.keys()] }, ...d]);
+    }
+    return updated.size === targets.length;
+  };
+  const confirmOne = async (g) => {
+    setBusyMsg("Speichere «" + g.name + "» …");
+    const ok = await confirmGroup(g, posFor(g));
+    setBusyMsg("");
+    if (ok && selKey === g.key) setSelKey(null);
+  };
+  const confirmSure = async () => {
+    // alle Zeilen, deren Name exakt in eigenen Flügen mit Koordinaten vorkommt (eindeutig)
+    const sure = groups.filter(g => { const o = paOwnCandidates(g, known).filter(c => c.exact); return o.length === 1 && !choice[g.key]; });
+    if (!sure.length) return;
+    if (!confirm(sure.length + " Plätze mit eindeutigem Treffer aus den eigenen Flügen übernehmen?")) return;
+    for (let i = 0; i < sure.length; i++) {
+      const o = paOwnCandidates(sure[i], known).filter(c => c.exact)[0];
+      setBusyMsg(`Speichere ${i + 1}/${sure.length}: ${sure[i].name}`);
+      await confirmGroup(sure[i], { lat: o.lat, lon: o.lon, alt: o.alt || 0 });
+    }
+    setBusyMsg("");
+  };
+  const undo = async (d) => {
+    const ids = new Set(d.ids);
+    const targets = flightsRef.current.filter(f => ids.has(f.id));
+    const updated = new Map();
+    for (const f of targets) {
+      const upd = d.kind === "start" ? { ...f, startPt: null, startAlt: d.prevAlt[f.id] ?? 0 } : { ...f, endPt: null, endAlt: d.prevAlt[f.id] ?? 0 };
+      const r = await saveFlight(upd);
+      if (r.ok) updated.set(f.id, upd);
+    }
+    if (updated.size) setFlights(prev => prev.map(f => updated.get(f.id) || f));
+    setDone(list => list.filter(x => x !== d));
+  };
+
+  // ── Karte ──────────────────────────────────────────────────────────────
+  const mapDivRef = useRef(null), mapRef = useRef(null);
+  const knownMk = useRef([]), candMk = useRef([]);
+  useEffect(() => {
+    if (!mapDivRef.current || !window.maptilersdk || !mapTilerKey) return;
+    const sdk = window.maptilersdk;
+    const map = new sdk.Map({ container: mapDivRef.current, apiKey: mapTilerKey, style: sdk.MapStyle.OUTDOOR, language: "de", center: [8.2, 46.8], zoom: 6 });
+    mapRef.current = map;
+    map.on("load", () => { removeStrayMapTilerWarnings(); setMapReady(true); });
+    map.on("click", (e) => {
+      if (e.originalEvent?.target?.closest?.("[data-pm]")) return; // Klick auf einen Marker
+      live.current.setPos(e.lngLat.lat, e.lngLat.lng, "manual");
+    });
+    return () => { try { map.remove(); } catch {} mapRef.current = null; setMapReady(false); };
+  }, [mapTilerKey]);
+
+  // Bekannte Plätze (kleine Punkte: grün = Start, rot = Landung)
+  useEffect(() => {
+    const map = mapRef.current, sdk = window.maptilersdk;
+    if (!map || !mapReady || !sdk) return;
+    knownMk.current.forEach(m => m.remove()); knownMk.current = [];
+    known.forEach(k => {
+      const el = document.createElement("div"); el.setAttribute("data-pm", "1");
+      el.style.cssText = `width:11px;height:11px;border-radius:50%;background:${k.kind === "start" ? "#4ade80" : "#f87171"};border:1.5px solid rgba(255,255,255,0.9);box-shadow:0 1px 3px rgba(0,0,0,0.5);cursor:pointer;`;
+      const mk = new sdk.Marker({ element: el }).setLngLat([k.lon, k.lat])
+        .setPopup(new sdk.Popup({ offset: 10 }).setText((k.kind === "start" ? "🛫 " : "🛬 ") + (k.name || "(ohne Namen)") + (k.alt > 0 ? " · " + k.alt + " m" : "")));
+      mk.addTo(map); knownMk.current.push(mk);
+    });
+  }, [mapReady, known]);
+
+  // Vorschläge der gewählten Zeile (blau, nummeriert) + verschiebbarer Pin
+  const candKey = selKey + "|" + selCands.map(c => c.id + c.lat.toFixed(5) + c.lon.toFixed(5)).join(",");
+  const posKey = selPos ? selPos.lat.toFixed(6) + "," + selPos.lon.toFixed(6) : "";
+  useEffect(() => {
+    const map = mapRef.current, sdk = window.maptilersdk;
+    if (!map || !mapReady || !sdk) return;
+    candMk.current.forEach(m => m.remove()); candMk.current = [];
+    if (!selGroup) return;
+    selCands.forEach((c, i) => {
+      const el = document.createElement("div"); el.setAttribute("data-pm", "1");
+      el.textContent = String(i + 1);
+      el.style.cssText = "width:22px;height:22px;border-radius:50%;background:#38bdf8;color:#04122a;font:700 12px system-ui;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.6);cursor:pointer;";
+      el.addEventListener("click", (ev) => { ev.stopPropagation(); live.current.setPos(c.lat, c.lon, c.id); });
+      const mk = new sdk.Marker({ element: el }).setLngLat([c.lon, c.lat]); mk.addTo(map); candMk.current.push(mk);
+    });
+    if (selPos) {
+      const el = document.createElement("div"); el.setAttribute("data-pm", "1");
+      el.style.cssText = "width:26px;height:26px;border-radius:50%;background:rgba(251,191,36,0.35);border:3px solid #fbbf24;box-shadow:0 0 0 2px rgba(0,0,0,0.5);cursor:grab;";
+      const mk = new sdk.Marker({ element: el, draggable: true }).setLngLat([selPos.lon, selPos.lat]);
+      mk.on("dragend", () => { const p = mk.getLngLat(); live.current.setPos(p.lat, p.lng, "manual"); });
+      mk.addTo(map); candMk.current.push(mk);
+    }
+  }, [mapReady, candKey, posKey]);
+
+  // Beim Wechsel der Zeile bzw. neuen Vorschlägen die Karte darauf ausrichten
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || !selGroup) return;
+    const pts = selCands.map(c => [c.lon, c.lat]);
+    if (selPos) pts.push([selPos.lon, selPos.lat]);
+    if (!pts.length) return;
+    if (pts.length === 1) { map.flyTo({ center: pts[0], zoom: Math.max(map.getZoom(), 12) }); return; }
+    const lons = pts.map(p => p[0]), lats = pts.map(p => p[1]);
+    map.fitBounds([[Math.min(...lons), Math.min(...lats)], [Math.max(...lons), Math.max(...lats)]], { padding: 50, maxZoom: 13 });
+  }, [mapReady, selKey, selCands.map(c => c.id).join(",")]);
+
+  // ── UI ─────────────────────────────────────────────────────────────────
+  const nFlights = groups.reduce((s, g) => s + g.flights.length, 0);
+  const sureCount = groups.filter(g => paOwnCandidates(g, known).filter(c => c.exact).length === 1 && !choice[g.key]).length;
+  const btn = (extra) => ({ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "6px 11px", color: "#e8f4fd", fontSize: 12, fontWeight: 600, cursor: "pointer", ...extra });
+  const chip = (on) => btn({ borderRadius: 20, background: on ? "rgba(125,211,252,0.18)" : "rgba(255,255,255,0.05)", border: `1px solid ${on ? "rgba(125,211,252,0.45)" : "rgba(255,255,255,0.1)"}`, color: on ? "#7dd3fc" : "rgba(232,244,253,0.55)" });
+  const parseLatLon = (txt) => {
+    const m = String(txt).replace(/;/g, ",").match(/(-?\d+(?:[.,]\d+)?)\s*[,\s]\s*(-?\d+(?:[.,]\d+)?)/);
+    if (!m) return null;
+    const lat = parseFloat(m[1].replace(",", ".")), lon = parseFloat(m[2].replace(",", "."));
+    return Math.abs(lat) <= 90 && Math.abs(lon) <= 180 ? { lat, lon } : null;
+  };
+
+  const renderRow = (g) => {
+    const open = selKey === g.key;
+    const cands = candsFor(g), pos = posFor(g), e = ext[g.key];
+    const isSkipped = skipped.has(g.key);
+    const bestLabel = pos ? (cands.find(c => c.id === pos.id)?.label || (pos.id === "manual" ? "Eigene Position" : "")) : "";
+    return (
+      <div key={g.key} style={{ borderRadius: 12, marginBottom: 8, border: `1px solid ${open ? "rgba(125,211,252,0.45)" : "rgba(255,255,255,0.08)"}`, background: open ? "rgba(125,211,252,0.06)" : "rgba(255,255,255,0.03)", opacity: isSkipped ? 0.55 : 1 }}>
+        <div onClick={() => setSelKey(open ? null : g.key)} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", cursor: "pointer" }}>
+          <span style={{ fontSize: 16 }}>{g.kind === "start" ? "🛫" : "🛬"}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{g.name}</div>
+            <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {g.flights.length} Flug{g.flights.length === 1 ? "" : "e"}
+              {g.variants.size > 1 ? ` · ${g.variants.size} Schreibweisen` : ""}
+              {pos ? ` · ${pos.lat.toFixed(4)}, ${pos.lon.toFixed(4)}` : " · kein Vorschlag"}
+              {bestLabel ? ` · ${bestLabel}` : ""}
+            </div>
+          </div>
+          {pos && !open && (
+            <button onClick={ev => { ev.stopPropagation(); confirmOne(g); }} title="Vorschlag bestätigen (gilt für alle Flüge mit diesem Namen)"
+              style={btn({ background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.35)", color: "#4ade80", padding: "5px 10px" })}>✓</button>
+          )}
+          <span style={{ color: "rgba(232,244,253,0.35)", fontSize: 12 }}>{open ? "▲" : "▼"}</span>
+        </div>
+        {open && (
+          <div style={{ padding: "0 12px 12px" }}>
+            {g.variants.size > 1 && (
+              <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginBottom: 8 }}>
+                Schreibweisen: {[...g.variants.entries()].map(([v, c]) => `«${v}» (${c}×)`).join(", ")}
+              </div>
+            )}
+            {cands.length === 0 && !e?.busy && (
+              <div style={{ fontSize: 12, color: "rgba(232,244,253,0.5)", marginBottom: 8 }}>
+                Noch keine Vorschläge. «Online suchen» startet die Suche — oder in die Karte klicken, um die Position selbst zu setzen.
+              </div>
+            )}
+            {cands.map((c, i) => (
+              <div key={c.id} onClick={() => setChoice(ch => ({ ...ch, [g.key]: { id: c.id, lat: c.lat, lon: c.lon, alt: c.alt || 0 } }))}
+                style={{ display: "flex", gap: 9, alignItems: "flex-start", padding: "7px 8px", borderRadius: 9, marginBottom: 4, cursor: "pointer",
+                  background: pos?.id === c.id ? "rgba(251,191,36,0.12)" : "rgba(255,255,255,0.03)", border: `1px solid ${pos?.id === c.id ? "rgba(251,191,36,0.45)" : "rgba(255,255,255,0.06)"}` }}>
+                <span style={{ flexShrink: 0, width: 20, height: 20, borderRadius: "50%", background: "#38bdf8", color: "#04122a", fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center" }}>{i + 1}</span>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, wordBreak: "break-word" }}>{c.label}</div>
+                  <div style={{ fontSize: 11, color: "rgba(232,244,253,0.5)", fontFamily: "monospace" }}>
+                    {c.lat.toFixed(5)}, {c.lon.toFixed(5)}{c.alt > 0 ? ` · ${Math.round(c.alt)} m` : ""}{c.detail ? ` · ${c.detail}` : ""}
+                  </div>
+                </div>
+              </div>
+            ))}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "8px 0", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, color: "rgba(232,244,253,0.55)" }}>Position:</span>
+              <input key={g.key + ":" + (pos ? pos.lat.toFixed(5) + "," + pos.lon.toFixed(5) : "")} defaultValue={pos ? `${pos.lat.toFixed(5)}, ${pos.lon.toFixed(5)}` : ""}
+                placeholder="Breite, Länge  (z.B. 46.4123, 8.1054)"
+                onClick={ev => ev.stopPropagation()}
+                onBlur={ev => { const p = parseLatLon(ev.target.value); if (p && (!pos || p.lat !== pos.lat || p.lon !== pos.lon)) setChoice(ch => ({ ...ch, [g.key]: { id: "manual", lat: p.lat, lon: p.lon, alt: 0 } })); }}
+                onKeyDown={ev => { if (ev.key === "Enter") ev.target.blur(); }}
+                style={{ flex: 1, minWidth: 160, background: "rgba(255,255,255,0.08)", border: "1px solid rgba(125,211,252,0.35)", borderRadius: 8, padding: "6px 9px", color: "#e8f4fd", fontSize: 13, fontFamily: "monospace" }} />
+            </div>
+            <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 8 }}>
+              Tipp: gelben Ring auf der Karte ziehen oder in die Karte klicken, um die Position anzupassen. Blaue Zahlen = Vorschläge, grüne/rote Punkte = bekannte Plätze.
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button onClick={() => confirmOne(g)} disabled={!pos}
+                style={btn({ background: pos ? "rgba(34,197,94,0.18)" : "rgba(255,255,255,0.04)", border: "1px solid rgba(34,197,94,0.4)", color: pos ? "#4ade80" : "rgba(232,244,253,0.3)", fontWeight: 700 })}>
+                ✓ Bestätigen ({g.flights.length} Flug{g.flights.length === 1 ? "" : "e"})
+              </button>
+              <button onClick={() => searchOne(g)} disabled={e?.busy} style={btn()}>{e?.busy ? "Suche …" : e?.done ? "🔎 Erneut suchen" : "🔎 Online suchen"}</button>
+              <button onClick={() => { setSkipped(s => { const n = new Set(s); n.has(g.key) ? n.delete(g.key) : n.add(g.key); return n; }); if (!isSkipped) setSelKey(null); }} style={btn({ color: "rgba(232,244,253,0.6)" })}>
+                {isSkipped ? "Wieder einblenden" : "Ausblenden"}
+              </button>
+            </div>
+            {e?.done && !e.cands.length && <div style={{ fontSize: 11, color: "#fbbf24", marginTop: 8 }}>Online nichts gefunden — Position bitte in der Karte setzen oder Namen prüfen.</div>}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const mapPane = (
+    <div style={{ position: "relative", ...(isWide ? { flex: "1 1 55%", minWidth: 0 } : { height: "38vh", flexShrink: 0 }), background: "#040e20" }}>
+      <div ref={mapDivRef} style={{ position: "absolute", inset: 0 }} />
+      {!mapTilerKey && (
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "rgba(4,14,32,0.92)", color: "rgba(232,244,253,0.6)", fontSize: 13, textAlign: "center", padding: 24 }}>
+          <div style={{ fontSize: 28 }}>🗺️</div>
+          <div>Kein MapTiler-Schlüssel hinterlegt.</div>
+          <a href="service.html" style={{ color: "#7dd3fc", fontSize: 12 }}>→ Unter Service eintragen</a>
+        </div>
+      )}
+      {mapTilerKey && !selGroup && (
+        <div style={{ position: "absolute", left: 10, bottom: 10, right: 10, pointerEvents: "none", fontSize: 11, color: "#04122a", background: "rgba(255,255,255,0.85)", borderRadius: 8, padding: "5px 9px", textAlign: "center" }}>
+          Zeile in der Liste antippen, um Vorschläge zu sehen · grün/rot = bereits bekannte Start-/Landeplätze
+        </div>
+      )}
+    </div>
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 300, background: "#040e20", color: "#e8f4fd", display: "flex", flexDirection: "column", fontFamily: "system-ui,sans-serif" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "calc(12px + env(safe-area-inset-top, 0px)) 14px 10px", borderBottom: "1px solid rgba(100,180,255,0.12)" }}>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#7dd3fc", fontSize: 24, cursor: "pointer", padding: 0 }}>‹</button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#7dd3fc", letterSpacing: 1.5, textTransform: "uppercase" }}>Orte zuordnen</div>
+          <div style={{ fontSize: 11, color: "rgba(232,244,253,0.45)", marginTop: 1 }}>
+            {groups.length} Plätze ohne Koordinaten · {nFlights} Flug-Einträge{done.length ? ` · ${done.length} bestätigt` : ""}
+          </div>
+        </div>
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: isWide ? "row" : "column" }}>
+        {mapPane}
+        <div style={{ flex: isWide ? "1 1 45%" : "1 1 auto", minWidth: 0, minHeight: 0, overflowY: "auto", padding: "10px 12px 40px", borderLeft: isWide ? "1px solid rgba(100,180,255,0.12)" : "none" }}>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10, alignItems: "center" }}>
+            <button onClick={() => setKindFilter("all")} style={chip(kindFilter === "all")}>Alle</button>
+            <button onClick={() => setKindFilter("start")} style={chip(kindFilter === "start")}>🛫 Start</button>
+            <button onClick={() => setKindFilter("end")} style={chip(kindFilter === "end")}>🛬 Landung</button>
+            {skipped.size > 0 && <button onClick={() => setShowSkipped(s => !s)} style={chip(showSkipped)}>Ausgeblendete ({skipped.size})</button>}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            <button onClick={searchAll} disabled={!!busyMsg || !visible.length} style={btn({ background: "rgba(125,211,252,0.12)", border: "1px solid rgba(125,211,252,0.35)", color: "#7dd3fc" })}>🔎 Alle online suchen</button>
+            {sureCount > 0 && <button onClick={confirmSure} disabled={!!busyMsg} style={btn({ background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.35)", color: "#4ade80" })}>✓ {sureCount} eindeutige aus eigenen Flügen übernehmen</button>}
+          </div>
+          {busyMsg && <div style={{ fontSize: 12, color: "#fbbf24", marginBottom: 10 }}>⏳ {busyMsg}</div>}
+          {!groups.length && <div style={{ textAlign: "center", color: "rgba(232,244,253,0.5)", fontSize: 14, padding: "30px 10px" }}>🎉 Alle Start- und Landeplätze haben Koordinaten.</div>}
+          {visible.map(renderRow)}
+          {done.length > 0 && (
+            <div style={{ marginTop: 18 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#4ade80", letterSpacing: 1.3, textTransform: "uppercase", marginBottom: 6 }}>Bestätigt ({done.length})</div>
+              {done.map((d, i) => (
+                <div key={d.key + i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: 10, marginBottom: 5, background: "rgba(34,197,94,0.06)", border: "1px solid rgba(34,197,94,0.2)" }}>
+                  <span>{d.kind === "start" ? "🛫" : "🛬"}</span>
+                  <div style={{ flex: 1, minWidth: 0, fontSize: 12 }}>
+                    <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</div>
+                    <div style={{ color: "rgba(232,244,253,0.5)", fontFamily: "monospace", fontSize: 11 }}>{d.pos.lat.toFixed(5)}, {d.pos.lon.toFixed(5)} · {d.ids.length} Flug{d.ids.length === 1 ? "" : "e"}</div>
+                  </div>
+                  <button onClick={() => undo(d)} style={btn({ padding: "4px 9px", fontSize: 11 })}>↶ Rückgängig</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ── Track in echter Flughöhe (nur Vollbild-Karte) ────────────────────────
 // MapLibre kennt keine 3D-Linien — daher ein eigener WebGL-"custom layer":
@@ -10591,7 +11100,7 @@ function FlugbuchApp() {
 
   const enrichedSelected = selected ? (flightsWithRanks.find(f=>f.id===selected.id) || selected) : null;
 
-  if (view==="worldmap") return <WorldMapView flights={filteredFlights} selectedIds={selectedIds} onBack={()=>setView("list")} mapTilerKey={mapTilerKey} />;
+  if (view==="worldmap") return <WorldMapView flights={filteredFlights} selectedIds={selectedIds} onBack={()=>setView("list")} mapTilerKey={mapTilerKey} allFlights={flights} setFlights={setFlights} saveFlight={saveFlight} />;
 
   // ── DETAIL VIEW ─────────────────────────────────────────────────────────
   if (view==="detail" && selected && isWide) {
