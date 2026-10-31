@@ -1794,12 +1794,16 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
     const sdk = window.maptilersdk;
     const map = new sdk.Map({ container: mapDivRef.current, apiKey: mapTilerKey, style: sdk.MapStyle.OUTDOOR, language: "de", center: [8.2, 46.8], zoom: 6 });
     mapRef.current = map;
-    map.on("load", () => { removeStrayMapTilerWarnings(); setMapReady(true); });
+    map.on("load", () => { removeStrayMapTilerWarnings(); map.resize(); setMapReady(true); });
+    // Container-Grösse nachführen (Layout steht beim Erzeugen noch nicht fest)
+    let ro = null;
+    if (window.ResizeObserver) { ro = new ResizeObserver(() => { try { map.resize(); } catch {} }); ro.observe(mapDivRef.current); }
+    setTimeout(() => { try { map.resize(); } catch {} }, 300);
     map.on("click", (e) => {
       if (e.originalEvent?.target?.closest?.("[data-pm]")) return; // Klick auf einen Marker
       live.current.setPos(e.lngLat.lat, e.lngLat.lng, "manual");
     });
-    return () => { try { map.remove(); } catch {} mapRef.current = null; setMapReady(false); };
+    return () => { if (ro) ro.disconnect(); try { map.remove(); } catch {} mapRef.current = null; setMapReady(false); };
   }, [mapTilerKey]);
 
   // Bekannte Plätze (kleine Punkte: grün = Start, rot = Landung)
@@ -1943,8 +1947,9 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
   };
 
   const mapPane = (
-    <div style={{ position: "relative", ...(isWide ? { flex: "1 1 55%", minWidth: 0 } : { height: "38vh", flexShrink: 0 }), background: "#040e20" }}>
-      <div ref={mapDivRef} style={{ position: "absolute", inset: 0 }} />
+    <div style={{ display: "flex", flexDirection: "column", ...(isWide ? { flex: "1 1 55%", minWidth: 0 } : { height: "42vh", flexShrink: 0 }), background: "#040e20" }}>
+     <div style={{ position: "relative", flex: 1, minHeight: 0, background: "#dfe6ea" }}>
+      <div ref={mapDivRef} style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, width: "100%", height: "100%" }} />
       {!mapTilerKey && (
         <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, background: "rgba(4,14,32,0.92)", color: "rgba(232,244,253,0.6)", fontSize: 13, textAlign: "center", padding: 24 }}>
           <div style={{ fontSize: 28 }}>🗺️</div>
@@ -1952,11 +1957,12 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
           <a href="service.html" style={{ color: "#7dd3fc", fontSize: 12 }}>→ Unter Service eintragen</a>
         </div>
       )}
-      {mapTilerKey && !selGroup && (
-        <div style={{ position: "absolute", left: 10, bottom: 10, right: 10, pointerEvents: "none", fontSize: 11, color: "#04122a", background: "rgba(255,255,255,0.85)", borderRadius: 8, padding: "5px 9px", textAlign: "center" }}>
-          Zeile in der Liste antippen, um Vorschläge zu sehen · grün/rot = bereits bekannte Start-/Landeplätze
-        </div>
-      )}
+     </div>
+     <div style={{ flexShrink: 0, fontSize: 12, lineHeight: 1.4, color: "rgba(232,244,253,0.85)", background: "#0a1c36", borderTop: "1px solid rgba(100,180,255,0.18)", padding: "6px 12px", textAlign: "center" }}>
+       {selGroup
+         ? "🟡 Ring ziehen oder in die Karte tippen = Position setzen · 🔵 Zahlen = Vorschläge"
+         : "Zeile antippen für Vorschläge · 🟢 Start / 🔴 Landung = bekannte Plätze"}
+     </div>
     </div>
   );
 
