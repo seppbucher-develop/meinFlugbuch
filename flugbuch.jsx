@@ -1350,7 +1350,7 @@ function removeStrayMapTilerWarnings() {
 }
 
 
-function WorldMapView({ flights, selectedIds, onBack, mapTilerKey, allFlights, setFlights, saveFlight }) {
+function WorldMapView({ flights, selectedIds, onBack, mapTilerKey, allFlights, setFlights, saveFlight, placeMatchRadiusKm }) {
   const mapDivRef = useRef(null);
   // "Orte zuordnen": Flüge mit Platznamen aber ohne Koordinaten (siehe PlaceAssignDialog)
   const [showAssign, setShowAssign] = useState(false);
@@ -1473,7 +1473,7 @@ function WorldMapView({ flights, selectedIds, onBack, mapTilerKey, allFlights, s
           </button>
         )}
       </div>
-      {showAssign && <PlaceAssignDialog flights={allFlights} setFlights={setFlights} saveFlight={saveFlight} mapTilerKey={mapTilerKey} onClose={()=>setShowAssign(false)} />}
+      {showAssign && <PlaceAssignDialog flights={allFlights} setFlights={setFlights} saveFlight={saveFlight} mapTilerKey={mapTilerKey} radiusKm={placeMatchRadiusKm} onClose={()=>setShowAssign(false)} />}
       <div style={{padding:"0 16px 12px"}}>
         <SearchBar filterText={search} setFilterText={setSearch} knownGliders={[...new Set(flights.map(f=>f.glider).filter(Boolean))].sort()} />
       </div>
@@ -1660,7 +1660,7 @@ async function paSearchOnline(group, anchor, apiKey) {
   return merged.slice(0, 8).map((c, i) => ({ ...c, id: "ext:" + i + ":" + c.source }));
 }
 
-function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, onClose }) {
+function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiusKm, onClose }) {
   const isWide = useIsWide();
   const flightsRef = useRef(flights); flightsRef.current = flights;
   const groups = useMemo(() => paCollectGroups(flights), [flights]);
@@ -1729,18 +1729,27 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, onClo
     const ids = new Set(g.flights.map(f => f.id));
     const pt = { lat: pos.lat, lon: pos.lon, gpsAlt: pos.alt || 0 };
     const targets = flightsRef.current.filter(f => ids.has(f.id));
-    const updated = new Map(), prevAlt = {};
+    const updated = new Map(), prevAlt = {}, landSet = {};
+    // Land (nur beim Startplatz): leere Land-Felder wie beim IGC-Import füllen —
+    // zuerst vom nächsten Flug mit Land innerhalb des Radius, sonst per MapTiler.
+    // Ein bereits eingetragenes Land wird nie überschrieben.
+    let land = "";
+    if (g.kind === "start" && targets.some(f => !(f.customFields?.land || "").trim())) {
+      land = findNearbyFieldValue(pt, flightsRef.current, f => f.startPt, f => f.customFields?.land, radiusKm || 0.5);
+      if (!land) land = await reverseGeocodeCountry(pt, mapTilerKey);
+    }
     for (const f of targets) {
-      const upd = g.kind === "start"
+      let upd = g.kind === "start"
         ? { ...f, startPt: pt, ...(pos.alt > 0 && !(f.startAlt > 0) ? { startAlt: pos.alt } : {}) }
         : { ...f, endPt: pt, ...(pos.alt > 0 && !(f.endAlt > 0) ? { endAlt: pos.alt } : {}) };
+      if (land && !(f.customFields?.land || "").trim()) { upd = { ...upd, customFields: { ...(f.customFields || {}), land } }; landSet[f.id] = land; }
       const r = await saveFlight(upd);
       if (!r.ok) { alert("Speichern fehlgeschlagen für Flug " + (f.name || f.id) + " — Vorgang abgebrochen."); break; }
       updated.set(f.id, upd); prevAlt[f.id] = g.kind === "start" ? f.startAlt : f.endAlt;
     }
     if (updated.size) {
       setFlights(prev => prev.map(f => updated.get(f.id) || f));
-      setDone(d => [{ key: g.key, kind: g.kind, name: g.name, pos: pt, prevAlt, ids: [...updated.keys()] }, ...d]);
+      setDone(d => [{ key: g.key, kind: g.kind, name: g.name, pos: pt, prevAlt, landSet, ids: [...updated.keys()] }, ...d]);
     }
     return updated.size === targets.length;
   };
@@ -1767,7 +1776,9 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, onClo
     const targets = flightsRef.current.filter(f => ids.has(f.id));
     const updated = new Map();
     for (const f of targets) {
-      const upd = d.kind === "start" ? { ...f, startPt: null, startAlt: d.prevAlt[f.id] ?? 0 } : { ...f, endPt: null, endAlt: d.prevAlt[f.id] ?? 0 };
+      let upd = d.kind === "start" ? { ...f, startPt: null, startAlt: d.prevAlt[f.id] ?? 0 } : { ...f, endPt: null, endAlt: d.prevAlt[f.id] ?? 0 };
+      // nur das hier ergänzte Land entfernen, nicht ein inzwischen geändertes
+      if (d.landSet?.[f.id] && f.customFields?.land === d.landSet[f.id]) upd = { ...upd, customFields: { ...(f.customFields || {}), land: "" } };
       const r = await saveFlight(upd);
       if (r.ok) updated.set(f.id, upd);
     }
@@ -1984,7 +1995,7 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, onClo
                   <span>{d.kind === "start" ? "🛫" : "🛬"}</span>
                   <div style={{ flex: 1, minWidth: 0, fontSize: 12 }}>
                     <div style={{ fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{d.name}</div>
-                    <div style={{ color: "rgba(232,244,253,0.5)", fontFamily: "monospace", fontSize: 11 }}>{d.pos.lat.toFixed(5)}, {d.pos.lon.toFixed(5)} · {d.ids.length} Flug{d.ids.length === 1 ? "" : "e"}</div>
+                    <div style={{ color: "rgba(232,244,253,0.5)", fontFamily: "monospace", fontSize: 11 }}>{d.pos.lat.toFixed(5)}, {d.pos.lon.toFixed(5)} · {d.ids.length} Flug{d.ids.length === 1 ? "" : "e"}{(() => { const l = Object.values(d.landSet || {})[0]; return l ? " · Land: " + l : ""; })()}</div>
                   </div>
                   <button onClick={() => undo(d)} style={btn({ padding: "4px 9px", fontSize: 11 })}>↶ Rückgängig</button>
                 </div>
@@ -11100,7 +11111,7 @@ function FlugbuchApp() {
 
   const enrichedSelected = selected ? (flightsWithRanks.find(f=>f.id===selected.id) || selected) : null;
 
-  if (view==="worldmap") return <WorldMapView flights={filteredFlights} selectedIds={selectedIds} onBack={()=>setView("list")} mapTilerKey={mapTilerKey} allFlights={flights} setFlights={setFlights} saveFlight={saveFlight} />;
+  if (view==="worldmap") return <WorldMapView flights={filteredFlights} selectedIds={selectedIds} onBack={()=>setView("list")} mapTilerKey={mapTilerKey} allFlights={flights} setFlights={setFlights} saveFlight={saveFlight} placeMatchRadiusKm={placeMatchRadiusKm} />;
 
   // ── DETAIL VIEW ─────────────────────────────────────────────────────────
   if (view==="detail" && selected && isWide) {
