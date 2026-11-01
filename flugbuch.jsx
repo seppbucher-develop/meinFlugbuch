@@ -1872,6 +1872,14 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
     const open = selKey === g.key;
     const cands = candsFor(g), pos = posFor(g), e = ext[g.key];
     const isSkipped = skipped.has(g.key);
+    // Zusammenfassung der betroffenen Flüge (Zeitraum, Länder, Reisen)
+    const sortedFl = g.flights.slice().sort((a, b) => parseDateToTs(a.date || a.rawDate) - parseDateToTs(b.date || b.rawDate));
+    const uniq = (fn) => [...new Set(g.flights.map(fn).filter(Boolean))];
+    const laender = uniq(f => f.customFields?.land), reisen = uniq(f => f.customFields?.reise);
+    const d0 = sortedFl[0]?.date || "", d1 = sortedFl[sortedFl.length - 1]?.date || "";
+    const summary = [d0 && (d0 === d1 ? d0 : d0 + " – " + d1), laender.join(", "), reisen.length ? "Reise: " + reisen.join(", ") : ""].filter(Boolean).join(" · ");
+    const otherLabel = g.kind === "start" ? "Landung" : "Start";
+    const otherOf = f => g.kind === "start" ? f.customFields?.landung : f.site;
     const bestLabel = pos ? (cands.find(c => c.id === pos.id)?.label || (pos.id === "manual" ? "Eigene Position" : "")) : "";
     return (
       <div key={g.key} style={{ borderRadius: 12, marginBottom: 8, border: `1px solid ${open ? "rgba(125,211,252,0.45)" : "rgba(255,255,255,0.08)"}`, background: open ? "rgba(125,211,252,0.06)" : "rgba(255,255,255,0.03)", opacity: isSkipped ? 0.55 : 1 }}>
@@ -1885,6 +1893,7 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
               {pos ? ` · ${pos.lat.toFixed(4)}, ${pos.lon.toFixed(4)}` : " · kein Vorschlag"}
               {bestLabel ? ` · ${bestLabel}` : ""}
             </div>
+            {summary && <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</div>}
           </div>
           {pos && !open && (
             <button onClick={ev => { ev.stopPropagation(); confirmOne(g); }} title="Vorschlag bestätigen (gilt für alle Flüge mit diesem Namen)"
@@ -1899,6 +1908,16 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
                 Schreibweisen: {[...g.variants.entries()].map(([v, c]) => `«${v}» (${c}×)`).join(", ")}
               </div>
             )}
+            <div style={{ maxHeight: 150, overflowY: "auto", marginBottom: 8, borderRadius: 9, background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.06)" }}>
+              {sortedFl.map(f => (
+                <div key={f.id} style={{ fontSize: 11, padding: "4px 8px", borderBottom: "1px solid rgba(255,255,255,0.04)", color: "rgba(232,244,253,0.75)" }}>
+                  <b style={{ color: "#e8f4fd" }}>{f.date || "—"}</b>
+                  {" · "}{otherLabel}: {otherOf(f) || "—"}
+                  {" · "}Land: {f.customFields?.land || "—"}
+                  {" · "}Reise: {f.customFields?.reise || "—"}
+                </div>
+              ))}
+            </div>
             {cands.length === 0 && !e?.busy && (
               <div style={{ fontSize: 12, color: "rgba(232,244,253,0.5)", marginBottom: 8 }}>
                 Noch keine Vorschläge. «Online suchen» startet die Suche — oder in die Karte klicken, um die Position selbst zu setzen.
