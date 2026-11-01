@@ -1669,6 +1669,7 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
   const [choice, setChoice] = useState({});    // key -> { id, lat, lon, alt }
   const [selKey, setSelKey] = useState(null);
   const [skipped, setSkipped] = useState(() => new Set());
+  const [excl, setExcl] = useState(() => new Set()); // abgewählte Flüge ("kind:id") — gelten nicht für die Zuordnung
   const [done, setDone] = useState([]);        // bestätigte Zuordnungen (für Rückgängig)
   const [kindFilter, setKindFilter] = useState("all");
   const [showSkipped, setShowSkipped] = useState(false);
@@ -1726,7 +1727,8 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
   // Eine Zuordnung speichern → gilt für ALLE Flüge dieses Platznamens
   const confirmGroup = async (g, pos) => {
     if (!pos || !PA_hasPt(pos)) return false;
-    const ids = new Set(g.flights.map(f => f.id));
+    const ids = new Set(g.flights.filter(f => !excl.has(g.kind + ":" + f.id)).map(f => f.id));
+    if (!ids.size) return false;
     const pt = { lat: pos.lat, lon: pos.lon, gpsAlt: pos.alt || 0 };
     const targets = flightsRef.current.filter(f => ids.has(f.id));
     const updated = new Map(), prevAlt = {}, landSet = {};
@@ -1749,6 +1751,8 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
     }
     if (updated.size) {
       setFlights(prev => prev.map(f => updated.get(f.id) || f));
+      // Abwahl nur für diesen Durchgang: übrige Flüge des Namens sind danach wieder angehakt
+      setExcl(prev => { const n = new Set(prev); g.flights.forEach(f => n.delete(g.kind + ":" + f.id)); return n; });
       setDone(d => [{ key: g.key, kind: g.kind, name: g.name, pos: pt, prevAlt, landSet, ids: [...updated.keys()] }, ...d]);
     }
     return updated.size === targets.length;
@@ -1877,8 +1881,11 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
     const uniq = (fn) => [...new Set(g.flights.map(fn).filter(Boolean))];
     const laender = uniq(f => f.customFields?.land), reisen = uniq(f => f.customFields?.reise);
     const d0 = sortedFl[0]?.date || "", d1 = sortedFl[sortedFl.length - 1]?.date || "";
-    const summary = [d0 && (d0 === d1 ? d0 : d0 + " – " + d1), laender.join(", "), reisen.length ? "Reise: " + reisen.join(", ") : ""].filter(Boolean).join(" · ");
-    const otherLabel = g.kind === "start" ? "Landung" : "Start";
+    const summary = [d0 && (d0 === d1 ? d0 : d0 + " – " + d1), laender.join(", "), reisen.join(", ")].filter(Boolean).join(" · ");
+    const chk = f => !excl.has(g.kind + ":" + f.id);
+    const nSel = g.flights.filter(chk).length;
+    const toggleFl = f => setExcl(prev => { const n = new Set(prev), k = g.kind + ":" + f.id; n.has(k) ? n.delete(k) : n.add(k); return n; });
+    const setAll = on => setExcl(prev => { const n = new Set(prev); g.flights.forEach(f => on ? n.delete(g.kind + ":" + f.id) : n.add(g.kind + ":" + f.id)); return n; });
     const otherOf = f => g.kind === "start" ? f.customFields?.landung : f.site;
     const bestLabel = pos ? (cands.find(c => c.id === pos.id)?.label || (pos.id === "manual" ? "Eigene Position" : "")) : "";
     return (
@@ -1908,14 +1915,20 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
                 Schreibweisen: {[...g.variants.entries()].map(([v, c]) => `«${v}» (${c}×)`).join(", ")}
               </div>
             )}
-            <div style={{ maxHeight: 150, overflowY: "auto", marginBottom: 8, borderRadius: 9, background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.06)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, fontSize: 11, color: "rgba(232,244,253,0.55)" }}>
+              <span style={{ flex: 1 }}>{nSel} von {g.flights.length} Flügen angehakt — die Zuordnung gilt nur für diese</span>
+              <button onClick={() => setAll(true)} style={btn({ padding: "2px 8px", fontSize: 11 })}>Alle</button>
+              <button onClick={() => setAll(false)} style={btn({ padding: "2px 8px", fontSize: 11 })}>Keine</button>
+            </div>
+            <div style={{ maxHeight: 170, overflowY: "auto", marginBottom: 8, borderRadius: 9, background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.06)" }}>
               {sortedFl.map(f => (
-                <div key={f.id} style={{ fontSize: 11, padding: "4px 8px", borderBottom: "1px solid rgba(255,255,255,0.04)", color: "rgba(232,244,253,0.75)" }}>
-                  <b style={{ color: "#e8f4fd" }}>{f.date || "—"}</b>
-                  {" · "}{otherLabel}: {otherOf(f) || "—"}
-                  {" · "}Land: {f.customFields?.land || "—"}
-                  {" · "}Reise: {f.customFields?.reise || "—"}
-                </div>
+                <label key={f.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, padding: "6px 8px", borderBottom: "1px solid rgba(255,255,255,0.04)", color: "rgba(232,244,253,0.75)", cursor: "pointer", opacity: chk(f) ? 1 : 0.45 }}>
+                  <input type="checkbox" checked={chk(f)} onChange={() => toggleFl(f)} style={{ marginTop: 2, width: 17, height: 17, flexShrink: 0, accentColor: "#38bdf8" }} />
+                  <span style={{ minWidth: 0, wordBreak: "break-word" }}>
+                    <b style={{ color: "#e8f4fd" }}>{f.date || "—"}</b>
+                    {[otherOf(f), f.customFields?.land, f.customFields?.reise].filter(Boolean).map((v, i) => <span key={i}>{" · "}{v}</span>)}
+                  </span>
+                </label>
               ))}
             </div>
             {cands.length === 0 && !e?.busy && (
@@ -1949,9 +1962,9 @@ function PlaceAssignDialog({ flights, setFlights, saveFlight, mapTilerKey, radiu
               Tipp: gelben Ring auf der Karte ziehen oder in die Karte klicken, um die Position anzupassen. Blaue Zahlen = Vorschläge, grüne/rote Punkte = bekannte Plätze.
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button onClick={() => confirmOne(g)} disabled={!pos}
-                style={btn({ background: pos ? "rgba(34,197,94,0.18)" : "rgba(255,255,255,0.04)", border: "1px solid rgba(34,197,94,0.4)", color: pos ? "#4ade80" : "rgba(232,244,253,0.3)", fontWeight: 700 })}>
-                ✓ Bestätigen ({g.flights.length} Flug{g.flights.length === 1 ? "" : "e"})
+              <button onClick={() => confirmOne(g)} disabled={!pos || !nSel}
+                style={btn({ background: pos && nSel ? "rgba(34,197,94,0.18)" : "rgba(255,255,255,0.04)", border: "1px solid rgba(34,197,94,0.4)", color: pos && nSel ? "#4ade80" : "rgba(232,244,253,0.3)", fontWeight: 700 })}>
+                ✓ Bestätigen ({nSel} Flug{nSel === 1 ? "" : "e"})
               </button>
               <button onClick={() => searchOne(g)} disabled={e?.busy} style={btn()}>{e?.busy ? "Suche …" : e?.done ? "🔎 Erneut suchen" : "🔎 Online suchen"}</button>
               <button onClick={() => { setSkipped(s => { const n = new Set(s); n.has(g.key) ? n.delete(g.key) : n.add(g.key); return n; }); if (!isSkipped) setSelKey(null); }} style={btn({ color: "rgba(232,244,253,0.6)" })}>
