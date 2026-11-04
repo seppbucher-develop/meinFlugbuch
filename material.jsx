@@ -4,7 +4,7 @@
 // im selben Storage-Origin wie flugbuch.html (siehe material.html).
 // Spalten entsprechen 1:1 dem "Diverses"-Reiter der ursprünglichen Excel-
 // Datei: Datum, Art, Typ, Wer, SN, Fabrikation, Hersteller, was, wo, Preis,
-// Bemerkung.
+// Bemerkung — ergänzt um "Datei" (hochgeladene Datei als Data-URL) und "URL".
 //
 // Führende Tabellen: Für die vier Kategorien in "Art" (Schirm/Sitz/Gerät/
 // Div) gibt es je eine eigene Stammdaten-Seite/-Liste (schirme:list,
@@ -41,7 +41,28 @@ const MATERIAL_FIELDS = [
   { id: "wo", label: "Wo", type: "text" },
   { id: "preis", label: "Preis", type: "number" },
   { id: "bemerkung", label: "Bemerkung", type: "text" },
+  { id: "datei", label: "Datei", type: "file" },
+  { id: "url", label: "URL", type: "url" },
 ];
+
+// Maximale Dateigrösse für das Feld "Datei" (wird als Data-URL im Eintrag
+// in der IndexedDB abgelegt).
+const MAX_FILE_BYTES = 5 * 1024 * 1024;
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+
+function normalizeUrl(u) {
+  const t = (u || "").trim();
+  if (!t) return "";
+  return /^[a-z][a-z0-9+.-]*:/i.test(t) ? t : "https://" + t;
+}
 
 function parseDateToTs(d) {
   if (!d) return 0;
@@ -122,7 +143,30 @@ function EntryForm({ initial, onSave, onCancel, onDelete, suggestions }) {
         {MATERIAL_FIELDS.map(f => (
           <div key={f.id} style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>{f.label}</div>
-            {f.type === "select" ? (
+            {f.type === "file" ? (
+              <div>
+                {data.datei?.data ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "8px 13px" }}>
+                    <a href={data.datei.data} download={data.datei.name} target="_blank" rel="noopener"
+                      style={{ flex: 1, minWidth: 0, color: "#7dd3fc", fontSize: 13, textDecoration: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      📎 {data.datei.name}
+                    </a>
+                    <button onClick={() => set("datei", null)}
+                      style={{ background: "none", border: "none", color: "#f87171", fontSize: 14, cursor: "pointer" }}>✕</button>
+                  </div>
+                ) : (
+                  <input type="file"
+                    onChange={async e => {
+                      const file = e.target.files && e.target.files[0]; e.target.value = "";
+                      if (!file) return;
+                      if (file.size > MAX_FILE_BYTES) { alert("Die Datei ist zu gross (max. 5 MB)."); return; }
+                      try { set("datei", { name: file.name, type: file.type, size: file.size, data: await readFileAsDataUrl(file) }); }
+                      catch { alert("Die Datei konnte nicht gelesen werden."); }
+                    }}
+                    style={{ width: "100%", boxSizing: "border-box", color: "rgba(232,244,253,0.7)", fontSize: 13 }} />
+                )}
+              </div>
+            ) : f.type === "select" ? (
               <select value={data[f.id] ?? ""} onChange={e => set(f.id, e.target.value)}
                 style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 14 }}>
                 <option value="" style={{ background: "#14253a" }}>— wählen —</option>
@@ -135,8 +179,8 @@ function EntryForm({ initial, onSave, onCancel, onDelete, suggestions }) {
               <input
                 value={data[f.id] ?? ""}
                 onChange={e => set(f.id, f.type === "number" ? (e.target.value === "" ? null : Number(e.target.value)) : e.target.value)}
-                type={f.type === "number" ? "number" : "text"}
-                placeholder={f.id === "datum" ? "tt.mm.jjjj" : ""}
+                type={f.type === "number" ? "number" : f.type === "url" ? "url" : "text"}
+                placeholder={f.type === "url" ? "https://…" : f.id === "datum" ? "tt.mm.jjjj" : ""}
                 list={f.datalist && typSuggestions.length ? "typ-datalist" : undefined}
                 style={{ width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 10, padding: "10px 13px", color: "#e8f4fd", fontSize: 14 }} />
             )}
@@ -234,6 +278,7 @@ function MaterialApp() {
   const saveEntry = async (data) => {
     const isNew = !data.id;
     let toSave = isNew ? { ...data, id: `mat_${Date.now()}` } : data;
+    toSave = { ...toSave, url: normalizeUrl(toSave.url) };
     await window.storage.set(`entry:${toSave.id}`, JSON.stringify(toSave));
     const [synced] = await syncMaterialWithMasters([toSave]);
     if (synced) { toSave = synced; loadMasterNames(); }
@@ -347,6 +392,12 @@ function MaterialApp() {
             <div style={{ fontSize: 12, color: "rgba(232,244,253,0.7)" }}>
               {[e.wer, e.hersteller, e.was].filter(Boolean).join(" · ") || "—"}
             </div>
+            {(e.datei?.data || e.url) && (
+              <div onClick={ev => ev.stopPropagation()} style={{ display: "flex", gap: 12, marginTop: 4, flexWrap: "wrap", fontSize: 12 }}>
+                {e.datei?.data && <a href={e.datei.data} download={e.datei.name} target="_blank" rel="noopener" style={{ color: "#7dd3fc", textDecoration: "none" }}>📎 {e.datei.name}</a>}
+                {e.url && <a href={e.url} target="_blank" rel="noopener noreferrer" style={{ color: "#7dd3fc", textDecoration: "none" }}>🔗 {e.url.replace(/^https?:\/\//, "")}</a>}
+              </div>
+            )}
             <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}>
               <span style={{ fontSize: 11, color: "rgba(232,244,253,0.4)" }}>{e.bemerkung}</span>
               {e.preis != null && <span style={{ fontSize: 12, fontWeight: 700, color: e.preis < 0 ? "#4ade80" : "#e8f4fd" }}>{e.preis.toLocaleString("de-CH", { maximumFractionDigits: 2 })}.-</span>}
