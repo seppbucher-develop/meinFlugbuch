@@ -9,7 +9,10 @@ vom Server geholt und live kompiliert). Gehostet auf GitHub Pages.
 Die Version der App wird aus Git-Tags abgeleitet und in `version.json`
 festgehalten (es gibt keinen Build-Server, der das für die App selbst
 automatisch könnte). Sie erscheint auf dem Hauptscreen (`index.html`) und
-im Dateinamen jedes Backups (`service.html` → Backup sichern).
+im Dateinamen jedes Backups (`service.html` → Backup sichern), zusammen mit dem
+optional im Feld „Gerätename“ gewählten Namen (z. B.
+`flugbuch-backup-v1.0.147-Sepp-Handy-2026-11-13.json.gz`; der Name wird nur
+lokal im Browser gespeichert, nicht im Backup).
 
 **Patch-Version (v1.0.0 → v1.0.1 → v1.0.2 → …): automatisch.** Der
 GitHub-Actions-Workflow `.github/workflows/bump-version.yml` läuft nach
