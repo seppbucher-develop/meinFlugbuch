@@ -723,6 +723,22 @@ function ServiceApp() {
     try { localStorage.setItem(name, val ? "1" : "0"); } catch {}
   };
 
+  // Gerätename für den Backup-Dateinamen: frei wählbar, nur lokal im Browser
+  // gespeichert (bewusst NICHT in window.storage, damit er nicht ins Backup
+  // wandert und beim Restore ein anderes Gerät überschreibt). Leer = kein
+  // Gerätename im Dateinamen.
+  const DEVICE_NAME_KEY = "flugbuch-geraetename";
+  const [deviceName, setDeviceName] = React.useState(() => {
+    try { return localStorage.getItem(DEVICE_NAME_KEY) || ""; } catch { return ""; }
+  });
+  const saveDeviceName = (name) => {
+    try {
+      const v = (name || "").trim();
+      if (v) localStorage.setItem(DEVICE_NAME_KEY, v);
+      else localStorage.removeItem(DEVICE_NAME_KEY);
+    } catch {}
+  };
+
   const exportBackup = async () => {
     setBusy(true); setMsg(null);
     // Berechtigung für den gewählten Ordner ganz am Anfang anfragen (falls
@@ -762,14 +778,15 @@ function ServiceApp() {
           } catch {}
         }
       }
-      const payload = { exportedAt: new Date().toISOString(), entries };
+      const deviceTag = deviceName.replace(/[\\/:*?"<>|\s]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+      const payload = { exportedAt: new Date().toISOString(), device: deviceTag, entries };
       const json = JSON.stringify(payload);
       const dateStamp = new Date().toISOString().slice(0, 10);
       // window.APP_VERSION kommt aus version.json (siehe service.html bzw.
       // scripts/update-version.sh) — im Dateinamen sofort erkennbar, mit
       // welcher App-Version ein Backup erstellt wurde.
       const versionTag = (window.APP_VERSION || "unbekannt").replace(/[\\/:*?"<>|]/g, "_");
-      const optTag = backupWithIgc ? "" : "-ohneIGC";
+      const optTag = (deviceTag ? "-" + deviceTag : "") + (backupWithIgc ? "" : "-ohneIGC");
 
       let blob, filename;
       try {
@@ -1254,6 +1271,14 @@ function ServiceApp() {
               {!fsapiSupported && " Auf diesem Browser läuft „Backup sichern” über den Teilen-/Download-Dialog (die automatische Ordner-Option oben gibt es nur in Chrome/Edge am PC)."}
             </div>
           )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, fontSize: 12, color: "rgba(232,244,253,0.7)" }}>
+            <label htmlFor="backup-device-name" style={{ flexShrink: 0 }}>Gerätename (im Dateinamen):</label>
+            <input id="backup-device-name" type="text" maxLength={40} autoComplete="off" placeholder="z. B. Sepp-Handy"
+              value={deviceName}
+              onChange={e => setDeviceName(e.target.value)}
+              onBlur={e => saveDeviceName(e.target.value)}
+              style={{ flex: "1 1 auto", minWidth: 0, boxSizing: "border-box", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.15)", borderRadius: 8, padding: "6px 10px", color: "#e8f4fd", fontSize: 13 }} />
+          </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <div style={{ flex: "1 1 160px" }}>
               <div style={{ display: "flex", gap: 14, justifyContent: "center", marginBottom: 8, fontSize: 12, color: "rgba(232,244,253,0.7)" }}>
