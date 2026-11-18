@@ -1,0 +1,34 @@
+name: build/ prüfen
+
+# Schlägt fehl, wenn build/*.js nicht zu den .jsx-Dateien passt (z.B. weil nach
+# einer Änderung `./scripts/build-local.sh` vergessen wurde), oder wenn eine
+# .jsx nicht kompiliert. Siehe CLAUDE.md / DOKU.md.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Neu bauen
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-package-lock esbuild@0.25.0
+          node scripts/build.js
+      - name: build/ muss unverändert sein
+        run: |
+          if ! git diff --exit-code --stat -- build; then
+            echo "::error::build/ ist veraltet. Lokal './scripts/build-local.sh' ausführen und build/ mit committen."
+            exit 1
+          fi
+          if [ -n "$(git ls-files --others --exclude-standard build)" ]; then
+            echo "::error::build/ enthält nicht eingecheckte Dateien. './scripts/build-local.sh' ausführen und committen."
+            exit 1
+          fi
