@@ -1291,7 +1291,7 @@ function buildGpxFromFlight(flight) {
   }).join("");
   return `<?xml version="1.0" encoding="UTF-8"?>
 <gpx version="1.1" creator="meinflugApp" xmlns="http://www.topografix.com/GPX/1/1">
-  <trk><name>${flight?.name || "Flug"}</name><trkseg>${points}</trkseg></trk>
+  <trk><name>${String(flight?.name || "Flug").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</name><trkseg>${points}</trkseg></trk>
 </gpx>`;
 }
 
@@ -9484,10 +9484,6 @@ function DetailContent({ fl, flights, navFlights, customFieldDefs, setFlights, s
                 </>
               )}
             </div>
-            <button onClick={()=>window.location.href="hilfe.html"} title="Hilfe"
-              style={{width:28,height:28,borderRadius:"50%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",color:"#ef4444",fontSize:13,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
-              ?
-            </button>
           </div>
         </div>
 
@@ -11278,10 +11274,6 @@ function FlugbuchApp() {
         )}
         <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
           <button onClick={addNewFlight} style={addFlugBtnStyle}>+ Flug</button>
-          <button onClick={()=>window.location.href="hilfe.html"} title="Hilfe"
-            style={{width:32,height:32,borderRadius:"50%",background:"rgba(255,255,255,0.06)",border:"1px solid rgba(255,255,255,0.12)",color:"#ef4444",fontSize:15,fontWeight:900,display:"flex",alignItems:"center",justifyContent:"center",cursor:"pointer",flexShrink:0}}>
-            ?
-          </button>
         </div>
       </div>
 

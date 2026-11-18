@@ -119,6 +119,10 @@
       async set(key, value) {
         try {
           await idbSet(keyFor(key), value);
+          // Veraltete localStorage-Kopie (Rest eines früheren Fallbacks)
+          // entfernen — get() würde sie sonst als "neueren" Stand werten
+          // und damit den soeben gespeicherten Wert wieder überschreiben.
+          try { localStorage.removeItem(keyFor(key)); } catch {}
           return { key, value };
         } catch (e) {
           console.error("storage.set error, falling back to localStorage:", e);
@@ -252,5 +256,6 @@
   window.addEventListener("offline", updateOfflineBanner);
   updateOfflineBanner();
 </script>
+<script src="chrome.js" data-page="stammdaten"></script>
 </body>
 </html>

@@ -4,11 +4,15 @@ Paragliding-Flugbuch als statische Web-App (kein Build-Schritt, kein Bundler
 — React/Babel werden im Browser per CDN geladen, die `.jsx`-Dateien direkt
 vom Server geholt und live kompiliert). Gehostet auf GitHub Pages.
 
+Weitere Unterlagen: [DOKU.md](DOKU.md) (Aufbau, Daten, Offline),
+[REVIEW.md](REVIEW.md) (Code-Review), In-App-Hilfe `hilfe.html` (Knopf **?**
+unten rechts, Version unten links auf jeder Seite).
+
 ## Versionierung
 
 Die Version der App wird aus Git-Tags abgeleitet und in `version.json`
 festgehalten (es gibt keinen Build-Server, der das für die App selbst
-automatisch könnte). Sie erscheint auf dem Hauptscreen (`index.html`) und
+automatisch könnte). Sie erscheint auf jeder Seite unten links (`chrome.js`) und
 im Dateinamen jedes Backups (`service.html` → Backup sichern), zusammen mit dem
 optional im Feld „Gerätename“ gewählten Namen (z. B.
 `flugbuch-backup-v1.0.147-Sepp-Handy-2026-11-13.json.gz`; der Name wird nur

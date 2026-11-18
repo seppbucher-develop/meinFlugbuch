@@ -8,7 +8,7 @@
 // CACHE_VERSION hochzählen, sonst wird die Änderung nicht ausgerollt, da
 // alte Service-Worker-Installationen sonst ihren alten Cache "STATIC_CACHE"
 // unverändert weiterverwenden.
-const CACHE_VERSION = "v6";
+const CACHE_VERSION = "v7";
 const CACHE_NAME = "flugbuch-cache-" + CACHE_VERSION;
 
 // Strategie für die eigenen Dateien (index.html, flugbuch.html, .jsx, ...):
@@ -112,6 +112,7 @@ const CORE_ASSETS = [
   "service.html",
   "service.jsx",
   "hilfe.html",
+  "chrome.js",
   "manifest.json",
   "version.json",
   "favicon.ico",
@@ -201,8 +202,12 @@ self.addEventListener("fetch", (event) => {
     caches.match(cacheKey).then((cached) => {
       const networkUpdate = fetch(req)
         .then((networkResponse) => {
-          const clone = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
+          // Nur erfolgreiche Antworten cachen: ein 404/500 würde sonst die
+          // funktionierende gecachte Fassung überschreiben (dann offline defekt).
+          if (networkResponse && networkResponse.ok) {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
+          }
           return networkResponse;
         })
         .catch(() => null);
@@ -225,8 +230,10 @@ self.addEventListener("fetch", (event) => {
   const respondNetworkFirst = () =>
     fetch(req)
       .then((networkResponse) => {
-        const clone = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
+        if (networkResponse && networkResponse.ok) {
+          const clone = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
+        }
         return networkResponse;
       })
       .catch(() =>
@@ -234,7 +241,7 @@ self.addEventListener("fetch", (event) => {
           if (cached) return cached;
           // Fallback für Cache-Buster-URLs (z.B. "flugbuch.jsx?v=...") auf
           // die zuletzt gecachte Basisversion ohne Query-String.
-          return caches.match(cacheKey) || caches.match("index.html");
+          return caches.match(cacheKey).then((base) => base || caches.match("index.html"));
         })
       );
 
