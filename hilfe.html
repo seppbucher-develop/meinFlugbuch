@@ -161,11 +161,11 @@
     <section id="service">
       <h2>🛠️ Service</h2>
       <ul>
-        <li><b>Backup sichern / wiederherstellen:</b> Sichert alle Daten (Flugbuch, Statistik-Voreinstellungen, Material) in eine Datei. Eine wiederhergestellte Sicherung ersetzt nur Einträge mit derselben ID, alles andere bleibt unangetastet. Ein Ordner lässt sich einmalig festlegen (z.B. ein Synology-Drive-Sync-Ordner) — künftige Backups landen dann automatisch dort, ohne Dialog.</li>
-        <li><b>CSV/IGC-Export:</b> Erzeugt je eine CSV-Datei pro Bereich (Flugbuch, Material, Schirme, Sitze, Geräte, Div) sowie eine ZIP-Datei mit allen IGC-Dateien.</li>
+        <li><b>Backup sichern / wiederherstellen:</b> Sichert alle Daten (Flugbuch, Statistik-Voreinstellungen, Material) in eine Datei. Eine wiederhergestellte Sicherung ersetzt nur Einträge mit derselben ID, alles andere bleibt unangetastet. Vor dem Einspielen wird die Datei vollständig geprüft; ist sie ungültig, wird nichts verändert. Bricht das Einspielen mittendrin ab (z.B. Speicher voll), wird der vorherige Stand automatisch zurückgesetzt. Ein Ordner lässt sich einmalig festlegen (z.B. ein Synology-Drive-Sync-Ordner) — künftige Backups landen dann automatisch dort, ohne Dialog.</li>
+        <li><b>CSV/IGC-Export:</b> Erzeugt je eine CSV-Datei pro Bereich (Flugbuch, Material, Schirme, Sitze, Geräte, Div) sowie eine ZIP-Datei mit allen IGC-Dateien. Texte, die mit <code>=</code>, <code>+</code>, <code>-</code> oder <code>@</code> beginnen, erhalten in der CSV ein vorangestelltes <code>'</code>, damit Excel/Numbers sie nicht als Formel ausführen.</li>
       </ul>
       <ul>
-        <li><b>Einstellungen:</b> API-Zugangsdaten (Karten-Schlüssel), Google Kalender (Reiseanalyse), Umkreise für Start-/Landeplatz-Erkennung beim IGC-Import und für die Umkreissuche, Updates &amp; Offline-Cache sowie ein Notizen-Bereich.</li>
+        <li><b>Einstellungen:</b> API-Zugangsdaten (MapTiler-Karten-Schlüssel — im MapTiler-Konto am besten auf die Domain der App beschränken, da er im Browser sichtbar ist), Google Kalender (Reiseanalyse), Umkreise für Start-/Landeplatz-Erkennung beim IGC-Import und für die Umkreissuche, Updates &amp; Offline-Cache sowie ein Notizen-Bereich.</li>
         <li><b>Gerätename:</b> Optionaler Name (z.B. „Sepp-Handy"), der im Backup-Dateinamen erscheint. Er wird nur lokal im Browser gespeichert.</li>
       </ul>
       <p class="hint">Ein roter Punkt auf der Service-Karte im Hauptmenü zeigt an, dass seit dem letzten Backup Daten geändert wurden.</p>
@@ -181,7 +181,7 @@
     <section id="version">
       <h2>🏷️ Version</h2>
       <p>Die aktuelle Version (z.B. <code>v1.0.148</code>) steht auf jeder Seite <b>unten links</b>. Sie steckt auch im Dateinamen jedes Backups, sodass man später sieht, mit welchem Stand es erstellt wurde.</p>
-      <p>Die letzte Stelle zählt automatisch bei jeder Änderung hoch; grössere Sprünge (z.B. v1.1.0) werden bewusst von Hand gesetzt. Sieht man nach einem Update noch eine alte Nummer, hilft unter Service → „Updates &amp; Offline-Cache" die Option „Immer neueste Version laden (Network-First)".</p>
+      <p>Die Versionsanzeige lädt <code>version.json</code> immer frisch vom Server (offline: zuletzt bekannter Stand). Die letzte Stelle zählt automatisch bei jeder Änderung hoch; grössere Sprünge (z.B. v1.1.0) werden bewusst von Hand gesetzt. Sieht man nach einem Update noch eine alte Nummer, hilft unter Service → „Updates &amp; Offline-Cache" die Option „Immer neueste Version laden (Network-First)".</p>
       <p class="hint">Das <b>?</b> unten rechts öffnet diese Hilfe — direkt beim Abschnitt der Seite, auf der man gerade ist.</p>
     </section>
 

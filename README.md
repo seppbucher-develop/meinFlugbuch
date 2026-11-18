@@ -1,8 +1,8 @@
 # Flugbuch
 
-Paragliding-Flugbuch als statische Web-App (kein Build-Schritt, kein Bundler
-— React/Babel werden im Browser per CDN geladen, die `.jsx`-Dateien direkt
-vom Server geholt und live kompiliert). Gehostet auf GitHub Pages.
+Paragliding-Flugbuch als statische Web-App (React per CDN; die `.jsx`-Dateien
+werden bei jedem Push auf `master` per esbuild nach `build/*.js` vorkompiliert,
+Rückfall: Kompilieren im Browser per Babel — siehe [DOKU.md](DOKU.md)). Gehostet auf GitHub Pages.
 
 Weitere Unterlagen: [DOKU.md](DOKU.md) (Aufbau, Daten, Offline),
 [REVIEW.md](REVIEW.md) (Code-Review), In-App-Hilfe `hilfe.html` (Knopf **?**
@@ -11,8 +11,7 @@ unten rechts, Version unten links auf jeder Seite).
 ## Versionierung
 
 Die Version der App wird aus Git-Tags abgeleitet und in `version.json`
-festgehalten (es gibt keinen Build-Server, der das für die App selbst
-automatisch könnte). Sie erscheint auf jeder Seite unten links (`chrome.js`) und
+festgehalten (Pflege automatisch durch den GitHub-Workflow, s.u.). Sie erscheint auf jeder Seite unten links (`chrome.js`) und
 im Dateinamen jedes Backups (`service.html` → Backup sichern), zusammen mit dem
 optional im Feld „Gerätename“ gewählten Namen (z. B.
 `flugbuch-backup-v1.0.147-Sepp-Handy-2026-11-13.json.gz`; der Name wird nur
@@ -21,7 +20,7 @@ lokal im Browser gespeichert, nicht im Backup).
 **Patch-Version (v1.0.0 → v1.0.1 → v1.0.2 → …): automatisch.** Der
 GitHub-Actions-Workflow `.github/workflows/bump-version.yml` läuft nach
 jedem Push auf `master` (z.B. jedem PR-Merge), zählt die Patch-Stelle des
-letzten Tags eins hoch, committet die neue `version.json` und setzt den
+letzten Tags eins hoch, baut `build/*.js` neu, committet `version.json` und `build/` und setzt den
 passenden Tag — ganz ohne manuellen Schritt.
 
 **Minor/Major-Version (z.B. v1.1.0 oder v2.0.0): manuell**, wenn ein

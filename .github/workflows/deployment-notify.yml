@@ -4,7 +4,7 @@ name: Benachrichtigung bei fertigem Deployment
 # den neuen Stand tatsächlich deployed hat ("Last deployed ... ago" auf der
 # Pages-Einstellungsseite aktualisiert sich erst dann). Dieser Workflow läuft
 # bei jedem erfolgreichen Deployment und erstellt ein Issue, das dem
-# Repo-Owner zugewiesen wird -- dadurch löst GitHub die übliche
+# Repo-Owner zugewiesen wird (und direkt wieder geschlossen wird) -- dadurch löst GitHub die übliche
 # Benachrichtigung (Web/E-Mail) genau in dem Moment aus, in dem der neue
 # Stand live ist.
 on:
@@ -26,7 +26,7 @@ jobs:
             const sha = context.payload.deployment.sha;
             const url = context.payload.deployment_status.environment_url || context.payload.deployment.payload?.web_url;
 
-            await github.rest.issues.create({
+            const issue = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `✅ Deployment fertig (${env})`,
@@ -35,4 +35,15 @@ jobs:
                 `Das Environment **${env}** wurde soeben erfolgreich mit Commit \`${sha}\` deployed.`,
                 url ? `\nURL: ${url}` : "",
               ].join("\n"),
+            });
+
+            // Die Benachrichtigung (Zuweisung) ist mit dem Anlegen bereits
+            // ausgelöst. Das Issue sofort schliessen, damit sich nicht bei
+            // jedem Deployment ein offenes Issue ansammelt.
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.data.number,
+              state: "closed",
+              state_reason: "completed",
             });

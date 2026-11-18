@@ -1,9 +1,9 @@
 # Flugbuch – Dokumentation
 
-Persönliches Paragliding-Flugbuch als statische Web-App (PWA). Kein Server,
-kein Build-Schritt: React und Babel kommen per CDN, die `.jsx`-Dateien werden
-im Browser geladen und live kompiliert. Alle Daten liegen **lokal im Browser**
-(IndexedDB). Gehostet auf GitHub Pages. Siehe auch `README.md`
+Persönliches Paragliding-Flugbuch als statische Web-App (PWA). Kein Server.
+React kommt per CDN (fest versioniert, mit SRI), die `.jsx`-Dateien werden bei
+jedem Push auf `master` einmalig zu `build/*.js` vorkompiliert (siehe unten).
+Alle Daten liegen **lokal im Browser** (IndexedDB). Gehostet auf GitHub Pages. Siehe auch `README.md`
 (Versionierung, Deployment) und die In-App-Hilfe (`hilfe.html`, Knopf **?**).
 
 ## Seiten
@@ -18,6 +18,10 @@ im Browser geladen und live kompiliert. Alle Daten liegen **lokal im Browser**
 | `service.html` + `service.jsx` | Backup/Restore, CSV-/IGC-Export, Einstellungen, Notizen |
 | `hilfe.html` | Benutzerhilfe (Abschnitte per Anker, z.B. `hilfe.html#service`) |
 | `chrome.js` | Gemeinsamer Rahmen: Version unten links, **?**-Knopf unten rechts |
+| `storage.js` | Gemeinsame Speicherschicht (`window.storage`, `window.fsapiHandle`) |
+| `loader.js` | Gemeinsamer App-Loader (lädt `build/<seite>.js`, Rückfall auf JSX + Babel) |
+| `build/*.js` | Vorkompilierte Seiten (automatisch erzeugt, nicht von Hand ändern) |
+| `scripts/build.js` | Build-Skript (esbuild) |
 | `sw.js` | Service Worker (Offline-Cache) |
 | `version.json` | Aktuelle Version (wird vom Workflow gepflegt) |
 
@@ -42,9 +46,10 @@ Neue Seite anlegen: `chrome.js`-Tag einfügen, passenden Abschnitt mit
 ## Datenhaltung
 
 Alle Seiten teilen sich dieselbe IndexedDB (`flugbuch-db`, Store `kv`, Präfix
-`flugbuch:`) über die in jedem HTML eingebettete Schicht `window.storage`
-(`get/set/delete/list`; localStorage nur als Fallback, wenn IndexedDB
-fehlschlägt). Wichtige Schlüssel:
+`flugbuch:`) über die gemeinsame Schicht `storage.js` (`window.storage` mit
+`get/set/delete/list`; localStorage nur als Fallback, wenn IndexedDB
+fehlschlägt — nach jedem erfolgreichen IndexedDB-Schreiben wird die
+localStorage-Kopie des Schlüssels entfernt). Wichtige Schlüssel:
 
 | Schlüssel | Inhalt |
 |---|---|
@@ -67,15 +72,30 @@ Access API) für Backup-Ordner und Vario-Ordner.
 `service.html` erzeugt `flugbuch-backup-<version>[-<gerät>]-<datum>.json[.gz]`
 mit `{ entries: { schlüssel: wert } }`. Restore schreibt jeden Eintrag zurück
 (gleiche ID → überschrieben, alles andere bleibt). Das ältere Format
-(`flights`, `customFieldDefs`, …) wird weiterhin gelesen. Der rote Punkt auf
+(`flights`, `customFieldDefs`, …) wird weiterhin gelesen.
+
+Sicherheitsnetz beim Restore: Die Datei wird zuerst **vollständig geprüft**
+(Schlüssel nicht leer/≤300 Zeichen/ohne Steuerzeichen, Werte nur Text) —
+bei einem Fehler wird nichts geschrieben. Vor dem Schreiben wird der bisherige
+Stand der betroffenen Schlüssel gemerkt; schlägt ein Schreibvorgang fehl
+(auch `storage.set` → `null`), wird alles **zurückgerollt**.
+
+CSV-Export: Texte, die mit `= + - @` (oder Tab/CR) beginnen, bekommen ein
+vorangestelltes `'` (Schutz vor CSV-/Formel-Injection); echte Zahlen bleiben. Der rote Punkt auf
 der Service-Karte (`settings:backupDirty`) zeigt ungesicherte Änderungen.
 
 ## Offline / Service Worker
 
+* `version.json` wird immer zuerst vom Netz geholt (Versionsanzeige aktuell),
+  offline aus dem Cache.
 * Eigene Dateien: Standard *stale-while-revalidate* (sofort aus Cache,
   Aktualisierung im Hintergrund); unter Service umschaltbar auf *network-first*.
-* CDN-Skripte (React, Babel, MapTiler, JSZip, tz-lookup): cache-first.
-* Nur erfolgreiche (`ok`) Antworten werden gecacht.
+* CDN-Skripte (React, MapTiler, JSZip, tz-lookup, mp4-muxer): cache-first,
+  beim Installieren per CORS vorab geladen (React/ReactDOM tragen
+  `integrity`+`crossorigin` und brauchen eine nicht-opake Antwort). Babel wird
+  nur im Rückfall nachgeladen und nicht vorab gecacht.
+* Nur erfolgreiche (`ok`) Antworten werden gecacht; Cache-Schlüssel ist der
+  Pfad relativ zum SW-Scope (auch `build/…`).
 * Bei **jeder** Änderung an der Dateiliste `CACHE_VERSION` in `sw.js` erhöhen.
 * Nur die Karte (MapTiler) und die Ländererkennung brauchen Internet.
 
@@ -86,11 +106,39 @@ Siehe `README.md`: Patch-Version automatisch durch
 Minor/Major manuell per Tag und `scripts/update-version.sh`.
 `deployment-notify.yml` legt nach erfolgreichem Pages-Deployment ein Issue an.
 
+## Build und Ladeablauf
+
+`scripts/build.js` (esbuild) übersetzt jede `<seite>.jsx` zu
+`build/<seite>.js` (nicht minifiziert, in einer Funktion mit `React`/`ReactDOM`
+als Parameter, setzt `window.__FLUGBUCH_APP__`). Der Workflow
+`bump-version.yml` baut bei jedem Push auf `master` und committet `build/`
+zusammen mit `version.json`.
+
+`loader.js` (je Seite mit `data-app`/`data-src`):
+1. React/ReactDOM prüfen; fehlen sie (z.B. SRI-Konflikt), aus derselben
+   fest versionierten URL **ohne** SRI nachladen.
+2. `build/<seite>.js` laden → kein Babel, kein `eval`.
+3. Schlägt das fehl (Datei fehlt): Rückfall wie früher — `<seite>.jsx` holen,
+   Babel (7.26.10) nachladen, per `new Function` starten.
+
+Lokal bauen:
+
+```sh
+npm install --no-save esbuild@0.25.0
+node scripts/build.js
+```
+
+Wer eine `.jsx` ändert und sofort testen will, sollte neu bauen; sonst läuft
+bis zum Workflow nach dem Merge noch der alte Stand aus `build/`.
+
 ## Entwickeln
 
-* Kein Build: Dateien ändern, im Browser neu laden. Syntax-Check der JSX-Dateien
-  z.B. mit `@babel/core` + `@babel/preset-react`.
-* `flugbuch.jsx` ist mit ~870 KB sehr gross (Babel meldet „deoptimised");
-  Ladezeit beim Start wird davon dominiert (siehe REVIEW.md).
-* Der Speicher-Block `window.storage` steht identisch in jedem HTML — Änderungen
-  müssen in allen Dateien nachgezogen werden (siehe REVIEW.md).
+* Syntax-Check der JSX-Dateien: `node scripts/build.js` (bricht bei Fehlern ab).
+* CDN-Versionen sind fest (React 18.3.1, Babel 7.26.10, JSZip 3.10.1,
+  tz-lookup 6.1.25, mp4-muxer 5.1.3, MapTiler SDK 3.0.0). Bei einem Update
+  HTML-Tags, `loader.js` und `CDN_ASSETS` in `sw.js` gemeinsam anpassen und
+  die SRI-Hashes der React-Tags neu berechnen
+  (`openssl dgst -sha384 -binary datei | openssl base64 -A`).
+* MapTiler-Schlüssel: im MapTiler-Konto auf die App-Domain beschränken.
+* Neue Seite: HTML mit `storage.js`, `loader.js`, `chrome.js`; Eintrag in
+  `APPS` (`scripts/build.js`) und `CORE_ASSETS` (`sw.js`); `CACHE_VERSION` erhöhen.

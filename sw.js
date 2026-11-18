@@ -8,7 +8,7 @@
 // CACHE_VERSION hochzählen, sonst wird die Änderung nicht ausgerollt, da
 // alte Service-Worker-Installationen sonst ihren alten Cache "STATIC_CACHE"
 // unverändert weiterverwenden.
-const CACHE_VERSION = "v7";
+const CACHE_VERSION = "v8";
 const CACHE_NAME = "flugbuch-cache-" + CACHE_VERSION;
 
 // Strategie für die eigenen Dateien (index.html, flugbuch.html, .jsx, ...):
@@ -83,13 +83,20 @@ self.addEventListener("message", (event) => {
 // (react@18, babel@7, maptiler-sdk-js/v3.0.0, ...), deshalb werden sie hier
 // wie CORE_ASSETS vorab gecacht und offline aus dem Cache bedient.
 const CDN_ASSETS = [
-  "https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js",
-  "https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js",
-  "https://cdn.jsdelivr.net/npm/@babel/standalone@7/babel.min.js",
+  "https://cdn.jsdelivr.net/npm/react@18.3.1/umd/react.production.min.js",
+  "https://cdn.jsdelivr.net/npm/react-dom@18.3.1/umd/react-dom.production.min.js",
   "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
   "https://cdn.jsdelivr.net/npm/tz-lookup@6.1.25/tz.js",
+  "https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/build/mp4-muxer.js",
   "https://cdn.maptiler.com/maptiler-sdk-js/v3.0.0/maptiler-sdk.umd.min.js",
   "https://cdn.maptiler.com/maptiler-sdk-js/v3.0.0/maptiler-sdk.css",
+];
+
+// Wird nur im Rückfall (kein vorkompiliertes build/*.js) von loader.js
+// geladen und deshalb NICHT vorab gecacht (3 MB), aber bei Bedarf wie die
+// anderen CDN-Dateien cache-first bedient/abgelegt.
+const CDN_LAZY_ASSETS = [
+  "https://cdn.jsdelivr.net/npm/@babel/standalone@7.26.10/babel.min.js",
 ];
 
 const CORE_ASSETS = [
@@ -113,6 +120,16 @@ const CORE_ASSETS = [
   "service.jsx",
   "hilfe.html",
   "chrome.js",
+  "storage.js",
+  "loader.js",
+  "build/flugbuch.js",
+  "build/statistik.js",
+  "build/material.js",
+  "build/schirme.js",
+  "build/sitze.js",
+  "build/geraete.js",
+  "build/div.js",
+  "build/service.js",
   "manifest.json",
   "version.json",
   "favicon.ico",
@@ -136,12 +153,14 @@ self.addEventListener("install", (event) => {
         ...CORE_ASSETS.map((url) =>
           cache.add(url).catch((err) => console.warn("SW: Konnte nicht cachen:", url, err))
         ),
-        // CDN-Skripte per no-cors laden (die CDNs senden zwar CORS-Header,
-        // aber no-cors ist robuster und liefert ein "opaque" Response, das
-        // sich als <script src>/<link> genauso verwenden lässt).
+        // CDN-Skripte per CORS laden: die <script>-Tags von React/ReactDOM
+        // tragen integrity+crossorigin und akzeptieren aus dem Cache nur eine
+        // "echte" (nicht opake) Antwort. Nur wenn CORS scheitert, Rückfall auf
+        // no-cors (opake Antwort, für normale <script src> ausreichend).
         ...CDN_ASSETS.map((url) =>
-          fetch(url, { mode: "no-cors" })
-            .then((resp) => cache.put(url, resp))
+          fetch(url, { mode: "cors" })
+            .catch(() => fetch(url, { mode: "no-cors" }))
+            .then((resp) => (resp.ok || resp.type === "opaque") ? cache.put(url, resp) : null)
             .catch((err) => console.warn("SW: Konnte CDN-Datei nicht cachen:", url, err))
         ),
       ])
@@ -178,13 +197,15 @@ self.addEventListener("fetch", (event) => {
   // unangetastet durchgereicht, damit deren eigenes Caching/Verhalten nicht
   // gestört wird.
   if (url.origin !== self.location.origin) {
-    if (!CDN_ASSETS.includes(req.url)) return;
+    if (!CDN_ASSETS.includes(req.url) && !CDN_LAZY_ASSETS.includes(req.url)) return;
     event.respondWith(
       caches.match(req.url).then((cached) => {
         if (cached) return cached;
         return fetch(req).then((networkResponse) => {
-          const clone = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(req.url, clone));
+          if (networkResponse.ok || networkResponse.type === "opaque") {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(req.url, clone));
+          }
           return networkResponse;
         });
       })
@@ -196,7 +217,29 @@ self.addEventListener("fetch", (event) => {
   // URLs wie "flugbuch.jsx?v=169..." bleibt die Basis-Datei im Cache unter
   // ihrem eigentlichen Pfad erreichbar (in beiden Strategien unten gleich
   // verwendet).
-  const cacheKey = url.pathname.split("/").pop() || "./";
+  // Pfad relativ zum SW-Scope (nicht nur der letzte Teil), damit Dateien in
+  // Unterordnern (build/flugbuch.js) denselben Schlüssel haben wie beim
+  // Vorab-Cachen in CORE_ASSETS.
+  const scopePath = new URL(self.registration.scope).pathname;
+  const cacheKey = (url.pathname.startsWith(scopePath) ? url.pathname.slice(scopePath.length) : url.pathname.split("/").pop()) || "./";
+
+  // version.json (Anzeige unten links, Backup-Dateiname) immer zuerst vom
+  // Netz holen, sonst hinkt die Anzeige bei stale-while-revalidate einen
+  // Aufruf hinterher. Offline weiterhin aus dem Cache.
+  if (cacheKey === "version.json") {
+    event.respondWith(
+      fetch(req)
+        .then((networkResponse) => {
+          if (networkResponse && networkResponse.ok) {
+            const clone = networkResponse.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(cacheKey, clone));
+          }
+          return networkResponse;
+        })
+        .catch(() => caches.match(cacheKey).then((cached) => cached || Response.error()))
+    );
+    return;
+  }
 
   const respondStaleWhileRevalidate = () =>
     caches.match(cacheKey).then((cached) => {

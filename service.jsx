@@ -81,6 +81,10 @@ function csvCell(v) {
   if (v === null || v === undefined) s = "";
   else if (typeof v === "object") s = JSON.stringify(v);
   else s = String(v);
+  // CSV-Injection: Excel/Numbers führen Texte, die mit = + - @ (oder Tab/CR)
+  // beginnen, als Formel aus. Echte Zahlen (auch negative) bleiben unverändert;
+  // alles andere bekommt ein ' vorangestellt.
+  if (typeof v === "string" && /^[=+\-@\t\r]/.test(s) && !/^[+-]?\d+([.,]\d+)?$/.test(s)) s = "'" + s;
   if (/[",\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
   return s;
 }
@@ -883,29 +887,61 @@ function ServiceApp() {
       // Format ({flights:[...], customFieldDefs:[...], service:{...},
       // reisen:{...}, notes, savedViews}) — falls noch ein Backup von vor
       // dieser Service-Seite vorliegt, lässt es sich weiterhin einlesen.
-      let count = 0;
-      if (data.entries && typeof data.entries === "object") {
-        for (const [key, value] of Object.entries(data.entries)) {
-          await window.storage.set(key, value);
-          count++;
+      // 1) Alles zuerst in eine Schreibliste [[schlüssel, wert], …] überführen
+      //    und VOLLSTÄNDIG prüfen — bei einem Fehler wird noch nichts geändert.
+      const writes = [];
+      if (data && data.entries && typeof data.entries === "object" && !Array.isArray(data.entries)) {
+        for (const [key, value] of Object.entries(data.entries)) writes.push([key, value]);
+      } else if (data && Array.isArray(data.flights)) {
+        for (const f of data.flights) {
+          if (!f || (typeof f.id !== "string" && typeof f.id !== "number")) throw new Error("Ungültiges Backup: Flug ohne ID.");
+          writes.push([`flight:${f.id}`, JSON.stringify(f)]);
         }
-      } else if (Array.isArray(data.flights)) {
-        for (const f of data.flights) { await window.storage.set(`flight:${f.id}`, JSON.stringify(f)); count++; }
-        if (Array.isArray(data.customFieldDefs) && data.customFieldDefs.length) {
-          await window.storage.set("customFieldDefs", JSON.stringify(data.customFieldDefs)); count++;
-        }
-        if (data.service && typeof data.service === "object") {
-          for (const [k, v] of Object.entries(data.service)) { await window.storage.set(k, JSON.stringify(v)); count++; }
-        }
-        if (data.reisen && typeof data.reisen === "object") {
-          for (const [k, v] of Object.entries(data.reisen)) { await window.storage.set(k, JSON.stringify(v)); count++; }
-        }
-        if (typeof data.notes === "string" && data.notes) { await window.storage.set("settings:notes", data.notes); count++; }
-        if (Array.isArray(data.savedViews) && data.savedViews.length) {
-          await window.storage.set("flugbuchSavedViews", JSON.stringify(data.savedViews)); count++;
-        }
+        if (Array.isArray(data.customFieldDefs) && data.customFieldDefs.length) writes.push(["customFieldDefs", JSON.stringify(data.customFieldDefs)]);
+        if (data.service && typeof data.service === "object") for (const [k, v] of Object.entries(data.service)) writes.push([k, JSON.stringify(v)]);
+        if (data.reisen && typeof data.reisen === "object") for (const [k, v] of Object.entries(data.reisen)) writes.push([k, JSON.stringify(v)]);
+        if (typeof data.notes === "string" && data.notes) writes.push(["settings:notes", data.notes]);
+        if (Array.isArray(data.savedViews) && data.savedViews.length) writes.push(["flugbuchSavedViews", JSON.stringify(data.savedViews)]);
       } else {
         throw new Error("Ungültiges Backup-Format.");
+      }
+      for (const [key, value] of writes) {
+        // Schlüssel: nicht leer, vernünftige Länge, keine Steuerzeichen.
+        // Werte: die Speicherschicht kennt nur Strings.
+        if (typeof key !== "string" || key.length === 0 || key.length > 300 || /[\u0000-\u001f]/.test(key)) {
+          throw new Error("Ungültiges Backup: unzulässiger Schlüssel \"" + String(key).slice(0, 40) + "\".");
+        }
+        if (typeof value !== "string") {
+          throw new Error("Ungültiges Backup: Wert zu \"" + key.slice(0, 40) + "\" ist kein Text.");
+        }
+      }
+
+      // 2) Vorherigen Stand der betroffenen Schlüssel merken, damit ein
+      //    Abbruch mitten im Schreiben (z.B. Speicher voll) alles wieder
+      //    zurückrollen kann statt einen halb ersetzten Stand zu hinterlassen.
+      const previous = await Promise.all(writes.map(async ([key]) => {
+        const r = await window.storage.get(key);
+        return [key, r ? r.value : null];
+      }));
+
+      let count = 0;
+      try {
+        for (const [key, value] of writes) {
+          // set() meldet einen Fehlschlag per null-Rückgabe, nicht per Exception.
+          const r = await window.storage.set(key, value);
+          if (!r) throw new Error("Speichern von \"" + key.slice(0, 40) + "\" fehlgeschlagen (Speicher voll?).");
+          count++;
+        }
+      } catch (e) {
+        let rollbackFailed = 0;
+        for (const [key, old] of previous) {
+          try {
+            if (old === null) await window.storage.delete(key);
+            else await window.storage.set(key, old);
+          } catch { rollbackFailed++; }
+        }
+        throw new Error((e.message || String(e)) + " — Wiederherstellung abgebrochen, vorheriger Stand wurde zurückgesetzt" +
+          (rollbackFailed ? ` (${rollbackFailed} Einträge konnten nicht zurückgesetzt werden)` : "") + ".");
       }
 
       await window.storage.set("settings:backupDirty", "0");
@@ -1048,7 +1084,7 @@ function ServiceApp() {
           <SectionHeader title="🔑 API-Zugangsdaten" sectionKey="maptiler" open={!!openInfo.maptiler} onToggle={toggleInfo} />
           {openInfo.maptiler && (
             <div style={{ fontSize: 12, color: "rgba(232,244,253,0.55)", marginBottom: 14, lineHeight: 1.5 }}>
-              MapTiler-Schlüssel für die Karten im Flugbuch (Outdoor-Kartenstil). Ohne eigenen Schlüssel läuft die App mit einem eingebauten Standard-Schlüssel weiter.
+              MapTiler-Schlüssel für die Karten im Flugbuch (Outdoor-Kartenstil). Ohne eigenen Schlüssel läuft die App mit einem eingebauten Standard-Schlüssel weiter. Tipp: Den Schlüssel im MapTiler-Konto auf die Domain dieser App beschränken (Allowed HTTP origins) — er ist im Browser sichtbar und wird bei Kartenanfragen mitgesendet.
             </div>
           )}
           <div style={{ fontSize: 11, color: "rgba(232,244,253,0.4)", marginBottom: 4 }}>MapTiler API Key</div>
