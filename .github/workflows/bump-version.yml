@@ -47,6 +47,20 @@ jobs:
           echo "Letzter Tag: $LATEST_TAG -> Neuer Tag: $NEW_TAG"
           echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
 
+      - name: Node einrichten
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Kompiliert die .jsx-Dateien zu build/*.js (siehe scripts/build.js,
+      # loader.js). Schlägt das fehl, bricht der Workflow ab und es wird
+      # keine neue Version vergeben.
+      - name: JSX vorkompilieren (build/)
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-package-lock esbuild@0.25.0
+          node scripts/build.js
+
       - name: version.json aktualisieren, committen, taggen, pushen
         run: |
           set -euo pipefail
@@ -54,9 +68,9 @@ jobs:
           printf '{\n  "version": "%s"\n}\n' "$NEW_TAG" > version.json
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.json
+          git add version.json build
           if git diff --cached --quiet; then
-            echo "version.json steht schon auf $NEW_TAG – kein Commit nötig"
+            echo "version.json und build/ unverändert – kein Commit nötig"
           else
             git commit -m "Version $NEW_TAG [skip ci]"
             git push origin HEAD:master

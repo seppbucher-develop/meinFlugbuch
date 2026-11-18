@@ -77,6 +77,13 @@
     font-size: 12px;
     color: #7dd3fc;
   }
+  section:target { border-color: #7dd3fc; box-shadow: 0 0 0 1px #7dd3fc; }
+  .toc { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+  .toc a {
+    font-size: 12px; color: #7dd3fc; text-decoration: none;
+    background: rgba(125,211,252,0.1); border: 1px solid rgba(125,211,252,0.25);
+    border-radius: 999px; padding: 4px 10px;
+  }
   .hint {
     font-size: 12px;
     color: rgba(232,244,253,0.5);
@@ -92,7 +99,17 @@
 
   <main>
 
-    <section>
+    <nav class="toc">
+      <a href="#flugbuch">📖 Flugbuch</a>
+      <a href="#statistik">📊 Statistik</a>
+      <a href="#material">🎒 Material</a>
+      <a href="#stammdaten">🪂 Schirme · Sitze · Geräte · Div</a>
+      <a href="#service">🛠️ Service</a>
+      <a href="#offline">📴 Offline</a>
+      <a href="#version">🏷️ Version</a>
+    </nav>
+
+    <section id="flugbuch">
       <h2>📖 Flugbuch</h2>
       <p>Jeder Flug ist ein eigener Eintrag mit Datum, Startplatz, Schirm, Dauer, Distanz und weiteren Feldern. Tippe auf einen Flug in der Liste, um ihn zu öffnen und zu bearbeiten.</p>
 
@@ -122,30 +139,50 @@
       <p>Über das 📍-Symbol beim Suchfeld lässt sich nach früheren Flügen in der Nähe des aktuellen Standorts filtern. Beim IGC-Import werden Startplatz, Landeplatz und Land für einen neuen Flug ausserdem automatisch von einem bereits erfassten Flug in der Nähe übernommen, sofern diese Felder noch leer sind.</p>
     </section>
 
-    <section>
+    <section id="statistik">
       <h2>📊 Statistik</h2>
       <p>Jahres-Übersicht aller Flüge (Anzahl, Dauer) mit Mehrfach-Filtern nach Flugtyp, Reise, Schirm, Landeplatz, Land und Training — analog zur „Übersicht"-Pivot-Tabelle der ursprünglichen Excel-Datei. Rein lesend, hier wird nichts bearbeitet.</p>
     </section>
 
-    <section>
+    <section id="material">
       <h2>🎒 Material</h2>
       <p>Übersicht aller erfassten Ausrüstungsgegenstände (Anschaffung, Service, Kosten). Für die vier Kategorien <b>Schirm</b>, <b>Sitz</b>, <b>Gerät</b> (z.B. Rettungsgerät) und <b>Div</b> gibt es je eine eigene Stammdaten-Liste mit eigener Seite — ein Material-Eintrag dieser Art wird automatisch mit dem passenden Stammdaten-Eintrag verknüpft (über den Namen im Feld „Typ"). Diese Stammdaten-Listen zeigen auch an, welche Flüge mit welchem Schirm geflogen wurden.</p>
     </section>
 
-    <section>
+    <section id="stammdaten">
+      <h2>🪂 Schirme · 💺 Sitze · 📡 Geräte · 🧰 Div</h2>
+      <p>Über die Material-Seite erreichbar. Jede der vier Seiten ist die <b>führende Stammdaten-Liste</b> ihrer Kategorie (ein Eintrag je Modell mit Hersteller, Bemerkung, letztem Check). Flüge und Material-Einträge verweisen per ID auf diese Listen, nie umgekehrt.</p>
+      <ul>
+        <li><b>Schirme:</b> zusätzlich mit Typ (<code>GS</code> Gleitschirm, <code>BP</code> Biplace, <code>SF</code> Speedflyer, <code>NS</code> Notschirm, <code>Div</code>). Zeigt, mit welchem Schirm wie viele Flüge/Stunden geflogen wurden.</li>
+        <li><b>Zuordnung:</b> Ein Material-Eintrag wird über sein Feld „Typ" dem gleichnamigen Stammdaten-Eintrag zugeordnet. Existiert noch keiner, wird er automatisch angelegt.</li>
+      </ul>
+    </section>
+
+    <section id="service">
       <h2>🛠️ Service</h2>
       <ul>
-        <li><b>Backup sichern / wiederherstellen:</b> Sichert alle Daten (Flugbuch, Statistik-Voreinstellungen, Material) in eine Datei. Eine wiederhergestellte Sicherung ersetzt nur Einträge mit derselben ID, alles andere bleibt unangetastet. Ein Ordner lässt sich einmalig festlegen (z.B. ein Synology-Drive-Sync-Ordner) — künftige Backups landen dann automatisch dort, ohne Dialog.</li>
-        <li><b>CSV/IGC-Export:</b> Erzeugt je eine CSV-Datei pro Bereich (Flugbuch, Material, Schirme, Sitze, Geräte, Div) sowie eine ZIP-Datei mit allen IGC-Dateien.</li>
+        <li><b>Backup sichern / wiederherstellen:</b> Sichert alle Daten (Flugbuch, Statistik-Voreinstellungen, Material) in eine Datei. Eine wiederhergestellte Sicherung ersetzt nur Einträge mit derselben ID, alles andere bleibt unangetastet. Vor dem Einspielen wird die Datei vollständig geprüft; ist sie ungültig, wird nichts verändert. Bricht das Einspielen mittendrin ab (z.B. Speicher voll), wird der vorherige Stand automatisch zurückgesetzt. Ein Ordner lässt sich einmalig festlegen (z.B. ein Synology-Drive-Sync-Ordner) — künftige Backups landen dann automatisch dort, ohne Dialog.</li>
+        <li><b>CSV/IGC-Export:</b> Erzeugt je eine CSV-Datei pro Bereich (Flugbuch, Material, Schirme, Sitze, Geräte, Div) sowie eine ZIP-Datei mit allen IGC-Dateien. Texte, die mit <code>=</code>, <code>+</code>, <code>-</code> oder <code>@</code> beginnen, erhalten in der CSV ein vorangestelltes <code>'</code>, damit Excel/Numbers sie nicht als Formel ausführen.</li>
+      </ul>
+      <ul>
+        <li><b>Einstellungen:</b> API-Zugangsdaten (MapTiler-Karten-Schlüssel — im MapTiler-Konto am besten auf die Domain der App beschränken, da er im Browser sichtbar ist), Google Kalender (Reiseanalyse), Umkreise für Start-/Landeplatz-Erkennung beim IGC-Import und für die Umkreissuche, Updates &amp; Offline-Cache sowie ein Notizen-Bereich.</li>
+        <li><b>Gerätename:</b> Optionaler Name (z.B. „Sepp-Handy"), der im Backup-Dateinamen erscheint. Er wird nur lokal im Browser gespeichert.</li>
       </ul>
       <p class="hint">Ein roter Punkt auf der Service-Karte im Hauptmenü zeigt an, dass seit dem letzten Backup Daten geändert wurden.</p>
     </section>
 
-    <section>
+    <section id="offline">
       <h2>📴 Offline-Nutzung</h2>
       <p>Die App funktioniert nach dem ersten Online-Start auch ohne Internetverbindung — ein Banner unten zeigt an, wenn gerade offline gearbeitet wird. Über „Zum Home-Bildschirm hinzufügen" (iOS) bzw. „App installieren" (Android/Desktop) lässt sich die Seite wie eine eigenständige App einrichten.</p>
       <p>Alle Flugdaten liegen ausschliesslich lokal im Browser (keine Serveranbindung nötig) — Flugliste ansehen/bearbeiten, neue Flüge erfassen (auch per IGC-Import), Statistik, Material sowie Backup/Export funktionieren daher vollständig offline.</p>
       <p class="hint">Nur die <b>Karte</b> auf der Flugdetailseite braucht eine Internetverbindung (Kartenmaterial kommt von einem externen Anbieter) — ohne Verbindung bleibt sie leer, der Rest der Seite bleibt bedienbar. Aus demselben Grund fällt offline auch die automatische Land-Erkennung beim IGC-Import aus, ohne den Import selbst zu blockieren.</p>
+    </section>
+
+    <section id="version">
+      <h2>🏷️ Version</h2>
+      <p>Die aktuelle Version (z.B. <code>v1.0.148</code>) steht auf jeder Seite <b>unten links</b>. Sie steckt auch im Dateinamen jedes Backups, sodass man später sieht, mit welchem Stand es erstellt wurde.</p>
+      <p>Die Versionsanzeige lädt <code>version.json</code> immer frisch vom Server (offline: zuletzt bekannter Stand). Die letzte Stelle zählt automatisch bei jeder Änderung hoch; grössere Sprünge (z.B. v1.1.0) werden bewusst von Hand gesetzt. Sieht man nach einem Update noch eine alte Nummer, hilft unter Service → „Updates &amp; Offline-Cache" die Option „Immer neueste Version laden (Network-First)".</p>
+      <p class="hint">Das <b>?</b> unten rechts öffnet diese Hilfe — direkt beim Abschnitt der Seite, auf der man gerade ist.</p>
     </section>
 
   </main>
@@ -174,5 +211,6 @@
   window.addEventListener("offline", updateOfflineBanner);
   updateOfflineBanner();
 </script>
+<script src="chrome.js" data-page="hilfe"></script>
 </body>
 </html>
