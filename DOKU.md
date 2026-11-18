@@ -128,8 +128,11 @@ npm install --no-save esbuild@0.25.0
 node scripts/build.js
 ```
 
-Wer eine `.jsx` ändert und sofort testen will, sollte neu bauen; sonst läuft
-bis zum Workflow nach dem Merge noch der alte Stand aus `build/`.
+Nach jeder `.jsx`-Änderung `./scripts/build-local.sh` ausführen und `build/`
+mitcommitten (sonst läuft bis zum Workflow nach dem Merge der alte Stand).
+Abgesichert durch den Claude-Hook `scripts/hook-build.sh` (baut automatisch)
+und die PR-Prüfung `.github/workflows/check-build.yml` (schlägt bei
+veraltetem `build/` fehl).
 
 ## Entwickeln
 

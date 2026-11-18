@@ -17,6 +17,13 @@ und die geänderten `build/*.js` **mit committen**. Schlägt der Build fehl
 Vor jedem Commit/PR kurz prüfen: `git status` zeigt `build/` als geändert,
 wenn eine `.jsx` geändert wurde.
 
+Abgesichert wird das doppelt:
+* **Hook** (`.claude/settings.json` → `scripts/hook-build.sh`): baut nach jedem
+  Edit/Write einer `*.jsx` (oder `scripts/build.js`) automatisch neu; bei
+  einem Build-Fehler meldet er ihn zurück (Exit 2).
+* **CI** (`.github/workflows/check-build.yml`): jeder PR schlägt fehl, wenn
+  `build/` nicht zu den `.jsx`-Dateien passt.
+
 ## Weitere Regeln
 
 * Neue/geänderte Dateien der App → `CORE_ASSETS` in `sw.js` ergänzen und
