@@ -1,4 +1,4 @@
-/* Automatisch erzeugt aus statistik.jsx (sha256 66694dbdb928) — nicht von Hand ändern, siehe scripts/build.js */
+/* Automatisch erzeugt aus statistik.jsx (sha256 612896164dd8) — nicht von Hand ändern, siehe scripts/build.js */
 (function (React, ReactDOM) {
 function stickyCol(bg) {
   return { position: "sticky", left: 0, zIndex: 1, background: bg, boxShadow: "2px 0 4px rgba(0,0,0,0.25)" };
@@ -703,45 +703,6 @@ function ReiseDrilldownModal({ row, onClose }) {
     ), expanded === t.id && /* @__PURE__ */ React.createElement("div", { style: { margin: "0 4px 8px", padding: "6px 8px", background: "rgba(255,255,255,0.04)", borderRadius: 8 } }, t.bookings.map((b) => /* @__PURE__ */ React.createElement("div", { key: b.id, style: { display: "flex", gap: 8, padding: "3px 0", fontSize: 12 } }, /* @__PURE__ */ React.createElement("div", { style: { flexShrink: 0, color: "rgba(232,244,253,0.5)" } }, formatIsoDe(b.datum)), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, b.name || "(ohne Bezeichnung)"), /* @__PURE__ */ React.createElement("div", { style: { flexShrink: 0, fontWeight: 600, color: b.betragChf < 0 ? "#f87171" : "#4ade80" } }, formatChf(b.betragChf)))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 4, paddingTop: 4, borderTop: "1px solid rgba(255,255,255,0.08)", fontSize: 12, fontWeight: 700 } }, /* @__PURE__ */ React.createElement("span", null, "Total (", t.bookings.length, " ", t.bookings.length === 1 ? "Buchung" : "Buchungen", ")"), /* @__PURE__ */ React.createElement("span", null, "CHF ", formatChf(t.bookings.reduce((a, x) => a - (x.betragChf || 0), 0)))))))
   ));
 }
-const FWA2025_FLAG_KEY = "reiseanalyse:fwa2025Korrektur";
-const FWA2025_FIXES = [
-  { id: "13235d7a-d233-4dce-891c-595dd1fe845c", note: "3823 = Rechnung 1938 + 1984", split: [
-    { inv: "1938", title: "Bologna-Rom", start: "2025-03-27", chf: 1890 },
-    { inv: "1984", title: "Rom-Napoli", start: "2025-04-03", chf: 1933 }
-  ] },
-  { id: "876c0949-1fac-43ab-92b8-239d20794bf1", note: "2928 = Malaga-Lissabon", trip: { title: "Malaga-Lissabon", start: "2025-05-21" } },
-  { id: "5f916bd0-0f13-4a0c-b8b7-5f838b2d2229", note: "2595 = Baltikum 1 (Litauen)", trip: { title: "Litauen", start: "2025-06-12" } },
-  { id: "229a4bc3-7aca-4357-8e36-fd14873dff68", note: "3450 = Rechnung 1926 + 1927", split: [
-    { inv: "1926", title: "Abruzzen 1", start: "2025-10-04", chf: 1725 },
-    { inv: "1927", title: "Abruzzen 2", start: "2025-10-11", chf: 1725 }
-  ] },
-  { id: "9fd7a429-f8c4-4ff5-8edb-40fd0fb78c31", note: "4105 = Rechnung 3568 + 3569", split: [
-    { inv: "3568", title: "Pyrenäen", start: "2025-08-30", chf: 2300 },
-    { inv: "3569", title: "Nordspanien", start: "2025-09-06", chf: 1805 }
-  ] },
-  { id: "35d4289b-6b4d-40e8-ac9d-f894e5632755", note: "3490 = Pampa (nicht angetreten, Gutschrift)", trip: NO_TRIP }
-];
-function buildFwa2025Fixes(trips, manual) {
-  const st = readBudgetState();
-  if (!st) throw new Error("Budget-Daten nicht gefunden (gleicher Browser/Origin nötig).");
-  const findTrip = ({ title, start }) => {
-    const t = trips.find((tr) => tr.title === title && tr.startDate === start);
-    if (!t) throw new Error(`Reise «${title}» (${start}) fehlt im Kalender-Cache — erst synchronisieren.`);
-    return t.id;
-  };
-  const next = { ...manual };
-  for (const f of FWA2025_FIXES) {
-    const b = (st.realTransaktionen || []).find((t) => t.id === f.id);
-    if (!b) throw new Error(`Buchung nicht im Budget gefunden (${f.note}).`);
-    const old = normAssign(manual[f.id]);
-    const entry = {};
-    if (f.split) entry.split = f.split.map((p) => ({ inv: p.inv, trip: findTrip(p), chf: p.chf }));
-    else entry.trip = f.trip === NO_TRIP ? NO_TRIP : findTrip(f.trip);
-    if (old.ok) entry.ok = true;
-    next[f.id] = entry;
-  }
-  return { next, count: FWA2025_FIXES.length };
-}
 function ReiseanalyseSection({ flights }) {
   const [clientId, setClientId] = React.useState("");
   const [calendarId, setCalendarId] = React.useState("primary");
@@ -756,14 +717,8 @@ function ReiseanalyseSection({ flights }) {
   const [budgetTick, setBudgetTick] = React.useState(0);
   const [assignOpen, setAssignOpen] = React.useState(false);
   const [listOpen, setListOpen] = React.useState(false);
-  const [fixDone, setFixDone] = React.useState(true);
   React.useEffect(() => {
     (async () => {
-      try {
-        const fl = await window.storage.get(FWA2025_FLAG_KEY);
-        setFixDone(!!fl?.value);
-      } catch {
-      }
       try {
         const [ci, cal, lbl, cache, zu] = await Promise.all([
           window.storage.get("settings:googleClientId"),
@@ -852,20 +807,6 @@ function ReiseanalyseSection({ flights }) {
     }
     setBudgetTick((t) => t + 1);
   };
-  const applyFwa2025Fix = async () => {
-    setError(null);
-    try {
-      const { next, count } = buildFwa2025Fixes(trips, manual);
-      if (!window.confirm(`Einmalkorrektur FWA 2025: ${count} Buchungen werden neu zugeordnet (Sammelrechnungen aufgeteilt). Fortfahren?`)) return;
-      await window.storage.set("reiseanalyse:kostenZuordnung", JSON.stringify(next));
-      await window.storage.set(FWA2025_FLAG_KEY, (/* @__PURE__ */ new Date()).toISOString());
-      setManual(next);
-      setFixDone(true);
-      setBudgetTick((t) => t + 1);
-    } catch (e) {
-      setError("Einmalkorrektur nicht angewendet: " + (e.message || e));
-    }
-  };
   const assign = (b, datum, tripId) => saveAssign(b, { datum, tripId: tripId || void 0 });
   const openRow = pivot.rows.find((r) => r.year === openYear) || null;
   if (!settingsLoaded) {
@@ -879,7 +820,7 @@ function ReiseanalyseSection({ flights }) {
       style: { background: "rgba(125,211,252,0.15)", border: "1px solid rgba(125,211,252,0.3)", borderRadius: 10, padding: "9px 14px", color: "#7dd3fc", fontSize: 12, fontWeight: 700, cursor: busy ? "default" : "pointer" }
     },
     busy ? "⏳ Synchronisiere…" : fetchedAt ? "🔄 Aktualisieren" : "🔗 Mit Google Kalender verbinden"
-  )), error && /* @__PURE__ */ React.createElement("div", { style: { background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#f87171", marginBottom: 12 } }, error), !fixDone && costs.available && trips.length > 0 && /* @__PURE__ */ React.createElement("div", { onClick: applyFwa2025Fix, style: { cursor: "pointer", background: "rgba(167,139,250,0.1)", border: "1px solid rgba(167,139,250,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#c4b5fd", marginBottom: 12 } }, "🛠 Einmalkorrektur: FWA-Rechnungen 2025 neu zuordnen (Sammelrechnungen aufteilen) — tippen zum Anwenden ›"), costs.available && costs.open.length > 0 && /* @__PURE__ */ React.createElement("div", { onClick: () => setAssignOpen(true), style: { cursor: "pointer", background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#fbbf24", marginBottom: 12 } }, "✈ ", costs.open.length, " Flugreise-", costs.open.length === 1 ? "Buchung ist" : "Buchungen sind", " keiner Reise eindeutig zugeordnet — tippen zum Zuordnen ›"), costs.available && costs.all.length > 0 && /* @__PURE__ */ React.createElement("div", { onClick: () => setListOpen(true), style: { cursor: "pointer", background: "rgba(125,211,252,0.08)", border: "1px solid rgba(125,211,252,0.25)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#7dd3fc", marginBottom: 12 } }, "📋 Zuordnungsliste (", costs.all.filter((r) => r.ok).length, "/", costs.all.length, " geprüft) ›"), /* @__PURE__ */ React.createElement(ReiseanalysePivotTable, { pivot, onOpenYear: setOpenYear }), assignOpen && /* @__PURE__ */ React.createElement(CostAssignModal, { open: costs.open, trips, onSave: assign, onClose: () => setAssignOpen(false) }), listOpen && /* @__PURE__ */ React.createElement(AssignListModal, { all: costs.all, trips, onSave: saveAssign, onClose: () => setListOpen(false) }), openRow && /* @__PURE__ */ React.createElement(ReiseDrilldownModal, { row: openRow, onClose: () => setOpenYear(null) }));
+  )), error && /* @__PURE__ */ React.createElement("div", { style: { background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#f87171", marginBottom: 12 } }, error), costs.available && costs.open.length > 0 && /* @__PURE__ */ React.createElement("div", { onClick: () => setAssignOpen(true), style: { cursor: "pointer", background: "rgba(245,158,11,0.1)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#fbbf24", marginBottom: 12 } }, "✈ ", costs.open.length, " Flugreise-", costs.open.length === 1 ? "Buchung ist" : "Buchungen sind", " keiner Reise eindeutig zugeordnet — tippen zum Zuordnen ›"), costs.available && costs.all.length > 0 && /* @__PURE__ */ React.createElement("div", { onClick: () => setListOpen(true), style: { cursor: "pointer", background: "rgba(125,211,252,0.08)", border: "1px solid rgba(125,211,252,0.25)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "#7dd3fc", marginBottom: 12 } }, "📋 Zuordnungsliste (", costs.all.filter((r) => r.ok).length, "/", costs.all.length, " geprüft) ›"), /* @__PURE__ */ React.createElement(ReiseanalysePivotTable, { pivot, onOpenYear: setOpenYear }), assignOpen && /* @__PURE__ */ React.createElement(CostAssignModal, { open: costs.open, trips, onSave: assign, onClose: () => setAssignOpen(false) }), listOpen && /* @__PURE__ */ React.createElement(AssignListModal, { all: costs.all, trips, onSave: saveAssign, onClose: () => setListOpen(false) }), openRow && /* @__PURE__ */ React.createElement(ReiseDrilldownModal, { row: openRow, onClose: () => setOpenYear(null) }));
 }
 function StatistikApp() {
   const [flights, setFlights] = React.useState(null);
