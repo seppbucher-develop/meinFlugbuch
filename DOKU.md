@@ -58,6 +58,7 @@ localStorage-Kopie des Schlüssels entfernt). Wichtige Schlüssel:
 | `schirme:list`, `sitze:list`, `geraete:list`, `div:list` | Stammdaten-Listen (führend) |
 | `customFieldDefs`, `flugbuchSavedViews`, `flugbuchListSettings` | Felddefinitionen, Ansichten, Listen-Einstellungen |
 | `settings:*` | Einstellungen (Karten-Schlüssel, Umkreise, Google-IDs, `backupDirty`, `lastBackupAt`, …) |
+| `reiseanalyse:tripsCache`, `reiseanalyse:kostenZuordnung`, `reiseanalyse:fwa2025Korrektur` | Reiseanalyse: Kalender-Reisen, manuelle Kostenzuordnung, Flag der Einmalkorrektur FWA 2025 (Statistik → Reiseanalyse; Hinweis verschwindet nach Anwendung) |
 
 Stammdaten-Verknüpfung: Flüge und Material-Einträge zeigen per ID
 (`schirmId`, `sitzId`, `geraetId`, `divId`) auf die Listen, nie umgekehrt.
