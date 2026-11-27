@@ -8330,7 +8330,12 @@ function matchFlights(flights, q){
   let s=q.trim()
     .replace(/\s+(UND|AND)\s+/gi," && ")
     .replace(/\s+(ODER|OR)\s+/gi," || ")
-    .replace(/&&/g," && ").replace(/\|\|/g," || ");
+    .replace(/&&/g," && ").replace(/\|\|/g," || ")
+    // Leerzeichen um den Operator tolerieren ("startplatz = Teba" /
+    // "startplatz =Teba" wie "startplatz=Teba"), sonst zerfällt der Term in
+    // das Wort "startplatz" und "=Teba" und findet nichts.
+    .replace(/([\wäöü]+)\s*(>=|<=|!=|≠|>|<|=|:)\s+(?=\S)/gi,"$1$2")
+    .replace(/([\wäöü]+)\s+(>=|<=|!=|≠|>|<|=|:)(?=\S)/gi,"$1$2");
   // Split into OR groups, each OR group split into AND terms
   const orGroups=s.split(/\s*\|\|\s*/);
   return flights.filter(f=>{
