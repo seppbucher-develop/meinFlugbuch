@@ -1,4 +1,4 @@
-/* Automatisch erzeugt aus flugbuch.jsx (sha256 b10598840f3d) — nicht von Hand ändern, siehe scripts/build.js */
+/* Automatisch erzeugt aus flugbuch.jsx (sha256 b9b50a9f7645) — nicht von Hand ändern, siehe scripts/build.js */
 (function (React, ReactDOM) {
 const { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } = React;
 let profileZoomActive = false;
@@ -8249,7 +8249,7 @@ function FlightRow({ f, isLongest, onClick, selectMode, isSelected, onToggleSele
 }
 function matchFlights(flights, q) {
   if (!q || !q.trim()) return flights;
-  let s = q.trim().replace(/\s+(UND|AND)\s+/gi, " && ").replace(/\s+(ODER|OR)\s+/gi, " || ").replace(/&&/g, " && ").replace(/\|\|/g, " || ");
+  let s = q.trim().replace(/\s+(UND|AND)\s+/gi, " && ").replace(/\s+(ODER|OR)\s+/gi, " || ").replace(/&&/g, " && ").replace(/\|\|/g, " || ").replace(/([\wäöü]+)\s*(>=|<=|!=|≠|>|<|=|:)\s+(?=\S)/gi, "$1$2").replace(/([\wäöü]+)\s+(>=|<=|!=|≠|>|<|=|:)(?=\S)/gi, "$1$2");
   const orGroups = s.split(/\s*\|\|\s*/);
   return flights.filter((f) => {
     return orGroups.some((group) => {
